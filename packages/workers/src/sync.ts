@@ -37,7 +37,7 @@ export function createSyncHandler(env: SyncEnvironment, repository: SyncReposito
     if (!event || event.eventKey !== message.eventKey || event.userId !== message.userId) return response(489, { "Upstash-NonRetryable-Error": "true" });
     const owner = leaseId(); const now = clock();
     const claimed = await repository.claimForSync(message.jobId, owner, now, new Date(now.getTime() + 5 * 60_000));
-    if (!claimed) return (await repository.getSyncState(message.jobId)) === "synced" ? response(204) : response(503); // only a durably synced duplicate may be acknowledged
+    if (!claimed) { const state = await repository.getSyncState(message.jobId); return state === "synced" ? response(204) : state === "needs_attention" ? response(489, { "Upstash-NonRetryable-Error": "true" }) : response(503); } // only durable terminal states may be acknowledged
     const outcome: SyncOutcome = await adapter.sync(event);
     if (outcome.kind === "success") return (await repository.markSynced(message.jobId, owner, clock())) ? response(204) : response(503);
     if (outcome.kind === "retryable") { const released = await repository.releaseSync(message.jobId, owner, outcome.code, clock()); const headers = outcome.retryAfterMs ? { "Retry-After": String(Math.ceil(outcome.retryAfterMs / 1000)) } : undefined; return released ? response(503, headers) : response(503); }

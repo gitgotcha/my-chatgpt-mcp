@@ -27,6 +27,7 @@ describe("DriveDestinationAdapter", () => {
   it("ignores corrupt/partial snapshots and selects the newest coherent complete snapshot", async () => {
     const drive = new MemoryDrive(); const immutable = { schemaVersion: "1", kind: "event", userId: "u1", eventKey: event.eventKey, event }; await drive.create("events", "event", immutable);
     drive.files.push({ id: "partial", name: "partial", parentId: "snapshots", json: { schemaVersion: "1", kind: "snapshot", userId: "u1", sourceEventKeys: [event.eventKey], generatedAt: "2026-01-03", events: [] } });
+    drive.files.push({ id: "altered", name: "altered", parentId: "snapshots", json: { schemaVersion: "1", kind: "snapshot", userId: "u1", sourceEventKeys: [event.eventKey], generatedAt: "2026-01-05", events: [{ ...event, payload: { title: "altered" } }] } });
     drive.files.push({ id: "old", name: "old", parentId: "snapshots", json: { schemaVersion: "1", kind: "snapshot", userId: "u1", sourceEventKeys: [event.eventKey], generatedAt: "2026-01-02", events: [event] } });
     drive.files.push({ id: "new", name: "new", parentId: "snapshots", json: { schemaVersion: "1", kind: "snapshot", userId: "u1", sourceEventKeys: [event.eventKey], generatedAt: "2026-01-04", events: [event] } });
     const result = await new DriveDestinationAdapter(drive, "events", "snapshots").sync(event);
