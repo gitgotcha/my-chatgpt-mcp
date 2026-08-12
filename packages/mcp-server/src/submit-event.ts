@@ -8,6 +8,14 @@ export interface IngressTransport {
   send(event: SyncEvent): Promise<IngressResponse>;
 }
 
+export type DeliveryAttempt<T> =
+  | { completed: true; value: T }
+  | { completed: false };
+
+export interface DeliveryDeadline {
+  run<T>(operation: () => Promise<T>): Promise<DeliveryAttempt<T>>;
+}
+
 export type LocalSubmitResult = {
   accepted: boolean;
   eventKey: string;
@@ -20,7 +28,8 @@ export class SubmitEventService {
     private readonly outbox: LocalOutbox,
     private readonly transport: IngressTransport,
     private readonly noticeClient: NoticeClient = new DisabledNoticeClient(),
-    private readonly maxFlushEvents = 20
+    private readonly maxFlushEvents = 20,
+    private readonly deadline: DeliveryDeadline = timeoutAfter(1_000)
   ) {}
 
   async submit(input: unknown): Promise<LocalSubmitResult> {
@@ -47,13 +56,18 @@ export class SubmitEventService {
 
   private async deliverByKey(eventKey: string): Promise<boolean> {
     const record = this.outbox.listPending().find((item) => item.eventKey === eventKey);
-    return record ? this.deliver(record) : true;
+    return record ? this.deliver(record) : false;
   }
 
   private async deliver(record: OutboxRecord): Promise<boolean> {
     this.outbox.markSending(record.eventKey);
     try {
-      const response = await this.transport.send(record.event);
+      const attempt = await this.deadline.run(() => this.transport.send(record.event));
+      if (!attempt.completed) {
+        this.outbox.markPending(record.eventKey, "ingress_timeout");
+        return false;
+      }
+      const response = attempt.value;
       const jobId = readAcceptedJobId(response);
       if (jobId) return this.outbox.acknowledge(record.eventKey, jobId);
       this.outbox.markPending(record.eventKey, `ingress_${response.status}`);
@@ -62,6 +76,24 @@ export class SubmitEventService {
     }
     return false;
   }
+}
+
+function timeoutAfter(timeoutMs: number): DeliveryDeadline {
+  return {
+    async run<T>(operation: () => Promise<T>): Promise<DeliveryAttempt<T>> {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          operation().then((value) => ({ completed: true as const, value })),
+          new Promise<DeliveryAttempt<T>>((resolve) => {
+            timeout = setTimeout(() => resolve({ completed: false }), timeoutMs);
+          })
+        ]);
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
+    }
+  };
 }
 
 function readAcceptedJobId(response: IngressResponse): string | null {
