@@ -166,3 +166,9 @@ The first `pnpm install` skipped `better-sqlite3`'s native build and tests could
 - Red evidence: after cleaning only `packages/protocol/dist` and `packages/mcp-server/dist`, `pnpm build` failed because no build script existed.
 - Green: added real TypeScript build configs and ordered root build (`Protocol` then `MCP`). Protocol emits runtime JS and declarations with runtime/type exports targeting `dist`; MCP emits its runnable `dist/index.js`.
 - Verification: `pnpm build` emitted both entrypoints; `node packages/mcp-server/dist/index.js flush-pending` exited cleanly without any configured ingress or Drive-success claim. Generated dist remains ignored. Worker bundling/deployment is unchanged and remains Wrangler-owned.
+
+## Build review clean-test and Hook verification
+
+- Tests now use an explicit Vitest-only alias to Protocol source files. This keeps `pnpm test` independent of ignored `dist` output, while Node production runtime continues resolving Protocol through built package exports.
+- Added `pnpm verify:build`, which reads the configured SessionStart Hook and fails unless its MCP target plus Protocol runtime/type outputs exist after the real build.
+- Verification sequence passed: delete only Protocol/MCP generated dist, `pnpm test` (63 tests), `pnpm build`, `pnpm verify:build`, bounded no-config `flush-pending`, `pnpm typecheck`, and `git diff --check`.

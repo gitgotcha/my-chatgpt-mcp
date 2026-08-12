@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "pnpm --filter @reliable-drive-sync/protocol build && pnpm --filter @reliable-drive-sync/mcp-server build",
+    "verify:build": "node scripts/verify-build.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
