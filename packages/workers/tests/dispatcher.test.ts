@@ -160,6 +160,22 @@ describe("durable QStash dispatcher", () => {
 });
 
 describe("QStash HTTP boundary", () => {
+  test("uses the configured regional QStash API host", async () => {
+    let request: Request | undefined;
+    const publisher = createQStashPublisher("secret-token", async (input, init) => {
+      request = new Request(input, init);
+      return new Response(JSON.stringify({ messageId: "msg-http" }), { status: 200 });
+    }, "https://qstash-us-east-1.upstash.io");
+
+    await publisher.publish({
+      targetUrl: "https://sync.example/v1/sync",
+      failureCallbackUrl: "https://ingress.example/v1/qstash/failure",
+      job: { jobId: "job-1", eventKey: "qiaobingyuan:algorithm:evt-1", userId: "qiaobingyuan" }
+    });
+
+    expect(request?.url).toBe("https://qstash-us-east-1.upstash.io/v2/publish/https://sync.example/v1/sync");
+  });
+
   test("sends only safe job identifiers and never the token in the body", async () => {
     let request: Request | undefined;
     const publisher = createQStashPublisher("secret-token", async (input, init) => {

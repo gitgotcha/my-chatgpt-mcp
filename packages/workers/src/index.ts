@@ -22,7 +22,7 @@ type WorkerShape = {
 export function createWorker(
   env: WorkerConfig,
   repository?: JobRepository & DispatchRepository & SyncRepository & FailureRepository,
-  publisher: QStashPublisher = createQStashPublisher(env.QSTASH_TOKEN ?? ""),
+  publisher: QStashPublisher = createQStashPublisher(env.QSTASH_TOKEN ?? "", fetch, env.QSTASH_URL),
   cronBatchSize = 100,
   adapter?: DestinationAdapter
 ): WorkerShape {

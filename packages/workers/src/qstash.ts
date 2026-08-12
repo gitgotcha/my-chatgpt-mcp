@@ -19,12 +19,18 @@ export class QStashPublishError extends Error {
 }
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+const defaultQStashUrl = "https://qstash.upstash.io";
 
 /** The token stays within this boundary and is never added to JSON or errors. */
-export function createQStashPublisher(token: string, fetchLike: FetchLike = fetch): QStashPublisher {
+export function createQStashPublisher(
+  token: string,
+  fetchLike: FetchLike = fetch,
+  qstashUrl = defaultQStashUrl
+): QStashPublisher {
+  const baseUrl = qstashUrl.replace(/\/+$/, "");
   return {
     async publish(request: QStashPublishRequest): Promise<unknown> {
-      const response = await fetchLike(`https://qstash.upstash.io/v2/publish/${request.targetUrl}`, {
+      const response = await fetchLike(`${baseUrl}/v2/publish/${request.targetUrl}`, {
         method: "POST",
         headers: {
           authorization: `Bearer ${token}`,
