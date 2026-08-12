@@ -38,6 +38,15 @@ export interface DispatchRepository {
   listDispatchPending(limit: number): Promise<DispatchJob[]>;
 }
 
+/** The sync worker owns a short lease; every transition is guarded by job id and lease. */
+export interface SyncRepository {
+  claimForSync(jobId: string, leaseOwner: string, now: Date, leaseUntil: Date): Promise<SyncJob | null>;
+  loadEvent(jobId: string): Promise<SyncEvent | null>;
+  markSynced(jobId: string, leaseOwner: string, now: Date): Promise<boolean>;
+  releaseSync(jobId: string, leaseOwner: string, errorCode: string, now: Date): Promise<boolean>;
+  markNeedsAttention(jobId: string, leaseOwner: string, errorCode: string, now: Date): Promise<boolean>;
+}
+
 type D1Statement = {
   bind(...values: unknown[]): D1Statement;
   run(): Promise<{ meta?: { changes?: number } }>;
@@ -70,7 +79,7 @@ function mapDispatchJob(row: DispatchJobRow): DispatchJob {
 }
 
 /** D1 implementation. The unique event_key constraint is the idempotency fence. */
-export class D1JobRepository implements JobRepository, DispatchRepository {
+export class D1JobRepository implements JobRepository, DispatchRepository, SyncRepository {
   constructor(private readonly database: D1Database) {}
 
   async createOrGet(event: SyncEvent): Promise<SyncJob> {
@@ -157,6 +166,38 @@ export class D1JobRepository implements JobRepository, DispatchRepository {
     return result.results.map(mapDispatchJob);
   }
 
+  async claimForSync(jobId: string, leaseOwner: string, now: Date, leaseUntil: Date): Promise<SyncJob | null> {
+    await this.database.prepare(`UPDATE sync_jobs SET state = 'syncing', lease_owner = ?, lease_until = ?, updated_at = ? WHERE job_id = ? AND state IN ('broker_queued', 'dispatch_pending')`)
+      .bind(leaseOwner, leaseUntil.toISOString(), now.toISOString(), jobId).run();
+    const row = await this.database.prepare(`SELECT job_id, event_key, user_id, state FROM sync_jobs WHERE job_id = ? AND state = 'syncing' AND lease_owner = ?`)
+      .bind(jobId, leaseOwner).first<JobRow>();
+    return row ? mapJob(row) : null;
+  }
+
+  async loadEvent(jobId: string): Promise<SyncEvent | null> {
+    const row = await this.database.prepare(`SELECT schema_version, event_id, event_key, event_type, user_id, source_skill, destination, created_at_source, payload_json FROM sync_jobs WHERE job_id = ?`)
+      .bind(jobId).first<Record<string, unknown>>();
+    if (!row) return null;
+    try { return { schemaVersion: String(row.schema_version ?? "1"), eventId: String(row.event_id), eventKey: String(row.event_key), type: String(row.event_type), userId: String(row.user_id), sourceSkill: String(row.source_skill), destination: "drive", createdAt: String(row.created_at_source), payload: JSON.parse(String(row.payload_json)) as Record<string, unknown> }; }
+    catch { return null; }
+  }
+
+  async markSynced(jobId: string, leaseOwner: string, now: Date): Promise<boolean> {
+    const result = await this.database.prepare(`UPDATE sync_jobs SET state = 'synced', lease_owner = NULL, lease_until = NULL, completed_at = ?, updated_at = ?, last_error_code = NULL WHERE job_id = ? AND state = 'syncing' AND lease_owner = ?`)
+      .bind(now.toISOString(), now.toISOString(), jobId, leaseOwner).run();
+    return result.meta?.changes === 1;
+  }
+  async releaseSync(jobId: string, leaseOwner: string, errorCode: string, now: Date): Promise<boolean> {
+    const result = await this.database.prepare(`UPDATE sync_jobs SET state = 'broker_queued', lease_owner = NULL, lease_until = NULL, last_error_code = ?, updated_at = ? WHERE job_id = ? AND state = 'syncing' AND lease_owner = ?`)
+      .bind(errorCode, now.toISOString(), jobId, leaseOwner).run();
+    return result.meta?.changes === 1;
+  }
+  async markNeedsAttention(jobId: string, leaseOwner: string, errorCode: string, now: Date): Promise<boolean> {
+    const result = await this.database.prepare(`UPDATE sync_jobs SET state = 'needs_attention', lease_owner = NULL, lease_until = NULL, last_error_code = ?, updated_at = ? WHERE job_id = ? AND state = 'syncing' AND lease_owner = ?`)
+      .bind(errorCode, now.toISOString(), jobId, leaseOwner).run();
+    return result.meta?.changes === 1;
+  }
+
   private async findByEventKey(eventKey: string): Promise<SyncJob | null> {
     const row = await this.database.prepare(`
       SELECT job_id, event_key, user_id, state FROM sync_jobs WHERE event_key = ?
@@ -166,10 +207,11 @@ export class D1JobRepository implements JobRepository, DispatchRepository {
 }
 
 /** Test-only in-memory adapter; production code uses D1JobRepository. */
-export class InMemoryJobRepository implements JobRepository, DispatchRepository {
+export class InMemoryJobRepository implements JobRepository, DispatchRepository, SyncRepository {
   private readonly jobs = new Map<string, SyncJob>();
   private readonly notices: OpenNotice[] = [];
   private readonly dispatchJobs = new Map<string, DispatchJob>();
+  private readonly events = new Map<string, SyncEvent>();
 
   constructor(private readonly createJobId: () => string = () => crypto.randomUUID()) {}
 
@@ -182,6 +224,8 @@ export class InMemoryJobRepository implements JobRepository, DispatchRepository 
     if (existing) return { ...existing, isNew: false };
     const job: SyncJob = { jobId: this.createJobId(), eventKey: event.eventKey, userId: event.userId, state: "dispatch_pending", isNew: true };
     this.jobs.set(event.eventKey, job);
+    this.events.set(job.jobId, event);
+    this.dispatchJobs.set(job.jobId, { ...job, dispatchAttempts: 0, lastErrorCode: null, brokerMessageId: null, leaseOwner: null, leaseUntil: null });
     return job;
   }
 
@@ -243,4 +287,15 @@ export class InMemoryJobRepository implements JobRepository, DispatchRepository 
   async listDispatchPending(limit: number): Promise<DispatchJob[]> {
     return [...this.dispatchJobs.values()].filter((job) => job.state === "dispatch_pending").slice(0, limit).map((job) => ({ ...job }));
   }
+
+  async claimForSync(jobId: string, leaseOwner: string, _now: Date, leaseUntil: Date): Promise<SyncJob | null> {
+    const job = this.dispatchJobs.get(jobId);
+    if (!job || !["broker_queued", "dispatch_pending"].includes(job.state)) return null;
+    job.state = "syncing"; job.leaseOwner = leaseOwner; job.leaseUntil = leaseUntil.toISOString();
+    return { jobId: job.jobId, eventKey: job.eventKey, userId: job.userId, state: job.state };
+  }
+  async loadEvent(jobId: string): Promise<SyncEvent | null> { return this.events.get(jobId) ?? null; }
+  async markSynced(jobId: string, leaseOwner: string): Promise<boolean> { const job = this.dispatchJobs.get(jobId); if (!job || job.state !== "syncing" || job.leaseOwner !== leaseOwner) return false; job.state = "synced"; job.leaseOwner = null; job.leaseUntil = null; return true; }
+  async releaseSync(jobId: string, leaseOwner: string, errorCode: string): Promise<boolean> { const job = this.dispatchJobs.get(jobId); if (!job || job.state !== "syncing" || job.leaseOwner !== leaseOwner) return false; job.state = "broker_queued"; job.leaseOwner = null; job.leaseUntil = null; job.lastErrorCode = errorCode; return true; }
+  async markNeedsAttention(jobId: string, leaseOwner: string, errorCode: string): Promise<boolean> { const job = this.dispatchJobs.get(jobId); if (!job || job.state !== "syncing" || job.leaseOwner !== leaseOwner) return false; job.state = "needs_attention"; job.leaseOwner = null; job.leaseUntil = null; job.lastErrorCode = errorCode; return true; }
 }
