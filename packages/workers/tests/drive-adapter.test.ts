@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DriveDestinationAdapter, type DriveCapability, type DriveFile } from "../src/drive-adapter.js";
+import { DriveDestinationAdapter, GoogleDriveCapability, type DriveCapability, type DriveFile } from "../src/drive-adapter.js";
 import type { SyncEvent } from "@reliable-drive-sync/protocol/event";
 
 const event: SyncEvent = { schemaVersion: "1", eventId: "e1", eventKey: "u1:lesson:1", type: "lesson", userId: "u1", sourceSkill: "algorithm", destination: "drive", createdAt: "2026-01-01T00:00:00.000Z", payload: { title: "two sum" } };
@@ -10,6 +10,8 @@ class MemoryDrive implements DriveCapability {
   async read(id: string) { const file = this.files.find((file) => file.id === id) ?? null; return this.failSnapshotRead && file?.parentId === "snapshots" ? null : file; }
 }
 describe("DriveDestinationAdapter", () => {
+  it("uses Drive JSON media endpoints and multipart JSON bytes without putting payload in metadata", async () => { const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = []; const fetchMock = async (input: RequestInfo | URL, init?: RequestInit) => { calls.push([input, init]); return new Response(JSON.stringify({ id: "f1", name: "a.json", parents: ["p"] }), { status: 200 }); }; const drive = new GoogleDriveCapability({ GOOGLE_DRIVE_ACCESS_TOKEN: "fast" }, fetchMock as typeof fetch); await drive.create("p", "a.json", { safe: true }); expect(String(calls[0][0])).toContain("/upload/drive/v3/files?uploadType=multipart"); expect(String(calls[0][1]?.body)).toContain('"safe":true'); expect(String(calls[0][1]?.body)).not.toContain("description"); });
+  it("treats missing OAuth configuration as retryable, leaving later configuration recoverable", async () => { const drive = new GoogleDriveCapability({}); const result = await new DriveDestinationAdapter(drive, "events", "snapshots").sync(event); expect(result).toMatchObject({ kind: "retryable", code: "drive_unavailable" }); });
   it("creates a verified immutable event and snapshot, then is duplicate safe", async () => {
     const drive = new MemoryDrive(); const adapter = new DriveDestinationAdapter(drive, "events", "snapshots", () => new Date("2026-01-02T00:00:00.000Z"));
     expect((await adapter.sync(event)).kind).toBe("success"); expect(drive.files.filter((f) => f.parentId === "events")).toHaveLength(1);

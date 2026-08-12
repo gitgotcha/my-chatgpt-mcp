@@ -5,7 +5,7 @@ import { Dispatcher, type DispatcherEnvironment } from "./dispatcher.js";
 import { createIngressHandler, type WaitUntilContext, type WorkerEnvironment } from "./ingress.js";
 import { createQStashPublisher, type QStashPublisher } from "./qstash.js";
 
-export type WorkerConfig = WorkerEnvironment & DispatcherEnvironment & SyncEnvironment & { GOOGLE_DRIVE_ACCESS_TOKEN?: string; DRIVE_EVENTS_PARENT_ID?: string; DRIVE_SNAPSHOTS_PARENT_ID?: string };
+export type WorkerConfig = WorkerEnvironment & DispatcherEnvironment & SyncEnvironment & { GOOGLE_DRIVE_ACCESS_TOKEN?: string; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string; GOOGLE_REFRESH_TOKEN?: string; DRIVE_EVENTS_PARENT_ID?: string; DRIVE_SNAPSHOTS_PARENT_ID?: string };
 
 export interface Environment extends WorkerConfig {
   DB: D1Database;

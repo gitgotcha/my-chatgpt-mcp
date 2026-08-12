@@ -16,16 +16,27 @@ export interface DriveCapability {
 
 /** Production-shaped REST boundary; it remains inert until OAuth and folder bindings are configured. */
 export class GoogleDriveCapability implements DriveCapability {
-  constructor(private readonly accessToken: string | undefined, private readonly fetchLike: typeof fetch = fetch) {}
-  private async request(path: string, init?: RequestInit): Promise<Response> {
-    if (!this.accessToken) throw { status: 401 };
-    const response = await this.fetchLike(`https://www.googleapis.com/drive/v3/${path}`, { ...init, headers: { authorization: `Bearer ${this.accessToken}`, ...(init?.headers ?? {}) } });
+  private cached?: { token: string; expiresAt: number };
+  constructor(private readonly env: { GOOGLE_DRIVE_ACCESS_TOKEN?: string; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string; GOOGLE_REFRESH_TOKEN?: string }, private readonly fetchLike: typeof fetch = fetch, private readonly now: () => number = () => Date.now()) {}
+  private async token(): Promise<string> {
+    if (this.env.GOOGLE_DRIVE_ACCESS_TOKEN) return this.env.GOOGLE_DRIVE_ACCESS_TOKEN;
+    if (this.cached && this.cached.expiresAt > this.now() + 60_000) return this.cached.token;
+    if (!this.env.GOOGLE_CLIENT_ID || !this.env.GOOGLE_CLIENT_SECRET || !this.env.GOOGLE_REFRESH_TOKEN) throw { status: 503, configuration: true };
+    const body = new URLSearchParams({ client_id: this.env.GOOGLE_CLIENT_ID, client_secret: this.env.GOOGLE_CLIENT_SECRET, refresh_token: this.env.GOOGLE_REFRESH_TOKEN, grant_type: "refresh_token" });
+    const response = await this.fetchLike("https://oauth2.googleapis.com/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
+    if (!response.ok) throw { status: response.status === 429 ? 429 : 401 };
+    const value = await response.json() as { access_token?: unknown; expires_in?: unknown }; if (typeof value.access_token !== "string") throw { status: 503 };
+    this.cached = { token: value.access_token, expiresAt: this.now() + (typeof value.expires_in === "number" ? value.expires_in : 300) * 1000 };
+    return this.cached.token;
+  }
+  private async request(path: string, init?: RequestInit, upload = false): Promise<Response> {
+    const response = await this.fetchLike(`${upload ? "https://www.googleapis.com/upload/drive/v3/" : "https://www.googleapis.com/drive/v3/"}${path}`, { ...init, headers: { authorization: `Bearer ${await this.token()}`, ...(init?.headers ?? {}) } });
     if (!response.ok) { const retryAfter = Number(response.headers.get("retry-after")); throw { status: response.status, retryAfterMs: Number.isFinite(retryAfter) ? retryAfter * 1000 : undefined }; }
     return response;
   }
-  async list(parentId: string): Promise<DriveFile[]> { const response = await this.request(`files?q=${encodeURIComponent(`'${parentId}' in parents and trashed = false`)}&fields=files(id,name,parents,description)`); const body = await response.json() as { files?: Array<{ id: string; name: string; parents?: string[]; description?: string }> }; return (body.files ?? []).map((file) => ({ id: file.id, name: file.name, parentId: file.parents?.[0] ?? "", json: file.description ? JSON.parse(file.description) : null })); }
-  async create(parentId: string, name: string, json: unknown): Promise<DriveFile> { const response = await this.request("files?fields=id,name,parents,description", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, parents: [parentId], mimeType: "application/json", description: JSON.stringify(json) }) }); const file = await response.json() as { id: string; name: string; parents?: string[]; description?: string }; return { id: file.id, name: file.name, parentId: file.parents?.[0] ?? parentId, json: file.description ? JSON.parse(file.description) : json }; }
-  async read(fileId: string): Promise<DriveFile | null> { try { const response = await this.request(`files/${encodeURIComponent(fileId)}?fields=id,name,parents,description`); const file = await response.json() as { id: string; name: string; parents?: string[]; description?: string }; return { id: file.id, name: file.name, parentId: file.parents?.[0] ?? "", json: file.description ? JSON.parse(file.description) : null }; } catch (error) { if (isRecord(error) && error.status === 404) return null; throw error; } }
+  async list(parentId: string): Promise<DriveFile[]> { const response = await this.request(`files?q=${encodeURIComponent(`'${parentId}' in parents and trashed = false`)}&fields=files(id,name,parents,mimeType)`); const body = await response.json() as { files?: Array<{ id: string; name: string; parents?: string[]; mimeType?: string }> }; return Promise.all((body.files ?? []).filter((file) => file.mimeType === "application/json").map(async (file) => { const json = await (await this.request(`files/${encodeURIComponent(file.id)}?alt=media`)).json(); return { id: file.id, name: file.name, parentId: file.parents?.[0] ?? "", json }; })); }
+  async create(parentId: string, name: string, json: unknown): Promise<DriveFile> { const boundary = `reliable-${crypto.randomUUID()}`; const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name, parents: [parentId], mimeType: "application/json" })}\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(json)}\r\n--${boundary}--`; const response = await this.request("files?uploadType=multipart&fields=id,name,parents", { method: "POST", headers: { "content-type": `multipart/related; boundary=${boundary}` }, body }, true); const file = await response.json() as { id: string; name: string; parents?: string[] }; return { id: file.id, name: file.name, parentId: file.parents?.[0] ?? parentId, json }; }
+  async read(fileId: string): Promise<DriveFile | null> { try { const metadata = await (await this.request(`files/${encodeURIComponent(fileId)}?fields=id,name,parents,mimeType`)).json() as { id: string; name: string; parents?: string[]; mimeType?: string }; if (metadata.mimeType !== "application/json") return null; const json = await (await this.request(`files/${encodeURIComponent(fileId)}?alt=media`)).json(); return { id: metadata.id, name: metadata.name, parentId: metadata.parents?.[0] ?? "", json }; } catch (error) { if (isRecord(error) && error.status === 404) return null; throw error; } }
 }
 
 type ImmutableEvent = { schemaVersion: string; kind: "event"; userId: string; eventKey: string; event: SyncEvent };
@@ -80,6 +91,6 @@ export class DriveDestinationAdapter implements DestinationAdapter {
   }
 }
 
-export function createProductionDriveAdapter(env: { GOOGLE_DRIVE_ACCESS_TOKEN?: string; DRIVE_EVENTS_PARENT_ID?: string; DRIVE_SNAPSHOTS_PARENT_ID?: string }): DestinationAdapter {
-  return new DriveDestinationAdapter(new GoogleDriveCapability(env.GOOGLE_DRIVE_ACCESS_TOKEN), env.DRIVE_EVENTS_PARENT_ID ?? "", env.DRIVE_SNAPSHOTS_PARENT_ID ?? "");
+export function createProductionDriveAdapter(env: { GOOGLE_DRIVE_ACCESS_TOKEN?: string; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string; GOOGLE_REFRESH_TOKEN?: string; DRIVE_EVENTS_PARENT_ID?: string; DRIVE_SNAPSHOTS_PARENT_ID?: string }): DestinationAdapter {
+  return new DriveDestinationAdapter(new GoogleDriveCapability(env), env.DRIVE_EVENTS_PARENT_ID ?? "", env.DRIVE_SNAPSHOTS_PARENT_ID ?? "");
 }
