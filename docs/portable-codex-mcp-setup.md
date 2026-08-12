@@ -96,6 +96,17 @@ args = ["C:\\ReliableDriveSync\\packages\\mcp-server\\dist\\index.js"]
 
 > 仅适用于全新 Codex 配置。如果已经有同名 `[mcp_servers.reliable_drive_sync]` 区块，先删除旧区块再添加，避免 TOML 重复定义。
 
+## Drive 云端归档布局
+
+新电脑不需要额外配置 Google Drive 文件夹。云端 Worker 会在每次同步时自动创建或复用以下层级：
+
+```text
+事件父文件夹/<sourceSkill>/<userId>/event-<eventKey>.json
+快照父文件夹/<sourceSkill>/<userId>/snapshot-<timestamp>-<uuid>.json
+```
+
+例如，算法学习事件会写入 `algorithm-learning/qiaobingyuan/`，面试类事件会写入 `interview/qiaobingyuan/`。旧的根目录 JSON 文件不会移动、修改或删除。
+
 ## 5. 验证
 
 在 Codex 中让助手调用 `submit_event` 提交一个无敏感信息的测试事件。预期结果包含：
