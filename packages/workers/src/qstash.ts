@@ -1,0 +1,33 @@
+export type QStashJobMessage = { jobId: string; eventKey: string; userId: string };
+
+export type QStashPublishRequest = {
+  targetUrl: string;
+  failureCallbackUrl: string;
+  job: QStashJobMessage;
+};
+
+export interface QStashPublisher {
+  publish(request: QStashPublishRequest): Promise<unknown>;
+}
+
+type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+/** The token stays within this boundary and is never added to JSON or errors. */
+export function createQStashPublisher(token: string, fetchLike: FetchLike = fetch): QStashPublisher {
+  return {
+    async publish(request: QStashPublishRequest): Promise<unknown> {
+      const response = await fetchLike(`https://qstash.upstash.io/v2/publish/${encodeURIComponent(request.targetUrl)}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "upstash-failure-callback": request.failureCallbackUrl,
+          "upstash-deduplication-id": request.job.jobId
+        },
+        body: JSON.stringify(request.job)
+      });
+      if (!response.ok) throw new Error(`QStash rejected publish with HTTP ${response.status}`);
+      return response.json();
+    }
+  };
+}

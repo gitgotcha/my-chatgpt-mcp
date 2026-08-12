@@ -1,12 +1,21 @@
 import type { SyncEvent } from "@reliable-drive-sync/protocol/event";
 
-export type JobState = "dispatch_pending" | "broker_queued" | "syncing" | "completed" | "failed" | "dead_letter";
+export type JobState = "dispatch_pending" | "broker_queued" | "syncing" | "synced" | "needs_attention";
 
 export type SyncJob = {
   jobId: string;
   eventKey: string;
   userId: string;
   state: JobState;
+  isNew?: boolean;
+};
+
+export type DispatchJob = SyncJob & {
+  dispatchAttempts: number;
+  lastErrorCode: string | null;
+  brokerMessageId: string | null;
+  leaseOwner: string | null;
+  leaseUntil: string | null;
 };
 
 export type OpenNotice = {
@@ -21,6 +30,13 @@ export interface JobRepository {
   listOpenNotices(userId: string): Promise<OpenNotice[]>;
 }
 
+export interface DispatchRepository {
+  claimForDispatch(jobId: string, leaseOwner: string, now: Date, leaseUntil: Date): Promise<DispatchJob | null>;
+  markBrokerQueued(jobId: string, leaseOwner: string, messageId: string, now: Date): Promise<void>;
+  recordDispatchFailure(jobId: string, leaseOwner: string, errorCode: string, now: Date): Promise<void>;
+  listDispatchPending(limit: number): Promise<DispatchJob[]>;
+}
+
 type D1Statement = {
   bind(...values: unknown[]): D1Statement;
   run(): Promise<unknown>;
@@ -32,19 +48,33 @@ export interface D1Database {
 }
 
 type JobRow = { job_id: string; event_key: string; user_id: string; state: JobState };
+type DispatchJobRow = JobRow & {
+  dispatch_attempts: number;
+  last_error_code: string | null;
+  broker_message_id: string | null;
+  lease_owner: string | null;
+  lease_until: string | null;
+};
 type NoticeRow = { notice_id: string; user_id: string; category: string; message: string };
 
 function mapJob(row: JobRow): SyncJob {
   return { jobId: row.job_id, eventKey: row.event_key, userId: row.user_id, state: row.state };
 }
 
+function mapDispatchJob(row: DispatchJobRow): DispatchJob {
+  return {
+    ...mapJob(row), dispatchAttempts: row.dispatch_attempts, lastErrorCode: row.last_error_code,
+    brokerMessageId: row.broker_message_id, leaseOwner: row.lease_owner, leaseUntil: row.lease_until
+  };
+}
+
 /** D1 implementation. The unique event_key constraint is the idempotency fence. */
-export class D1JobRepository implements JobRepository {
+export class D1JobRepository implements JobRepository, DispatchRepository {
   constructor(private readonly database: D1Database) {}
 
   async createOrGet(event: SyncEvent): Promise<SyncJob> {
     const existing = await this.findByEventKey(event.eventKey);
-    if (existing) return existing;
+    if (existing) return { ...existing, isNew: false };
 
     const now = new Date().toISOString();
     const candidateJobId = crypto.randomUUID();
@@ -60,7 +90,7 @@ export class D1JobRepository implements JobRepository {
 
     const persisted = await this.findByEventKey(event.eventKey);
     if (!persisted) throw new Error("Sync job was not persisted");
-    return persisted;
+    return { ...persisted, isNew: true };
   }
 
   async listOpenNotices(userId: string): Promise<OpenNotice[]> {
@@ -74,6 +104,49 @@ export class D1JobRepository implements JobRepository {
     return result.results.map((row) => ({ id: row.notice_id, userId: row.user_id, category: row.category, message: row.message }));
   }
 
+  async claimForDispatch(jobId: string, leaseOwner: string, now: Date, leaseUntil: Date): Promise<DispatchJob | null> {
+    await this.database.prepare(`
+      UPDATE sync_jobs
+      SET lease_owner = ?, lease_until = ?, updated_at = ?
+      WHERE job_id = ? AND state = 'dispatch_pending'
+        AND (lease_until IS NULL OR lease_until < ?)
+    `).bind(leaseOwner, leaseUntil.toISOString(), now.toISOString(), jobId, now.toISOString()).run();
+    const row = await this.database.prepare(`
+      SELECT job_id, event_key, user_id, state, dispatch_attempts, last_error_code,
+             broker_message_id, lease_owner, lease_until
+      FROM sync_jobs WHERE job_id = ? AND lease_owner = ? AND state = 'dispatch_pending'
+    `).bind(jobId, leaseOwner).first<DispatchJobRow>();
+    return row ? mapDispatchJob(row) : null;
+  }
+
+  async markBrokerQueued(jobId: string, leaseOwner: string, messageId: string, now: Date): Promise<void> {
+    await this.database.prepare(`
+      UPDATE sync_jobs
+      SET state = 'broker_queued', broker_message_id = ?, lease_owner = NULL,
+          lease_until = NULL, last_error_code = NULL, dispatched_at = ?, updated_at = ?
+      WHERE job_id = ? AND state = 'dispatch_pending' AND lease_owner = ?
+    `).bind(messageId, now.toISOString(), now.toISOString(), jobId, leaseOwner).run();
+  }
+
+  async recordDispatchFailure(jobId: string, leaseOwner: string, errorCode: string, now: Date): Promise<void> {
+    await this.database.prepare(`
+      UPDATE sync_jobs
+      SET dispatch_attempts = dispatch_attempts + 1, last_error_code = ?,
+          lease_owner = NULL, lease_until = NULL, updated_at = ?
+      WHERE job_id = ? AND state = 'dispatch_pending' AND lease_owner = ?
+    `).bind(errorCode, now.toISOString(), jobId, leaseOwner).run();
+  }
+
+  async listDispatchPending(limit: number): Promise<DispatchJob[]> {
+    const statement = this.database.prepare(`
+      SELECT job_id, event_key, user_id, state, dispatch_attempts, last_error_code,
+             broker_message_id, lease_owner, lease_until
+      FROM sync_jobs WHERE state = 'dispatch_pending' ORDER BY created_at ASC LIMIT ?
+    `).bind(limit) as D1Statement & { all<T>(): Promise<{ results: T[] }> };
+    const result = await statement.all<DispatchJobRow>();
+    return result.results.map(mapDispatchJob);
+  }
+
   private async findByEventKey(eventKey: string): Promise<SyncJob | null> {
     const row = await this.database.prepare(`
       SELECT job_id, event_key, user_id, state FROM sync_jobs WHERE event_key = ?
@@ -83,9 +156,10 @@ export class D1JobRepository implements JobRepository {
 }
 
 /** Test-only in-memory adapter; production code uses D1JobRepository. */
-export class InMemoryJobRepository implements JobRepository {
+export class InMemoryJobRepository implements JobRepository, DispatchRepository {
   private readonly jobs = new Map<string, SyncJob>();
   private readonly notices: OpenNotice[] = [];
+  private readonly dispatchJobs = new Map<string, DispatchJob>();
 
   constructor(private readonly createJobId: () => string = () => crypto.randomUUID()) {}
 
@@ -95,8 +169,8 @@ export class InMemoryJobRepository implements JobRepository {
 
   async createOrGet(event: SyncEvent): Promise<SyncJob> {
     const existing = this.jobs.get(event.eventKey);
-    if (existing) return existing;
-    const job: SyncJob = { jobId: this.createJobId(), eventKey: event.eventKey, userId: event.userId, state: "dispatch_pending" };
+    if (existing) return { ...existing, isNew: false };
+    const job: SyncJob = { jobId: this.createJobId(), eventKey: event.eventKey, userId: event.userId, state: "dispatch_pending", isNew: true };
     this.jobs.set(event.eventKey, job);
     return job;
   }
@@ -107,5 +181,45 @@ export class InMemoryJobRepository implements JobRepository {
 
   addOpenNotice(notice: OpenNotice): void {
     this.notices.push(notice);
+  }
+
+  addDispatchJob(job: DispatchJob): void {
+    this.dispatchJobs.set(job.jobId, { ...job });
+  }
+
+  getDispatchJob(jobId: string): DispatchJob | undefined {
+    const job = this.dispatchJobs.get(jobId);
+    return job ? { ...job } : undefined;
+  }
+
+  async claimForDispatch(jobId: string, leaseOwner: string, now: Date, leaseUntil: Date): Promise<DispatchJob | null> {
+    const job = this.dispatchJobs.get(jobId);
+    if (!job || job.state !== "dispatch_pending" || (job.leaseUntil && job.leaseUntil >= now.toISOString())) return null;
+    job.leaseOwner = leaseOwner;
+    job.leaseUntil = leaseUntil.toISOString();
+    return { ...job };
+  }
+
+  async markBrokerQueued(jobId: string, leaseOwner: string, messageId: string): Promise<void> {
+    const job = this.dispatchJobs.get(jobId);
+    if (!job || job.state !== "dispatch_pending" || job.leaseOwner !== leaseOwner) return;
+    job.state = "broker_queued";
+    job.brokerMessageId = messageId;
+    job.leaseOwner = null;
+    job.leaseUntil = null;
+    job.lastErrorCode = null;
+  }
+
+  async recordDispatchFailure(jobId: string, leaseOwner: string, errorCode: string): Promise<void> {
+    const job = this.dispatchJobs.get(jobId);
+    if (!job || job.state !== "dispatch_pending" || job.leaseOwner !== leaseOwner) return;
+    job.dispatchAttempts += 1;
+    job.lastErrorCode = errorCode;
+    job.leaseOwner = null;
+    job.leaseUntil = null;
+  }
+
+  async listDispatchPending(limit: number): Promise<DispatchJob[]> {
+    return [...this.dispatchJobs.values()].filter((job) => job.state === "dispatch_pending").slice(0, limit).map((job) => ({ ...job }));
   }
 }

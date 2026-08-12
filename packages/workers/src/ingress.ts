@@ -2,6 +2,8 @@ import { parseSyncEvent } from "@reliable-drive-sync/protocol/event";
 import type { JobRepository } from "./db.js";
 
 export type WorkerEnvironment = { INGRESS_SHARED_SECRET: string };
+export type WaitUntilContext = { waitUntil(work: Promise<unknown>): void };
+export type ImmediateDispatcher = { dispatch(jobId: string): Promise<void> };
 
 const encoder = new TextEncoder();
 
@@ -30,8 +32,8 @@ function authorizationFailure(request: Request, env: WorkerEnvironment): Respons
   return null;
 }
 
-export function createIngressHandler(env: WorkerEnvironment, repository: JobRepository) {
-  return async (request: Request): Promise<Response> => {
+export function createIngressHandler(env: WorkerEnvironment, repository: JobRepository, dispatcher?: ImmediateDispatcher) {
+  return async (request: Request, context?: WaitUntilContext): Promise<Response> => {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/v1/jobs") {
       const denied = authorizationFailure(request, env);
@@ -45,6 +47,7 @@ export function createIngressHandler(env: WorkerEnvironment, repository: JobRepo
       try {
         const event = parseSyncEvent(body);
         const job = await repository.createOrGet(event);
+        if (job.isNew && dispatcher && context) context.waitUntil(dispatcher.dispatch(job.jobId));
         return json({ jobId: job.jobId, state: job.state }, 202);
       } catch (error) {
         if (error instanceof TypeError) return json({ error: "Invalid sync event" }, 400);

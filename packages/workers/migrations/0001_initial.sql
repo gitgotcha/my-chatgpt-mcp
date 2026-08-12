@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
   created_at_source TEXT NOT NULL,
   payload_json TEXT NOT NULL,
   state TEXT NOT NULL DEFAULT 'dispatch_pending',
-  attempt_count INTEGER NOT NULL DEFAULT 0,
+  dispatch_attempts INTEGER NOT NULL DEFAULT 0,
   last_error_code TEXT,
   last_error_message TEXT,
   lease_owner TEXT,
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
   updated_at TEXT NOT NULL,
   dispatched_at TEXT,
   completed_at TEXT,
-  CHECK (state IN ('dispatch_pending', 'broker_queued', 'syncing', 'completed', 'failed', 'dead_letter'))
+  CHECK (state IN ('dispatch_pending', 'broker_queued', 'syncing', 'synced', 'needs_attention'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_state_created_at
