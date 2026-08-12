@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { LocalOutbox } from "../src/outbox.js";
-import { SubmitEventService, type DeliveryDeadline } from "../src/submit-event.js";
+import { SubmitEventService, type DeliveryBudget, type DeliveryDeadline } from "../src/submit-event.js";
 
 const baseEvent = {
   schemaVersion: "1",
@@ -80,13 +80,18 @@ describe("SubmitEventService", () => {
     outbox.enqueue({ ...baseEvent, eventId: "event-old", eventKey: "qiao:old:1" });
     let attempts = 0;
     const timeoutOldOnly: DeliveryDeadline = {
-      run: async (operation) => {
-        if (++attempts === 1) {
-          void operation();
-          return { completed: false };
+      createBudget: () => ({
+        expired: false,
+        run: async (operation) => {
+          if (++attempts === 1) {
+            const controller = new AbortController();
+            void operation(controller.signal);
+            controller.abort();
+            return { completed: false };
+          }
+          return { completed: true, value: await operation(new AbortController().signal) };
         }
-        return { completed: true, value: await operation() };
-      }
+      })
     };
     const service = new SubmitEventService(outbox, {
       send: async (event) => event.eventKey === "qiao:old:1"
@@ -118,4 +123,67 @@ describe("SubmitEventService", () => {
     rejectFirst(new Error("ingress unavailable"));
     await expect(first).resolves.toMatchObject({ accepted: false, deliveryState: "pending" });
   });
+
+  test("aborts an old hung transport and ignores its late completion", async () => {
+    const outbox = new LocalOutbox(":memory:");
+    outbox.enqueue({ ...baseEvent, eventId: "event-old", eventKey: "qiao:old:1" });
+    let resolveOld!: (response: { status: number; body: { jobId: string } }) => void;
+    let wasAborted = false;
+    const oldResponse = new Promise<{ status: number; body: { jobId: string } }>((resolve) => { resolveOld = resolve; });
+    const deadline = immediateTimeoutThenSuccess();
+    const service = new SubmitEventService(outbox, {
+      send: async (event, signal) => {
+        if (event.eventKey !== "qiao:old:1") return { status: 202, body: { jobId: "job-current" } };
+        signal.addEventListener("abort", () => { wasAborted = true; });
+        return oldResponse;
+      }
+    }, undefined, 20, deadline);
+
+    await expect(service.submit(baseEvent)).resolves.toMatchObject({ accepted: true });
+    expect(wasAborted).toBe(true);
+    resolveOld({ status: 202, body: { jobId: "late-job" } });
+    await Promise.resolve();
+    expect(outbox.listPending()[0]?.eventKey).toBe("qiao:old:1");
+  });
+
+  test("shares one preflush budget across multiple hung older events", async () => {
+    const outbox = new LocalOutbox(":memory:");
+    outbox.enqueue({ ...baseEvent, eventId: "event-old-1", eventKey: "qiao:old:1" });
+    outbox.enqueue({ ...baseEvent, eventId: "event-old-2", eventKey: "qiao:old:2" });
+    const sends: string[] = [];
+    const service = new SubmitEventService(outbox, {
+      send: async (event) => {
+        sends.push(event.eventKey);
+        return event.eventKey === "qiao:current:1"
+          ? { status: 202, body: { jobId: "job-current" } }
+          : new Promise(() => undefined);
+      }
+    }, undefined, 20, immediateTimeoutThenSuccess());
+
+    await expect(service.submit(baseEvent)).resolves.toMatchObject({ accepted: true });
+    expect(sends).toEqual(["qiao:old:1", "qiao:current:1"]);
+  });
 });
+
+function immediateTimeoutThenSuccess(): DeliveryDeadline {
+  let budgets = 0;
+  return {
+    createBudget: (): DeliveryBudget => {
+      const isPreflush = budgets++ === 0;
+      let expired = false;
+      return {
+        get expired() { return expired; },
+        run: async (operation) => {
+          const controller = new AbortController();
+          if (isPreflush) {
+            void operation(controller.signal);
+            controller.abort();
+            expired = true;
+            return { completed: false };
+          }
+          return { completed: true, value: await operation(controller.signal) };
+        }
+      };
+    }
+  };
+}

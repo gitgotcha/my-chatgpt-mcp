@@ -5,7 +5,7 @@ import type { LocalOutbox, OutboxRecord } from "./outbox.js";
 
 export type IngressResponse = { status: number; body: unknown };
 export interface IngressTransport {
-  send(event: SyncEvent): Promise<IngressResponse>;
+  send(event: SyncEvent, signal: AbortSignal): Promise<IngressResponse>;
 }
 
 export type DeliveryAttempt<T> =
@@ -13,7 +13,12 @@ export type DeliveryAttempt<T> =
   | { completed: false };
 
 export interface DeliveryDeadline {
-  run<T>(operation: () => Promise<T>): Promise<DeliveryAttempt<T>>;
+  createBudget(): DeliveryBudget;
+}
+
+export interface DeliveryBudget {
+  readonly expired: boolean;
+  run<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<DeliveryAttempt<T>>;
 }
 
 export type LocalSubmitResult = {
@@ -39,9 +44,13 @@ export class SubmitEventService {
     const pendingBeforeCurrent = this.outbox.listPending()
       .filter((record) => record.eventKey !== event.eventKey)
       .slice(0, this.maxFlushEvents);
-    for (const record of pendingBeforeCurrent) await this.deliver(record);
+    const preflushBudget = this.deadline.createBudget();
+    for (const record of pendingBeforeCurrent) {
+      if (preflushBudget.expired) break;
+      await this.deliver(record, preflushBudget);
+    }
 
-    const accepted = await this.deliverByKey(event.eventKey);
+    const accepted = await this.deliverByKey(event.eventKey, this.deadline.createBudget());
     return {
       accepted,
       eventKey: event.eventKey,
@@ -51,18 +60,22 @@ export class SubmitEventService {
   }
 
   async flushPending(limit = this.maxFlushEvents): Promise<void> {
-    for (const record of this.outbox.listPending().slice(0, limit)) await this.deliver(record);
+    const budget = this.deadline.createBudget();
+    for (const record of this.outbox.listPending().slice(0, limit)) {
+      if (budget.expired) break;
+      await this.deliver(record, budget);
+    }
   }
 
-  private async deliverByKey(eventKey: string): Promise<boolean> {
+  private async deliverByKey(eventKey: string, budget: DeliveryBudget): Promise<boolean> {
     const record = this.outbox.listPending().find((item) => item.eventKey === eventKey);
-    return record ? this.deliver(record) : false;
+    return record ? this.deliver(record, budget) : false;
   }
 
-  private async deliver(record: OutboxRecord): Promise<boolean> {
+  private async deliver(record: OutboxRecord, budget: DeliveryBudget): Promise<boolean> {
     this.outbox.markSending(record.eventKey);
     try {
-      const attempt = await this.deadline.run(() => this.transport.send(record.event));
+      const attempt = await budget.run((signal) => this.transport.send(record.event, signal));
       if (!attempt.completed) {
         this.outbox.markPending(record.eventKey, "ingress_timeout");
         return false;
@@ -80,18 +93,35 @@ export class SubmitEventService {
 
 function timeoutAfter(timeoutMs: number): DeliveryDeadline {
   return {
-    async run<T>(operation: () => Promise<T>): Promise<DeliveryAttempt<T>> {
-      let timeout: ReturnType<typeof setTimeout> | undefined;
-      try {
-        return await Promise.race([
-          operation().then((value) => ({ completed: true as const, value })),
-          new Promise<DeliveryAttempt<T>>((resolve) => {
-            timeout = setTimeout(() => resolve({ completed: false }), timeoutMs);
-          })
-        ]);
-      } finally {
-        if (timeout) clearTimeout(timeout);
-      }
+    createBudget(): DeliveryBudget {
+      const startedAt = Date.now();
+      let exhausted = false;
+      return {
+        get expired() { return exhausted || Date.now() - startedAt >= timeoutMs; },
+        async run<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<DeliveryAttempt<T>> {
+          const remainingMs = timeoutMs - (Date.now() - startedAt);
+          if (remainingMs <= 0) {
+            exhausted = true;
+            return { completed: false };
+          }
+          const controller = new AbortController();
+          let timeout: ReturnType<typeof setTimeout> | undefined;
+          try {
+            return await Promise.race([
+              operation(controller.signal).then((value) => ({ completed: true as const, value })),
+              new Promise<DeliveryAttempt<T>>((resolve) => {
+                timeout = setTimeout(() => {
+                  exhausted = true;
+                  controller.abort();
+                  resolve({ completed: false });
+                }, remainingMs);
+              })
+            ]);
+          } finally {
+            if (timeout) clearTimeout(timeout);
+          }
+        }
+      };
     }
   };
 }
