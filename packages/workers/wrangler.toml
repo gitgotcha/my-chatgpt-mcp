@@ -6,6 +6,9 @@ compatibility_date = "2026-08-12"
 SYNC_WORKER_URL = "https://reliable-drive-sync.qiaobingyuan886.workers.dev/v1/sync"
 QSTASH_FAILURE_CALLBACK_URL = "https://reliable-drive-sync.qiaobingyuan886.workers.dev/v1/qstash/failure"
 QSTASH_URL = "https://qstash-us-east-1.upstash.io"
+GOOGLE_SERVICE_ACCOUNT_EMAIL = "reliable-drive-sync-worker@reliable-drive-sync.iam.gserviceaccount.com"
+DRIVE_EVENTS_PARENT_ID = "1ZZRD4a1Z93NT1OGKbRkLPu13TsHbDsF8"
+DRIVE_SNAPSHOTS_PARENT_ID = "1bAokejGSIdn2oLCWPjDgSb3xbiX0r999"
 
 # D1 database id is non-secret. All credentials are supplied with Wrangler
 # secrets and must never be committed.

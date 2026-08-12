@@ -63,6 +63,21 @@ describe("SubmitEventService", () => {
     expect(outbox.listPending()).toHaveLength(1);
   });
 
+  test("accepts an ingress response that arrives after one second", async () => {
+    const outbox = new LocalOutbox(":memory:");
+    const service = new SubmitEventService(outbox, {
+      send: async () => new Promise((resolve) => {
+        setTimeout(() => resolve({ status: 202, body: { jobId: "job-after-one-second" } }), 1_100);
+      })
+    });
+
+    await expect(service.submit(baseEvent)).resolves.toMatchObject({
+      accepted: true,
+      deliveryState: "cloud_accepted"
+    });
+    expect(outbox.listPending()).toHaveLength(0);
+  });
+
   test("keeps an event pending after a malformed 202 response", async () => {
     const outbox = new LocalOutbox(":memory:");
     const service = new SubmitEventService(outbox, {

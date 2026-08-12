@@ -34,7 +34,7 @@ export class SubmitEventService {
     private readonly transport: IngressTransport,
     private readonly noticeClient: NoticeClient = new DisabledNoticeClient(),
     private readonly maxFlushEvents = 20,
-    private readonly deadline: DeliveryDeadline = timeoutAfter(1_000)
+    private readonly deadline: DeliveryDeadline = timeoutAfter(2_000)
   ) {}
 
   async submit(input: unknown): Promise<LocalSubmitResult> {
