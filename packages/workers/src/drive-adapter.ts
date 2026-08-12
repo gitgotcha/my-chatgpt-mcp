@@ -11,10 +11,12 @@ export interface DestinationAdapter { sync(event: SyncEvent): Promise<SyncOutcom
 type DriveOperation = "list" | "read" | "upload";
 type SafeDriveReason = "storageQuotaExceeded" | "insufficientFilePermissions" | "accessNotConfigured";
 
-export type DriveFile = { id: string; name: string; parentId: string; json: unknown };
+export const DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
+export type DriveFile = { id: string; name: string; parentId: string; mimeType?: string; json: unknown };
 export interface DriveCapability {
   list(parentId: string): Promise<DriveFile[]>;
   create(parentId: string, name: string, json: unknown): Promise<DriveFile>;
+  ensureFolder(parentId: string, name: string): Promise<DriveFile>;
   read(fileId: string): Promise<DriveFile | null>;
 }
 
@@ -72,9 +74,10 @@ export class GoogleDriveCapability implements DriveCapability {
     if (!response.ok) { const retryAfter = Number(response.headers.get("retry-after")); throw { status: response.status, retryAfterMs: Number.isFinite(retryAfter) ? retryAfter * 1000 : undefined, operation: operationFor(path, upload), reason: await safeReason(response) }; }
     return response;
   }
-  async list(parentId: string): Promise<DriveFile[]> { const response = await this.request(`files?q=${encodeURIComponent(`'${parentId}' in parents and trashed = false`)}&fields=files(id,name,parents,mimeType)`); const body = await response.json() as { files?: Array<{ id: string; name: string; parents?: string[]; mimeType?: string }> }; return Promise.all((body.files ?? []).filter((file) => file.mimeType === "application/json").map(async (file) => { const json = await (await this.request(`files/${encodeURIComponent(file.id)}?alt=media`)).json(); return { id: file.id, name: file.name, parentId: file.parents?.[0] ?? "", json }; })); }
-  async create(parentId: string, name: string, json: unknown): Promise<DriveFile> { const boundary = `reliable-${crypto.randomUUID()}`; const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name, parents: [parentId], mimeType: "application/json" })}\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(json)}\r\n--${boundary}--`; const response = await this.request("files?uploadType=multipart&fields=id,name,parents", { method: "POST", headers: { "content-type": `multipart/related; boundary=${boundary}` }, body }, true); const file = await response.json() as { id: string; name: string; parents?: string[] }; return { id: file.id, name: file.name, parentId: file.parents?.[0] ?? parentId, json }; }
-  async read(fileId: string): Promise<DriveFile | null> { try { const metadata = await (await this.request(`files/${encodeURIComponent(fileId)}?fields=id,name,parents,mimeType`)).json() as { id: string; name: string; parents?: string[]; mimeType?: string }; if (metadata.mimeType !== "application/json") return null; const json = await (await this.request(`files/${encodeURIComponent(fileId)}?alt=media`)).json(); return { id: metadata.id, name: metadata.name, parentId: metadata.parents?.[0] ?? "", json }; } catch (error) { if (isRecord(error) && error.status === 404) return null; throw error; } }
+  async list(parentId: string): Promise<DriveFile[]> { const response = await this.request(`files?q=${encodeURIComponent(`'${parentId}' in parents and trashed = false`)}&fields=files(id,name,parents,mimeType)`); const body = await response.json() as { files?: Array<{ id: string; name: string; parents?: string[]; mimeType?: string }> }; return Promise.all((body.files ?? []).map(async (file) => { const mimeType = file.mimeType ?? ""; const json = mimeType === "application/json" ? await (await this.request(`files/${encodeURIComponent(file.id)}?alt=media`)).json() : null; return { id: file.id, name: file.name, parentId: file.parents?.[0] ?? "", mimeType, json }; })); }
+  async create(parentId: string, name: string, json: unknown): Promise<DriveFile> { const boundary = `reliable-${crypto.randomUUID()}`; const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name, parents: [parentId], mimeType: "application/json" })}\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(json)}\r\n--${boundary}--`; const response = await this.request("files?uploadType=multipart&fields=id,name,parents,mimeType", { method: "POST", headers: { "content-type": `multipart/related; boundary=${boundary}` }, body }, true); const file = await response.json() as { id: string; name: string; parents?: string[]; mimeType?: string }; return { id: file.id, name: file.name, parentId: file.parents?.[0] ?? parentId, mimeType: file.mimeType ?? "application/json", json }; }
+  async ensureFolder(parentId: string, name: string): Promise<DriveFile> { const existing = (await this.list(parentId)).filter((file) => file.name === name && file.mimeType === DRIVE_FOLDER_MIME_TYPE).sort((left, right) => left.id.localeCompare(right.id))[0]; if (existing) return existing; const response = await this.request("files?fields=id,name,parents,mimeType", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, parents: [parentId], mimeType: DRIVE_FOLDER_MIME_TYPE }) }); const file = await response.json() as { id: string; name: string; parents?: string[]; mimeType?: string }; return { id: file.id, name: file.name, parentId: file.parents?.[0] ?? parentId, mimeType: file.mimeType ?? DRIVE_FOLDER_MIME_TYPE, json: null }; }
+  async read(fileId: string): Promise<DriveFile | null> { try { const metadata = await (await this.request(`files/${encodeURIComponent(fileId)}?fields=id,name,parents,mimeType`)).json() as { id: string; name: string; parents?: string[]; mimeType?: string }; if (metadata.mimeType !== "application/json") return null; const json = await (await this.request(`files/${encodeURIComponent(fileId)}?alt=media`)).json(); return { id: metadata.id, name: metadata.name, parentId: metadata.parents?.[0] ?? "", mimeType: metadata.mimeType, json }; } catch (error) { if (isRecord(error) && error.status === 404) return null; throw error; } }
 }
 
 type ImmutableEvent = { schemaVersion: string; kind: "event"; userId: string; eventKey: string; event: SyncEvent };
@@ -90,6 +93,7 @@ function validSnapshot(value: unknown, userId: string, keys: string[], immutable
   return isRecord(value) && value.kind === "snapshot" && value.schemaVersion === "1" && value.userId === userId && typeof value.generatedAt === "string" && Array.isArray(value.sourceEventKeys) && value.sourceEventKeys.every((key) => typeof key === "string") && Array.isArray(value.events) && value.events.every((event) => isRecord(event) && event.userId === userId && typeof event.eventKey === "string") && sameKeys(value.sourceEventKeys, keys) && sameKeys(value.events.map((event) => String((event as Record<string, unknown>).eventKey)), keys) && value.events.every((item) => canonical(item) === canonical(immutable.get(String((item as Record<string, unknown>).eventKey))));
 }
 function sameKeys(left: string[], right: string[]): boolean { return left.length === right.length && [...left].sort().every((key, index) => key === [...right].sort()[index]); }
+function isValidPathComponent(value: string): boolean { return /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value); }
 function problem(error: unknown): SyncOutcome {
   const status = isRecord(error) && typeof error.status === "number" ? error.status : undefined;
   const retryAfterMs = isRecord(error) && typeof error.retryAfterMs === "number" ? Math.min(Math.max(error.retryAfterMs, 0), 3_600_000) : undefined;
@@ -103,30 +107,37 @@ function problem(error: unknown): SyncOutcome {
 export class DriveDestinationAdapter implements DestinationAdapter {
   constructor(private readonly drive: DriveCapability, private readonly eventsParentId: string, private readonly snapshotsParentId: string, private readonly now: () => Date = () => new Date()) {}
 
+  private async resolveUserDirectory(parentId: string, sourceSkill: string, userId: string): Promise<string> {
+    const skillFolder = await this.drive.ensureFolder(parentId, sourceSkill);
+    return (await this.drive.ensureFolder(skillFolder.id, userId)).id;
+  }
+
   async sync(event: SyncEvent): Promise<SyncOutcome> {
     try {
       if (!this.eventsParentId || !this.snapshotsParentId) return { kind: "retryable", code: "drive_configuration_unavailable" };
-      if (event.destination !== "drive" || !event.userId) return { kind: "permanent", code: "invalid_drive_identity" };
-      const existingEvents = await this.drive.list(this.eventsParentId);
+      if (event.destination !== "drive" || !event.userId || !isValidPathComponent(event.sourceSkill) || !isValidPathComponent(event.userId)) return { kind: "permanent", code: "invalid_drive_identity" };
+      const eventsDirectory = await this.resolveUserDirectory(this.eventsParentId, event.sourceSkill, event.userId);
+      const snapshotsDirectory = await this.resolveUserDirectory(this.snapshotsParentId, event.sourceSkill, event.userId);
+      const existingEvents = await this.drive.list(eventsDirectory);
       const known = new Map<string, SyncEvent>();
-      for (const file of existingEvents) if (file.parentId === this.eventsParentId && validEvent(file.json, event.userId)) known.set(file.json.eventKey, file.json.event);
+      for (const file of existingEvents) if (file.parentId === eventsDirectory && validEvent(file.json, event.userId)) known.set(file.json.eventKey, file.json.event);
       if (!known.has(event.eventKey)) {
         const immutable: ImmutableEvent = { schemaVersion: "1", kind: "event", userId: event.userId, eventKey: event.eventKey, event };
-        const created = await this.drive.create(this.eventsParentId, eventName(event), immutable);
+        const created = await this.drive.create(eventsDirectory, eventName(event), immutable);
         const reread = await this.drive.read(created.id);
-        if (!reread || reread.parentId !== this.eventsParentId || !validEvent(reread.json, event.userId) || reread.json.eventKey !== event.eventKey) return { kind: "retryable", code: "event_readback_failed" };
+        if (!reread || reread.parentId !== eventsDirectory || !validEvent(reread.json, event.userId) || reread.json.eventKey !== event.eventKey) return { kind: "retryable", code: "event_readback_failed" };
         known.set(event.eventKey, event);
       }
       const keys = [...known.keys()].sort();
-      const candidateSnapshots = await this.drive.list(this.snapshotsParentId);
-      const complete = candidateSnapshots.filter((file) => file.parentId === this.snapshotsParentId && validSnapshot(file.json, event.userId, keys, known))
+      const candidateSnapshots = await this.drive.list(snapshotsDirectory);
+      const complete = candidateSnapshots.filter((file) => file.parentId === snapshotsDirectory && validSnapshot(file.json, event.userId, keys, known))
         .sort((a, b) => String((b.json as Snapshot).generatedAt).localeCompare(String((a.json as Snapshot).generatedAt)) || b.id.localeCompare(a.id));
       if (complete.length > 0) return { kind: "success", syncedAt: (complete[0].json as Snapshot).generatedAt };
       const generatedAt = this.now().toISOString();
       const snapshot: Snapshot = { schemaVersion: "1", kind: "snapshot", userId: event.userId, sourceEventKeys: keys, generatedAt, events: keys.map((key) => known.get(key)!) };
-      const created = await this.drive.create(this.snapshotsParentId, `snapshot-${generatedAt.replace(/[:.]/g, "-")}-${crypto.randomUUID()}.json`, snapshot);
+      const created = await this.drive.create(snapshotsDirectory, `snapshot-${generatedAt.replace(/[:.]/g, "-")}-${crypto.randomUUID()}.json`, snapshot);
       const reread = await this.drive.read(created.id);
-      if (!reread || reread.parentId !== this.snapshotsParentId || !validSnapshot(reread.json, event.userId, keys, known)) return { kind: "retryable", code: "snapshot_readback_failed" };
+      if (!reread || reread.parentId !== snapshotsDirectory || !validSnapshot(reread.json, event.userId, keys, known)) return { kind: "retryable", code: "snapshot_readback_failed" };
       return { kind: "success", syncedAt: generatedAt };
     } catch (error) { return problem(error); }
   }
