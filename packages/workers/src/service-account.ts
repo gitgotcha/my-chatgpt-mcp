@@ -19,7 +19,7 @@ function jsonBase64Url(value: unknown): string {
   return base64Url(new TextEncoder().encode(JSON.stringify(value)));
 }
 
-function privateKeyBytes(pem: string): Uint8Array {
+function privateKeyBytes(pem: string): ArrayBuffer {
   const normalized = pem.replace(/\\n/g, "\n");
   const base64 = normalized
     .replace(/-----BEGIN PRIVATE KEY-----/g, "")
@@ -27,7 +27,10 @@ function privateKeyBytes(pem: string): Uint8Array {
     .replace(/\s/g, "");
   if (!base64) throw failure(503, true);
   try {
-    return Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
+    const decoded = Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
+    const copied = new Uint8Array(decoded.byteLength);
+    copied.set(decoded);
+    return copied.buffer;
   } catch {
     throw failure(401);
   }
