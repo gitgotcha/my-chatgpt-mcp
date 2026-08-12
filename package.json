@@ -7,6 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
+    "build": "pnpm --filter @reliable-drive-sync/protocol build && pnpm --filter @reliable-drive-sync/mcp-server build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

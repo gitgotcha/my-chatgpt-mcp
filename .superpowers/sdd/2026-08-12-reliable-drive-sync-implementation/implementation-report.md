@@ -160,3 +160,9 @@ The first `pnpm install` skipped `better-sqlite3`'s native build and tests could
 - The module cache now uses a full SHA-256 digest of length-delimited configuration values, never raw credentials, and keeps at most 64 least-recently-used adapters. Same configuration reuses an adapter; a different configuration remains isolated.
 - Failure callback tests now prove tampered raw body, expired JWT, and incorrect audience all return non-retryable failure without mutating the job or notices.
 - `replayAfterRemediation` remains an internal repository primitive only. Its caller must verify operator authorization and remediation evidence externally; the repository enforces only explicit acknowledgement plus atomic `needs_attention` CAS and there is no public route.
+
+## Post-plan build integration
+
+- Red evidence: after cleaning only `packages/protocol/dist` and `packages/mcp-server/dist`, `pnpm build` failed because no build script existed.
+- Green: added real TypeScript build configs and ordered root build (`Protocol` then `MCP`). Protocol emits runtime JS and declarations with runtime/type exports targeting `dist`; MCP emits its runnable `dist/index.js`.
+- Verification: `pnpm build` emitted both entrypoints; `node packages/mcp-server/dist/index.js flush-pending` exited cleanly without any configured ingress or Drive-success claim. Generated dist remains ignored. Worker bundling/deployment is unchanged and remains Wrangler-owned.

@@ -3,8 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "scripts": { "build": "tsc -p tsconfig.build.json" },
   "exports": {
-    "./event": "./src/event.ts",
-    "./result": "./src/result.ts"
+    "./event": { "types": "./dist/event.d.ts", "default": "./dist/event.js" },
+    "./result": { "types": "./dist/result.d.ts", "default": "./dist/result.js" }
   }
 }
