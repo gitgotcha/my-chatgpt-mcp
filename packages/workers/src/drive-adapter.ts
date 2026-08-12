@@ -61,7 +61,7 @@ export class GoogleDriveCapability implements DriveCapability {
     if (this.cached && this.cached.expiresAt > this.now() + 60_000) return this.cached.token;
     if (!this.env.GOOGLE_CLIENT_ID || !this.env.GOOGLE_CLIENT_SECRET || !this.env.GOOGLE_REFRESH_TOKEN) throw { status: 503, configuration: true };
     const body = new URLSearchParams({ client_id: this.env.GOOGLE_CLIENT_ID, client_secret: this.env.GOOGLE_CLIENT_SECRET, refresh_token: this.env.GOOGLE_REFRESH_TOKEN, grant_type: "refresh_token" });
-    const response = await this.fetchLike("https://oauth2.googleapis.com/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
+    const response = await callFetch(this.fetchLike, "https://oauth2.googleapis.com/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
     if (!response.ok) throw { status: response.status === 429 ? 429 : response.status >= 500 ? response.status : 401 };
     const value = await response.json() as { access_token?: unknown; expires_in?: unknown }; if (typeof value.access_token !== "string") throw { status: 503 };
     this.cached = { token: value.access_token, expiresAt: this.now() + (typeof value.expires_in === "number" ? value.expires_in : 300) * 1000 };
