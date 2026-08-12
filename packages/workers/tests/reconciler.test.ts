@@ -25,4 +25,14 @@ describe("Reconciler", () => {
     await reconciler.runHourly();
     expect(published).toEqual([]);
   });
+
+  test("allows explicit internal replay only from needs_attention and never a live job", async () => {
+    const repository = new InMemoryJobRepository();
+    repository.addDispatchJob(makeJob("attention", "needs_attention"));
+    repository.addDispatchJob(makeJob("live", "broker_queued"));
+    expect(await repository.replayAfterRemediation("attention", "operator-ack", new Date())).toBe(true);
+    expect(await repository.replayAfterRemediation("attention", "operator-ack", new Date())).toBe(false);
+    expect(await repository.replayAfterRemediation("live", "operator-ack", new Date())).toBe(false);
+    expect(repository.getDispatchJob("attention")?.state).toBe("dispatch_pending");
+  });
 });

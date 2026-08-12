@@ -146,3 +146,11 @@ The first `pnpm install` skipped `better-sqlite3`'s native build and tests could
 - Added module/isolate-local Drive adapter cache keyed by every credential and parent-folder identity; identical configuration reuses the capability and differing configuration does not.
 - Public operator replay remains intentionally disabled because no authenticated operator remediation workflow exists yet; any future replay must be an explicit internal durable transition from `needs_attention`, never an automatic Cron action.
 - Cron entries are configuration-ready only. No Cloudflare/QStash/Google call, deployment, credential, or secret was used.
+
+## Task 6 review hardening
+
+- Replaced select-then-update notice consumption with D1 `UPDATE ... RETURNING`; concurrent readers atomically claim open notices and cannot both surface the same notice.
+- Added an internal-only `replayAfterRemediation` compare-and-set method: an explicit non-empty remediation acknowledgement can move only `needs_attention` to `dispatch_pending`; no public replay route exists and live states are rejected.
+- Added direct signed failure-callback route coverage for current/next key rotation, missing signature, foreign task rejection, terminal 489 header, and idempotent notices.
+- Replaced raw credential concatenation in the isolate-local cache key with a one-way non-secret fingerprint. Tests retain reuse/separation coverage.
+- Final verification: `pnpm typecheck` and `pnpm test` passed (10 files, 61 tests). No external resource, credential, or deployment was used.

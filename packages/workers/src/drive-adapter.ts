@@ -97,9 +97,15 @@ export function createProductionDriveAdapter(env: { GOOGLE_DRIVE_ACCESS_TOKEN?: 
 }
 
 const productionAdapterCache = new Map<string, DestinationAdapter>();
+function cacheFingerprint(values: Array<string | undefined>): string {
+  // The cache keeps only a one-way, non-secret identifier; raw OAuth material never becomes a map key.
+  let hash = 2166136261;
+  for (const value of values) for (const byte of new TextEncoder().encode(value ?? "")) { hash ^= byte; hash = Math.imul(hash, 16777619); }
+  return (hash >>> 0).toString(16);
+}
 /** Isolate-local only; the key includes every credential/folder identity to prevent cross-env reuse. */
 export function cachedProductionDriveAdapter(env: { GOOGLE_DRIVE_ACCESS_TOKEN?: string; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string; GOOGLE_REFRESH_TOKEN?: string; DRIVE_EVENTS_PARENT_ID?: string; DRIVE_SNAPSHOTS_PARENT_ID?: string }): DestinationAdapter {
-  const key = [env.GOOGLE_DRIVE_ACCESS_TOKEN, env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET, env.GOOGLE_REFRESH_TOKEN, env.DRIVE_EVENTS_PARENT_ID, env.DRIVE_SNAPSHOTS_PARENT_ID].map((value) => value ?? "").join("\u0000");
+  const key = cacheFingerprint([env.GOOGLE_DRIVE_ACCESS_TOKEN, env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET, env.GOOGLE_REFRESH_TOKEN, env.DRIVE_EVENTS_PARENT_ID, env.DRIVE_SNAPSHOTS_PARENT_ID]);
   let adapter = productionAdapterCache.get(key);
   if (!adapter) { adapter = createProductionDriveAdapter(env); productionAdapterCache.set(key, adapter); }
   return adapter;

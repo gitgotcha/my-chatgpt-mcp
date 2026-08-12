@@ -125,6 +125,15 @@ describe("cloud ingress", () => {
     await expect(scoped.json()).resolves.toEqual({ notices: [{ id: "n1", category: "drive", message: "retry needed" }] });
   });
 
+  test("consumes a notice exactly once across simultaneous authenticated reads", async () => {
+    const { handler, repository } = fixture();
+    repository.addOpenNotice({ id: "n1", userId: "qiaobingyuan", category: "drive", message: "once" });
+    const init = { headers: { authorization: `Bearer ${sharedSecret}` } };
+    const [left, right] = await Promise.all([handler(request("/v1/notices?userId=qiaobingyuan", init)), handler(request("/v1/notices?userId=qiaobingyuan", init))]);
+    const delivered = [await left.json(), await right.json()].flatMap((value: any) => value.notices);
+    expect(delivered).toHaveLength(1);
+  });
+
   test("compares equal-length secrets without an early mismatch return", () => {
     expect(secureEquals("same-length", "same-length")).toBe(true);
     expect(secureEquals("same-length", "different!!!")).toBe(false);
