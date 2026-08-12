@@ -101,11 +101,11 @@ export class D1JobRepository implements JobRepository, DispatchRepository, SyncR
     const inserted = await this.database.prepare(`
       INSERT OR IGNORE INTO sync_jobs (
         job_id, event_key, event_id, user_id, event_type, source_skill, destination,
-        created_at_source, payload_json, state, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'dispatch_pending', ?, ?)
+        created_at_source, payload_json, schema_version, state, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'dispatch_pending', ?, ?)
     `).bind(
       candidateJobId, event.eventKey, event.eventId, event.userId, event.type,
-      event.sourceSkill, event.destination, event.createdAt, JSON.stringify(event.payload), now, now
+      event.sourceSkill, event.destination, event.createdAt, JSON.stringify(event.payload), event.schemaVersion, now, now
     ).run();
 
     const persisted = await this.findByEventKey(event.eventKey);

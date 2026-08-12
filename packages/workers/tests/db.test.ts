@@ -48,4 +48,34 @@ describe("D1 idempotent insert", () => {
     expect(one.jobId).toBe("persisted-job");
     expect(two.jobId).toBe("persisted-job");
   });
+
+  test("persists the event schema version needed by later sync delivery", async () => {
+    let insertQuery = "";
+    let insertValues: unknown[] = [];
+    let inserted = false;
+    const database: D1Database = {
+      prepare(query) {
+        const statement = {
+          bind(...values: unknown[]) {
+            if (query.includes("INSERT OR IGNORE")) {
+              insertQuery = query;
+              insertValues = values;
+            }
+            return statement;
+          },
+          async run() { inserted = true; return { meta: { changes: 1 } }; },
+          async first<T>() {
+            if (query.includes("SELECT job_id") && inserted) return { job_id: "persisted-job", event_key: event().eventKey, user_id: event().userId, state: "dispatch_pending" } as T;
+            return null;
+          }
+        };
+        return statement;
+      }
+    };
+
+    await new D1JobRepository(database).createOrGet(event());
+
+    expect(insertQuery).toContain("schema_version");
+    expect(insertValues).toContain("1");
+  });
 });
