@@ -1,8 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { ingressTransportFromEnvironment } from "./fetch-ingress.js";
 import { LocalOutbox } from "./outbox.js";
-import { SubmitEventService, type IngressTransport } from "./submit-event.js";
+import { SubmitEventService } from "./submit-event.js";
 
 const syncEventSchema = {
   schemaVersion: z.string().min(1), eventId: z.string().min(1), eventKey: z.string().min(1),
@@ -10,13 +11,9 @@ const syncEventSchema = {
   destination: z.literal("drive"), createdAt: z.string().min(1), payload: z.record(z.unknown())
 };
 
-function unavailableIngress(): IngressTransport {
-  return { send: async () => { throw new Error("Ingress is not configured"); } };
-}
-
 async function main(): Promise<void> {
   const outbox = new LocalOutbox(process.env.RELIABLE_DRIVE_SYNC_OUTBOX_PATH ?? "reliable-drive-sync.sqlite");
-  const service = new SubmitEventService(outbox, unavailableIngress());
+  const service = new SubmitEventService(outbox, ingressTransportFromEnvironment());
   if (process.argv[2] === "flush-pending") {
     await service.flushPending();
     return;

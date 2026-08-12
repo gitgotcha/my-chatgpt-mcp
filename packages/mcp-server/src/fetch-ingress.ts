@@ -29,6 +29,20 @@ export function createFetchIngressTransport(
   };
 }
 
+export function ingressTransportFromEnvironment(
+  env: Record<string, string | undefined> = process.env,
+  fetchImpl: typeof fetch = fetch
+): IngressTransport {
+  return createFetchIngressTransport({
+    url: env.RELIABLE_DRIVE_SYNC_INGRESS_URL,
+    sharedSecret: env.RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET
+  }, fetchImpl) ?? unavailableIngress();
+}
+
+function unavailableIngress(): IngressTransport {
+  return { send: async () => { throw new Error("Ingress is not configured"); } };
+}
+
 function isHttpUrl(value: string): boolean {
   try {
     const url = new URL(value);

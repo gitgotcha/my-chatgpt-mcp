@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { createFetchIngressTransport } from "../src/fetch-ingress.js";
+import { createFetchIngressTransport, ingressTransportFromEnvironment } from "../src/fetch-ingress.js";
 
 const baseEvent = {
   schemaVersion: "1",
@@ -64,5 +64,21 @@ describe("createFetchIngressTransport", () => {
 
     await transport?.send(baseEvent, controller.signal);
     expect(received).toBe(controller.signal);
+  });
+
+  test("uses a disabled transport unless both local values are present", async () => {
+    const ready = ingressTransportFromEnvironment({
+      RELIABLE_DRIVE_SYNC_INGRESS_URL: "https://worker.example/v1/jobs",
+      RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET: "secret"
+    }, async () => new Response(JSON.stringify({ jobId: "job-1" }), { status: 202 }));
+    await expect(ready.send(baseEvent, new AbortController().signal)).resolves.toEqual({
+      status: 202,
+      body: { jobId: "job-1" }
+    });
+
+    const disabled = ingressTransportFromEnvironment({
+      RELIABLE_DRIVE_SYNC_INGRESS_URL: "https://worker.example/v1/jobs"
+    });
+    await expect(disabled.send(baseEvent, new AbortController().signal)).rejects.toThrow("Ingress is not configured");
   });
 });
