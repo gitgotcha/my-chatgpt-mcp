@@ -8,6 +8,8 @@ export type SyncOutcome =
 
 export interface DestinationAdapter { sync(event: SyncEvent): Promise<SyncOutcome>; }
 
+type DriveOperation = "list" | "read" | "upload";
+
 export type DriveFile = { id: string; name: string; parentId: string; json: unknown };
 export interface DriveCapability {
   list(parentId: string): Promise<DriveFile[]>;
@@ -24,6 +26,11 @@ type DriveAuthEnvironment = GoogleServiceAccountEnvironment & {
 
 function callFetch(fetchLike: typeof fetch, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   return fetchLike(input, init);
+}
+
+function operationFor(path: string, upload: boolean): DriveOperation {
+  if (upload) return "upload";
+  return path.startsWith("files?q=") ? "list" : "read";
 }
 
 /** Production-shaped REST boundary; it remains inert until OAuth and folder bindings are configured. */
@@ -51,7 +58,7 @@ export class GoogleDriveCapability implements DriveCapability {
   }
   private async request(path: string, init?: RequestInit, upload = false): Promise<Response> {
     const response = await callFetch(this.fetchLike, `${upload ? "https://www.googleapis.com/upload/drive/v3/" : "https://www.googleapis.com/drive/v3/"}${path}`, { ...init, headers: { authorization: `Bearer ${await this.token()}`, ...(init?.headers ?? {}) } });
-    if (!response.ok) { const retryAfter = Number(response.headers.get("retry-after")); throw { status: response.status, retryAfterMs: Number.isFinite(retryAfter) ? retryAfter * 1000 : undefined }; }
+    if (!response.ok) { const retryAfter = Number(response.headers.get("retry-after")); throw { status: response.status, retryAfterMs: Number.isFinite(retryAfter) ? retryAfter * 1000 : undefined, operation: operationFor(path, upload) }; }
     return response;
   }
   async list(parentId: string): Promise<DriveFile[]> { const response = await this.request(`files?q=${encodeURIComponent(`'${parentId}' in parents and trashed = false`)}&fields=files(id,name,parents,mimeType)`); const body = await response.json() as { files?: Array<{ id: string; name: string; parents?: string[]; mimeType?: string }> }; return Promise.all((body.files ?? []).filter((file) => file.mimeType === "application/json").map(async (file) => { const json = await (await this.request(`files/${encodeURIComponent(file.id)}?alt=media`)).json(); return { id: file.id, name: file.name, parentId: file.parents?.[0] ?? "", json }; })); }
@@ -75,7 +82,7 @@ function sameKeys(left: string[], right: string[]): boolean { return left.length
 function problem(error: unknown): SyncOutcome {
   const status = isRecord(error) && typeof error.status === "number" ? error.status : undefined;
   const retryAfterMs = isRecord(error) && typeof error.retryAfterMs === "number" ? Math.min(Math.max(error.retryAfterMs, 0), 3_600_000) : undefined;
-  if (status !== undefined && status >= 400 && status < 500) console.warn("Google Drive request rejected", { status });
+  if (status !== undefined && status >= 400 && status < 500) console.warn("Google Drive request rejected", { status, operation: isRecord(error) && typeof error.operation === "string" ? error.operation : undefined });
   if (isRecord(error) && error.configuration === true) return { kind: "retryable", code: "drive_configuration_unavailable" };
   if (status === 429 || (status !== undefined && status >= 500 && status <= 599) || error instanceof TypeError) return { kind: "retryable", code: status === 429 ? "drive_rate_limited" : "drive_unavailable", retryAfterMs };
   return { kind: "permanent", code: status && status >= 400 && status < 500 ? "drive_request_rejected" : "drive_invalid_data" };
