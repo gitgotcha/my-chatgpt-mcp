@@ -59,7 +59,7 @@ export class GoogleDriveCapability implements DriveCapability {
     if (hasServiceEmail && hasServiceKey) return this.serviceCredential().token();
     if (this.env.GOOGLE_DRIVE_ACCESS_TOKEN) return this.env.GOOGLE_DRIVE_ACCESS_TOKEN;
     if (this.cached && this.cached.expiresAt > this.now() + 60_000) return this.cached.token;
-    if (!this.env.GOOGLE_CLIENT_ID || !this.env.GOOGLE_CLIENT_SECRET || !this.env.GOOGLE_REFRESH_TOKEN) throw { status: 503 };
+    if (!this.env.GOOGLE_CLIENT_ID || !this.env.GOOGLE_CLIENT_SECRET || !this.env.GOOGLE_REFRESH_TOKEN) throw { status: 503, configuration: true };
     const body = new URLSearchParams({ client_id: this.env.GOOGLE_CLIENT_ID, client_secret: this.env.GOOGLE_CLIENT_SECRET, refresh_token: this.env.GOOGLE_REFRESH_TOKEN, grant_type: "refresh_token" });
     const response = await this.fetchLike("https://oauth2.googleapis.com/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
     if (!response.ok) throw { status: response.status === 429 ? 429 : response.status >= 500 ? response.status : 401 };
