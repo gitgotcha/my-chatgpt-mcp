@@ -24,7 +24,7 @@ export class GoogleDriveCapability implements DriveCapability {
     if (!this.env.GOOGLE_CLIENT_ID || !this.env.GOOGLE_CLIENT_SECRET || !this.env.GOOGLE_REFRESH_TOKEN) throw { status: 503, configuration: true };
     const body = new URLSearchParams({ client_id: this.env.GOOGLE_CLIENT_ID, client_secret: this.env.GOOGLE_CLIENT_SECRET, refresh_token: this.env.GOOGLE_REFRESH_TOKEN, grant_type: "refresh_token" });
     const response = await this.fetchLike("https://oauth2.googleapis.com/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
-    if (!response.ok) throw { status: response.status === 429 ? 429 : 401 };
+    if (!response.ok) throw { status: response.status === 429 ? 429 : response.status >= 500 ? response.status : 401 };
     const value = await response.json() as { access_token?: unknown; expires_in?: unknown }; if (typeof value.access_token !== "string") throw { status: 503 };
     this.cached = { token: value.access_token, expiresAt: this.now() + (typeof value.expires_in === "number" ? value.expires_in : 300) * 1000 };
     return this.cached.token;
@@ -65,7 +65,8 @@ export class DriveDestinationAdapter implements DestinationAdapter {
 
   async sync(event: SyncEvent): Promise<SyncOutcome> {
     try {
-      if (event.destination !== "drive" || !event.userId || !this.eventsParentId || !this.snapshotsParentId) return { kind: "permanent", code: "invalid_drive_identity" };
+      if (!this.eventsParentId || !this.snapshotsParentId) return { kind: "retryable", code: "drive_configuration_unavailable" };
+      if (event.destination !== "drive" || !event.userId) return { kind: "permanent", code: "invalid_drive_identity" };
       const existingEvents = await this.drive.list(this.eventsParentId);
       const known = new Map<string, SyncEvent>();
       for (const file of existingEvents) if (file.parentId === this.eventsParentId && validEvent(file.json, event.userId)) known.set(file.json.eventKey, file.json.event);
