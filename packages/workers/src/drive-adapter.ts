@@ -22,6 +22,10 @@ type DriveAuthEnvironment = GoogleServiceAccountEnvironment & {
   GOOGLE_REFRESH_TOKEN?: string;
 };
 
+function callFetch(fetchLike: typeof fetch, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  return fetchLike(input, init);
+}
+
 /** Production-shaped REST boundary; it remains inert until OAuth and folder bindings are configured. */
 export class GoogleDriveCapability implements DriveCapability {
   private cached?: { token: string; expiresAt: number };
@@ -46,7 +50,7 @@ export class GoogleDriveCapability implements DriveCapability {
     return this.cached.token;
   }
   private async request(path: string, init?: RequestInit, upload = false): Promise<Response> {
-    const response = await this.fetchLike(`${upload ? "https://www.googleapis.com/upload/drive/v3/" : "https://www.googleapis.com/drive/v3/"}${path}`, { ...init, headers: { authorization: `Bearer ${await this.token()}`, ...(init?.headers ?? {}) } });
+    const response = await callFetch(this.fetchLike, `${upload ? "https://www.googleapis.com/upload/drive/v3/" : "https://www.googleapis.com/drive/v3/"}${path}`, { ...init, headers: { authorization: `Bearer ${await this.token()}`, ...(init?.headers ?? {}) } });
     if (!response.ok) { const retryAfter = Number(response.headers.get("retry-after")); throw { status: response.status, retryAfterMs: Number.isFinite(retryAfter) ? retryAfter * 1000 : undefined }; }
     return response;
   }
@@ -71,8 +75,6 @@ function sameKeys(left: string[], right: string[]): boolean { return left.length
 function problem(error: unknown): SyncOutcome {
   const status = isRecord(error) && typeof error.status === "number" ? error.status : undefined;
   const retryAfterMs = isRecord(error) && typeof error.retryAfterMs === "number" ? Math.min(Math.max(error.retryAfterMs, 0), 3_600_000) : undefined;
-  // Operational trace only: it intentionally excludes response bodies, URLs, and credentials.
-  console.warn("Google Drive sync request failed", { status: status ?? "network", configuration: isRecord(error) && error.configuration === true, phase: isRecord(error) && typeof error.phase === "string" ? error.phase : undefined });
   if (isRecord(error) && error.configuration === true) return { kind: "retryable", code: "drive_configuration_unavailable" };
   if (status === 429 || (status !== undefined && status >= 500 && status <= 599) || error instanceof TypeError) return { kind: "retryable", code: status === 429 ? "drive_rate_limited" : "drive_unavailable", retryAfterMs };
   return { kind: "permanent", code: status && status >= 400 && status < 500 ? "drive_request_rejected" : "drive_invalid_data" };

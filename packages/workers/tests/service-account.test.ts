@@ -59,6 +59,20 @@ describe("GoogleServiceAccountCredential", () => {
     await expect(credential.token()).resolves.toBe("service-token");
   });
 
+  it("calls a platform fetch function without rebinding its this context", async () => {
+    const key = await testPrivateKeyPem();
+    const fetchMock = async function (this: unknown): Promise<Response> {
+      expect(this).toBeUndefined();
+      return new Response(JSON.stringify({ access_token: "service-token", expires_in: 3600 }));
+    };
+    const credential = new GoogleServiceAccountCredential(
+      { GOOGLE_SERVICE_ACCOUNT_EMAIL: "sync@test.iam.gserviceaccount.com", GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: key },
+      fetchMock as typeof fetch,
+    );
+
+    await expect(credential.token()).resolves.toBe("service-token");
+  });
+
   it("rejects incomplete service-account configuration without making a token request", async () => {
     let requests = 0;
     const fetchMock = (async () => { requests += 1; throw new Error("must not request Google"); }) as typeof fetch;
