@@ -108,3 +108,41 @@ The first `pnpm install` skipped `better-sqlite3`'s native build and tests could
 - Green: `createOrGet` derives `isNew` solely from D1 `meta.changes === 1`; ingress tests prove only one of two interleaved duplicates schedules background dispatch.
 - The durable dispatch claim now changes state from `dispatch_pending` to `dispatching` before QStash is called. If a valid acknowledgement cannot be committed to `broker_queued`, its message id is retained with `qstash_ack_persist_failed` when possible; if even that write fails, the durable `dispatching` state remains the no-republish fence. Future Task 6 reconciliation must inspect `dispatching` records rather than re-dispatch them.
 - Verification: focused Worker tests passed 14/14; full suite passed 35/35; `pnpm typecheck` and `git diff --check` passed.
+# Task 5 — signed Drive synchronization and snapshot recovery
+
+- Red evidence: the first focused test execution exposed a malformed test assertion (suite transform failure); after fixing the harness, the same focused test exposed that signature verification imported an HMAC key with only `verify` usage while the constant-time implementation computes the MAC itself. Both failures were corrected before the green run.
+- Green evidence: `pnpm --filter @reliable-drive-sync/workers test -- sync.test.ts drive-adapter.test.ts` passed (2 files, 7 tests); `pnpm test` passed (8 files, 42 tests); `pnpm typecheck` passed.
+- Implemented `packages/workers/src/sync.ts`: raw-body HS256 JWT verification with audience, expiry/not-before, algorithm pinning, current/next key rotation, task-substitution validation, lease-guarded state transitions, and QStash response mapping.
+- Implemented `packages/workers/src/drive-adapter.ts`: extensible destination contract, immutable event verification, complete-snapshot selection/rebuild, readback verification, and retryable/permanent classification.
+- Extended `db.ts` and `index.ts` with lease-safe sync repository operations and the `/v1/sync` route (adapter injection only).
+- Added `drive-adapter.test.ts` and `sync.test.ts` for duplicate/recovery, snapshot failure, invalid/tampered/expired signatures, substitution defense, success, and 429 mapping.
+- Commit: `97e9601 feat: sync immutable Drive events and snapshots`.
+- No Drive OAuth/HTTP request, QStash request, Cloudflare request, deployment, secret, or refresh token was used. A production Google Drive HTTP capability remains deliberately unconfigured: it must be added after dedicated OAuth credentials and a Drive test folder exist, behind the already-defined `DriveCapability` interface.
+
+## Task 5 review hardening
+
+- Added CAS-result checking to every sync completion/failure transition. Only an already durable `synced` duplicate receives 204; a lost lease or any other state uncertainty returns 503 for broker retry.
+- Sync claims now only accept `broker_queued`, preserving the Dispatcher acknowledgement fence; `dispatch_pending` cannot be delivered directly.
+- Permanent outcomes now create/idempotently retain an open `sync_failure_notices` record before a 489 acknowledgement, and return 503 if either durable step cannot be confirmed.
+- Snapshot acceptance now requires a valid event aggregate whose event keys exactly match the complete valid immutable event set. Added corrupt/partial/newest-complete and snapshot-readback tests.
+- Added current/next rotation, nbf, lost lease, dispatch fence, durable permanent notice, and duplicate-safe coverage.
+- Verification: focused 2 files/12 tests, full 8 files/47 tests, and typecheck all pass. Follow-up commit: `ebcd605 fix: harden signed sync recovery`.
+
+## Task 5 second review completion
+
+- Default Worker construction now injects a production-shaped `GoogleDriveCapability` and `DriveDestinationAdapter`. It has no network side effect until the sync route is called; missing OAuth/folder configuration classifies through the Drive adapter as a permanent configuration/authorization failure rather than a missing-adapter 503.
+- Durable `needs_attention` duplicate delivery returns QStash's non-retryable 489 header, while only `synced` returns 204.
+- Snapshot validation now canonical-compares every aggregate event against its immutable event body, rejecting payload alteration even when identity and eventKey match.
+- Security tests now actually exercise HS algorithm mismatch, audience mismatch, valid current and next signing keys, raw-body tampering, missing, expiration, and nbf. Duplicate permanent delivery uses a valid signature.
+- Verification: focused 2 files/13 tests, full 8 files/48 tests, and typecheck pass. Commit: `57eaad7 fix: complete sync worker safety checks`.
+
+# Task 6 — reconciliation, failure callbacks, and notices
+
+- Red evidence: the new reconciler suite first failed because `src/reconciler.ts` did not exist. MCP tests then specified that notice lookup runs only after accepted Ingress persistence and must not reverse acceptance.
+- Green evidence: focused reconciler (2 tests), Drive cache (9 tests), and MCP notice/submit (11 tests) suites pass. Final full verification passes 10 files / 58 tests and `pnpm typecheck` passes.
+- Added a bounded reconciler: only `dispatch_pending` rows are dispatched. Hourly and six-hour paths deliberately do not mutate broker/sync/acknowledged-uncertain fences until a separately verified broker/DLQ reconciliation adapter exists.
+- Added signed QStash terminal-failure callback handling on `/v1/qstash/failure`; raw signature is validated before parsing its body, then task identity is checked before idempotently opening a scoped failure notice and setting `needs_attention`.
+- Notice GET now atomically consumes only the requesting user's open notices. MCP reads it only after a successful accepted submit and returns `[]` if the advisory lookup fails.
+- Added module/isolate-local Drive adapter cache keyed by every credential and parent-folder identity; identical configuration reuses the capability and differing configuration does not.
+- Public operator replay remains intentionally disabled because no authenticated operator remediation workflow exists yet; any future replay must be an explicit internal durable transition from `needs_attention`, never an automatic Cron action.
+- Cron entries are configuration-ready only. No Cloudflare/QStash/Google call, deployment, credential, or secret was used.

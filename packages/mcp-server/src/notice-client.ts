@@ -4,11 +4,12 @@ export type SyncNotice = {
 };
 
 export interface NoticeClient {
-  listNotices(): Promise<SyncNotice[]>;
+  /** The Ingress GET endpoint consumes acknowledged notices, so each is shown once. */
+  listNotices(userId: string): Promise<SyncNotice[]>;
 }
 
 export class DisabledNoticeClient implements NoticeClient {
-  async listNotices(): Promise<SyncNotice[]> {
+  async listNotices(_userId: string): Promise<SyncNotice[]> {
     return [];
   }
 }

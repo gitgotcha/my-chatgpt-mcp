@@ -8,3 +8,6 @@ compatibility_date = "2026-08-12"
 binding = "DB"
 database_name = "REPLACE_AFTER_CLOUDFLARE_PROVISIONING"
 database_id = "REPLACE_AFTER_CLOUDFLARE_PROVISIONING"
+
+[triggers]
+crons = ["*/5 * * * *", "0 * * * *", "0 */6 * * *"]

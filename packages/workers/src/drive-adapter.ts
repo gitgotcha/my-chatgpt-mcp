@@ -95,3 +95,12 @@ export class DriveDestinationAdapter implements DestinationAdapter {
 export function createProductionDriveAdapter(env: { GOOGLE_DRIVE_ACCESS_TOKEN?: string; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string; GOOGLE_REFRESH_TOKEN?: string; DRIVE_EVENTS_PARENT_ID?: string; DRIVE_SNAPSHOTS_PARENT_ID?: string }): DestinationAdapter {
   return new DriveDestinationAdapter(new GoogleDriveCapability(env), env.DRIVE_EVENTS_PARENT_ID ?? "", env.DRIVE_SNAPSHOTS_PARENT_ID ?? "");
 }
+
+const productionAdapterCache = new Map<string, DestinationAdapter>();
+/** Isolate-local only; the key includes every credential/folder identity to prevent cross-env reuse. */
+export function cachedProductionDriveAdapter(env: { GOOGLE_DRIVE_ACCESS_TOKEN?: string; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string; GOOGLE_REFRESH_TOKEN?: string; DRIVE_EVENTS_PARENT_ID?: string; DRIVE_SNAPSHOTS_PARENT_ID?: string }): DestinationAdapter {
+  const key = [env.GOOGLE_DRIVE_ACCESS_TOKEN, env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET, env.GOOGLE_REFRESH_TOKEN, env.DRIVE_EVENTS_PARENT_ID, env.DRIVE_SNAPSHOTS_PARENT_ID].map((value) => value ?? "").join("\u0000");
+  let adapter = productionAdapterCache.get(key);
+  if (!adapter) { adapter = createProductionDriveAdapter(env); productionAdapterCache.set(key, adapter); }
+  return adapter;
+}

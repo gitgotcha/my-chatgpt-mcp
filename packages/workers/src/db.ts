@@ -28,6 +28,7 @@ export type OpenNotice = {
 export interface JobRepository {
   createOrGet(event: SyncEvent): Promise<SyncJob>;
   listOpenNotices(userId: string): Promise<OpenNotice[]>;
+  consumeOpenNotices(userId: string, now: Date): Promise<OpenNotice[]>;
 }
 
 export interface DispatchRepository {
@@ -47,6 +48,11 @@ export interface SyncRepository {
   releaseSync(jobId: string, leaseOwner: string, errorCode: string, now: Date): Promise<boolean>;
   markNeedsAttention(jobId: string, leaseOwner: string, errorCode: string, now: Date): Promise<boolean>;
   openSyncFailureNotice(userId: string, category: string, message: string, now: Date): Promise<boolean>;
+}
+
+/** Recovery transitions are intentionally separate from the normal lease owner path. */
+export interface FailureRepository {
+  markFailureNeedsAttention(jobId: string, errorCode: string, now: Date): Promise<SyncJob | null>;
 }
 
 type D1Statement = {
@@ -81,7 +87,7 @@ function mapDispatchJob(row: DispatchJobRow): DispatchJob {
 }
 
 /** D1 implementation. The unique event_key constraint is the idempotency fence. */
-export class D1JobRepository implements JobRepository, DispatchRepository, SyncRepository {
+export class D1JobRepository implements JobRepository, DispatchRepository, SyncRepository, FailureRepository {
   constructor(private readonly database: D1Database) {}
 
   async createOrGet(event: SyncEvent): Promise<SyncJob> {
@@ -114,6 +120,19 @@ export class D1JobRepository implements JobRepository, DispatchRepository, SyncR
     `).bind(userId) as D1Statement & { all<T>(): Promise<{ results: T[] }> };
     const result = await statement.all<NoticeRow>();
     return result.results.map((row) => ({ id: row.notice_id, userId: row.user_id, category: row.category, message: row.message }));
+  }
+  async consumeOpenNotices(userId: string, now: Date): Promise<OpenNotice[]> {
+    const notices = await this.listOpenNotices(userId);
+    if (notices.length === 0) return notices;
+    const stamp = now.toISOString();
+    await Promise.all(notices.map((notice) => this.database.prepare(`UPDATE sync_failure_notices SET status = 'acknowledged', acknowledged_at = ?, updated_at = ? WHERE notice_id = ? AND user_id = ? AND status = 'open'`).bind(stamp, stamp, notice.id, userId).run()));
+    return notices;
+  }
+
+  async markFailureNeedsAttention(jobId: string, errorCode: string, now: Date): Promise<SyncJob | null> {
+    await this.database.prepare(`UPDATE sync_jobs SET state = 'needs_attention', lease_owner = NULL, lease_until = NULL, last_error_code = ?, updated_at = ? WHERE job_id = ? AND state <> 'synced'`).bind(errorCode, now.toISOString(), jobId).run();
+    const row = await this.database.prepare(`SELECT job_id, event_key, user_id, state FROM sync_jobs WHERE job_id = ? AND state = 'needs_attention'`).bind(jobId).first<JobRow>();
+    return row ? mapJob(row) : null;
   }
 
   async claimForDispatch(jobId: string, leaseOwner: string, now: Date, leaseUntil: Date): Promise<DispatchJob | null> {
@@ -216,7 +235,7 @@ export class D1JobRepository implements JobRepository, DispatchRepository, SyncR
 }
 
 /** Test-only in-memory adapter; production code uses D1JobRepository. */
-export class InMemoryJobRepository implements JobRepository, DispatchRepository, SyncRepository {
+export class InMemoryJobRepository implements JobRepository, DispatchRepository, SyncRepository, FailureRepository {
   private readonly jobs = new Map<string, SyncJob>();
   private readonly notices: OpenNotice[] = [];
   private readonly dispatchJobs = new Map<string, DispatchJob>();
@@ -240,6 +259,11 @@ export class InMemoryJobRepository implements JobRepository, DispatchRepository,
 
   async listOpenNotices(userId: string): Promise<OpenNotice[]> {
     return this.notices.filter((notice) => notice.userId === userId);
+  }
+  async consumeOpenNotices(userId: string, _now: Date): Promise<OpenNotice[]> {
+    const notices = await this.listOpenNotices(userId);
+    for (const notice of notices) { const index = this.notices.indexOf(notice); if (index >= 0) this.notices.splice(index, 1); }
+    return notices;
   }
 
   addOpenNotice(notice: OpenNotice): void {
@@ -309,4 +333,5 @@ export class InMemoryJobRepository implements JobRepository, DispatchRepository,
   async releaseSync(jobId: string, leaseOwner: string, errorCode: string): Promise<boolean> { const job = this.dispatchJobs.get(jobId); if (!job || job.state !== "syncing" || job.leaseOwner !== leaseOwner) return false; job.state = "broker_queued"; job.leaseOwner = null; job.leaseUntil = null; job.lastErrorCode = errorCode; return true; }
   async markNeedsAttention(jobId: string, leaseOwner: string, errorCode: string): Promise<boolean> { const job = this.dispatchJobs.get(jobId); if (!job || job.state !== "syncing" || job.leaseOwner !== leaseOwner) return false; job.state = "needs_attention"; job.leaseOwner = null; job.leaseUntil = null; job.lastErrorCode = errorCode; return true; }
   async openSyncFailureNotice(userId: string, category: string, message: string): Promise<boolean> { if (!this.notices.some((notice) => notice.userId === userId && notice.category === category)) this.notices.push({ id: crypto.randomUUID(), userId, category, message }); return true; }
+  async markFailureNeedsAttention(jobId: string, errorCode: string): Promise<SyncJob | null> { const job = this.dispatchJobs.get(jobId); if (!job || job.state === "synced") return null; job.state = "needs_attention"; job.leaseOwner = null; job.leaseUntil = null; job.lastErrorCode = errorCode; return { jobId: job.jobId, eventKey: job.eventKey, userId: job.userId, state: job.state }; }
 }

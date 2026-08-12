@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DriveDestinationAdapter, GoogleDriveCapability, type DriveCapability, type DriveFile } from "../src/drive-adapter.js";
+import { cachedProductionDriveAdapter, DriveDestinationAdapter, GoogleDriveCapability, type DriveCapability, type DriveFile } from "../src/drive-adapter.js";
 import type { SyncEvent } from "@reliable-drive-sync/protocol/event";
 
 const event: SyncEvent = { schemaVersion: "1", eventId: "e1", eventKey: "u1:lesson:1", type: "lesson", userId: "u1", sourceSkill: "algorithm", destination: "drive", createdAt: "2026-01-01T00:00:00.000Z", payload: { title: "two sum" } };
@@ -36,4 +36,10 @@ describe("DriveDestinationAdapter", () => {
     const result = await new DriveDestinationAdapter(drive, "events", "snapshots").sync(event);
     expect(result).toMatchObject({ kind: "success", syncedAt: "2026-01-04" }); expect(drive.creates).toBe(1);
   });
+});
+
+it("reuses the isolate-local capability only for the same Drive configuration", () => {
+  const same = { GOOGLE_CLIENT_ID: "client-a", GOOGLE_CLIENT_SECRET: "secret-a", GOOGLE_REFRESH_TOKEN: "refresh-a", DRIVE_EVENTS_PARENT_ID: "events", DRIVE_SNAPSHOTS_PARENT_ID: "snapshots" };
+  expect(cachedProductionDriveAdapter(same)).toBe(cachedProductionDriveAdapter({ ...same }));
+  expect(cachedProductionDriveAdapter(same)).not.toBe(cachedProductionDriveAdapter({ ...same, GOOGLE_REFRESH_TOKEN: "refresh-b" }));
 });

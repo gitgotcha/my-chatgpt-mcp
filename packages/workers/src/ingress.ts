@@ -60,7 +60,7 @@ export function createIngressHandler(env: WorkerEnvironment, repository: JobRepo
       if (denied) return denied;
       const userId = url.searchParams.get("userId");
       if (!userId) return json({ error: "userId is required" }, 400);
-      const notices = await repository.listOpenNotices(userId);
+      const notices = await repository.consumeOpenNotices(userId, new Date());
       return json({ notices: notices.map(({ id, category, message }) => ({ id, category, message })) }, 200);
     }
 

@@ -30,6 +30,25 @@ describe("SubmitEventService", () => {
     expect(outbox.listPending()).toHaveLength(0);
   });
 
+  test("reads notices only after cloud acceptance and degrades notice errors safely", async () => {
+    const outbox = new LocalOutbox(":memory:");
+    let reads = 0;
+    const service = new SubmitEventService(outbox, {
+      send: async () => ({ status: 202, body: { jobId: "job-123" } })
+    }, { listNotices: async (userId) => { reads += 1; expect(userId).toBe("qiao"); throw new Error("read unavailable"); } });
+
+    await expect(service.submit(baseEvent)).resolves.toMatchObject({ accepted: true, notices: [] });
+    expect(reads).toBe(1);
+  });
+
+  test("does not read notices when ingress did not accept the event", async () => {
+    const outbox = new LocalOutbox(":memory:");
+    let reads = 0;
+    const service = new SubmitEventService(outbox, { send: async () => ({ status: 503, body: {} }) }, { listNotices: async () => { reads += 1; return []; } });
+    await service.submit(baseEvent);
+    expect(reads).toBe(0);
+  });
+
   test("keeps an event pending after a transport timeout", async () => {
     const outbox = new LocalOutbox(":memory:");
     const service = new SubmitEventService(outbox, {

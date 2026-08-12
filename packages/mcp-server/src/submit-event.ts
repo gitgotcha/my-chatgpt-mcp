@@ -51,12 +51,19 @@ export class SubmitEventService {
     }
 
     const accepted = await this.deliverByKey(event.eventKey, this.deadline.createBudget());
+    // A notice is advisory only: failure to read it can never revoke durable ingress acceptance.
+    const notices = accepted ? await this.readNotices(event.userId) : [];
     return {
       accepted,
       eventKey: event.eventKey,
       deliveryState: accepted ? "cloud_accepted" : "pending",
-      notices: await this.noticeClient.listNotices()
+      notices
     };
+  }
+
+  private async readNotices(userId: string): Promise<SyncNotice[]> {
+    try { return await this.noticeClient.listNotices(userId); }
+    catch { return []; }
   }
 
   async flushPending(limit = this.maxFlushEvents): Promise<void> {

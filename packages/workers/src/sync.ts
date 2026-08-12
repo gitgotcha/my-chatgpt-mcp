@@ -47,3 +47,25 @@ export function createSyncHandler(env: SyncEnvironment, repository: SyncReposito
     return sealed ? response(489, { "Upstash-NonRetryable-Error": "true" }) : response(503);
   };
 }
+
+type FailureCallback = { body: string };
+function failureCallback(value: unknown): value is FailureCallback { return plain(value) && typeof value.body === "string"; }
+
+/** Signed terminal QStash callback. It never parses the callback job before signature verification. */
+export function createFailureCallbackHandler(env: SyncEnvironment & { QSTASH_FAILURE_CALLBACK_URL?: string }, repository: SyncRepository & import("./db.js").FailureRepository, clock: () => Date = () => new Date()) {
+  return async (request: Request): Promise<Response> => {
+    const raw = await request.text();
+    const valid = await verifyQStashSignature(request.headers.get("Upstash-Signature"), raw, env.QSTASH_FAILURE_CALLBACK_URL, [env.QSTASH_CURRENT_SIGNING_KEY ?? "", env.QSTASH_NEXT_SIGNING_KEY ?? ""]);
+    if (!valid) return response(489, { "Upstash-NonRetryable-Error": "true" });
+    let callback: unknown; try { callback = JSON.parse(raw); } catch { return response(489, { "Upstash-NonRetryable-Error": "true" }); }
+    if (!failureCallback(callback)) return response(489, { "Upstash-NonRetryable-Error": "true" });
+    let message: unknown; try { message = JSON.parse(callback.body); } catch { return response(489, { "Upstash-NonRetryable-Error": "true" }); }
+    if (!envelope(message)) return response(489, { "Upstash-NonRetryable-Error": "true" });
+    const event = await repository.loadEvent(message.jobId);
+    if (!event || event.eventKey !== message.eventKey || event.userId !== message.userId) return response(489, { "Upstash-NonRetryable-Error": "true" });
+    const failed = await repository.markFailureNeedsAttention(message.jobId, "qstash_delivery_exhausted", clock());
+    if (!failed) return response(489, { "Upstash-NonRetryable-Error": "true" });
+    const noticed = await repository.openSyncFailureNotice(event.userId, "qstash:delivery_exhausted", "Google Drive synchronization needs attention.", clock());
+    return noticed ? response(489, { "Upstash-NonRetryable-Error": "true" }) : response(503);
+  };
+}
