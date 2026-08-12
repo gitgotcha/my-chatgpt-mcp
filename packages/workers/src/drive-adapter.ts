@@ -75,6 +75,7 @@ function sameKeys(left: string[], right: string[]): boolean { return left.length
 function problem(error: unknown): SyncOutcome {
   const status = isRecord(error) && typeof error.status === "number" ? error.status : undefined;
   const retryAfterMs = isRecord(error) && typeof error.retryAfterMs === "number" ? Math.min(Math.max(error.retryAfterMs, 0), 3_600_000) : undefined;
+  if (status !== undefined && status >= 400 && status < 500) console.warn("Google Drive request rejected", { status });
   if (isRecord(error) && error.configuration === true) return { kind: "retryable", code: "drive_configuration_unavailable" };
   if (status === 429 || (status !== undefined && status >= 500 && status <= 599) || error instanceof TypeError) return { kind: "retryable", code: status === 429 ? "drive_rate_limited" : "drive_unavailable", retryAfterMs };
   return { kind: "permanent", code: status && status >= 400 && status < 500 ? "drive_request_rejected" : "drive_invalid_data" };
