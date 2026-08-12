@@ -1,0 +1,19 @@
+{
+  "name": "reliable-drive-sync",
+  "version": "0.1.0",
+  "description": "Reliable local event protocol for Drive sync requests.",
+  "author": {
+    "name": "Reliable Drive Sync"
+  },
+  "license": "MIT",
+  "keywords": ["drive", "sync", "protocol"],
+  "interface": {
+    "displayName": "Reliable Drive Sync",
+    "shortDescription": "Validate local Drive sync events.",
+    "longDescription": "Provides a safe, local protocol foundation for reliable Google Drive sync requests.",
+    "developerName": "Reliable Drive Sync",
+    "category": "Productivity",
+    "capabilities": ["Read"],
+    "defaultPrompt": ["Validate a local Drive sync event."]
+  }
+}
