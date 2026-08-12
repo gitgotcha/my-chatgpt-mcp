@@ -173,6 +173,7 @@ describe("QStash HTTP boundary", () => {
       job: { jobId: "job-1", eventKey: "qiaobingyuan:algorithm:evt-1", userId: "qiaobingyuan" }
     });
 
+    expect(request?.url).toBe("https://qstash.upstash.io/v2/publish/https://sync.example/v1/sync");
     expect(await request?.json()).toEqual({ jobId: "job-1", eventKey: "qiaobingyuan:algorithm:evt-1", userId: "qiaobingyuan" });
     expect(request?.headers.get("authorization")).toBe("Bearer secret-token");
     expect(request?.headers.get("upstash-failure-callback")).toBe("https://ingress.example/v1/qstash/failure");

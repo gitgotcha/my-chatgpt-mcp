@@ -24,7 +24,7 @@ type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respo
 export function createQStashPublisher(token: string, fetchLike: FetchLike = fetch): QStashPublisher {
   return {
     async publish(request: QStashPublishRequest): Promise<unknown> {
-      const response = await fetchLike(`https://qstash.upstash.io/v2/publish/${encodeURIComponent(request.targetUrl)}`, {
+      const response = await fetchLike(`https://qstash.upstash.io/v2/publish/${request.targetUrl}`, {
         method: "POST",
         headers: {
           authorization: `Bearer ${token}`,
