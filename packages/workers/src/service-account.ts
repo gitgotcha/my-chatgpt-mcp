@@ -3,7 +3,7 @@ export type GoogleServiceAccountEnvironment = {
   GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY?: string;
 };
 
-type CredentialFailure = { status: number; configuration?: true };
+type CredentialFailure = { status: number; configuration?: true; phase?: "service_account_sign" | "oauth_token_request" };
 
 function failure(status: number, configuration = false): CredentialFailure {
   return configuration ? { status, configuration: true } : { status };
@@ -71,13 +71,23 @@ export class GoogleServiceAccountCredential {
     } catch {
       throw failure(401);
     }
-    const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(input));
+    let signature: ArrayBuffer;
+    try {
+      signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(input));
+    } catch {
+      throw { status: 503, phase: "service_account_sign" } satisfies CredentialFailure;
+    }
     const assertion = `${input}.${base64Url(new Uint8Array(signature))}`;
-    const response = await this.fetchLike("https://oauth2.googleapis.com/token", {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion }),
-    });
+    let response: Response;
+    try {
+      response = await this.fetchLike("https://oauth2.googleapis.com/token", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion }),
+      });
+    } catch {
+      throw { status: 503, phase: "oauth_token_request" } satisfies CredentialFailure;
+    }
     if (!response.ok) throw failure(response.status);
     let value: { access_token?: unknown; expires_in?: unknown };
     try {

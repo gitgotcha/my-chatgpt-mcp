@@ -72,7 +72,7 @@ function problem(error: unknown): SyncOutcome {
   const status = isRecord(error) && typeof error.status === "number" ? error.status : undefined;
   const retryAfterMs = isRecord(error) && typeof error.retryAfterMs === "number" ? Math.min(Math.max(error.retryAfterMs, 0), 3_600_000) : undefined;
   // Operational trace only: it intentionally excludes response bodies, URLs, and credentials.
-  console.warn("Google Drive sync request failed", { status: status ?? "network", configuration: isRecord(error) && error.configuration === true });
+  console.warn("Google Drive sync request failed", { status: status ?? "network", configuration: isRecord(error) && error.configuration === true, phase: isRecord(error) && typeof error.phase === "string" ? error.phase : undefined });
   if (isRecord(error) && error.configuration === true) return { kind: "retryable", code: "drive_configuration_unavailable" };
   if (status === 429 || (status !== undefined && status >= 500 && status <= 599) || error instanceof TypeError) return { kind: "retryable", code: status === 429 ? "drive_rate_limited" : "drive_unavailable", retryAfterMs };
   return { kind: "permanent", code: status && status >= 400 && status < 500 ? "drive_request_rejected" : "drive_invalid_data" };
