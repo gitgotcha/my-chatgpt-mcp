@@ -1,6 +1,6 @@
 import type { SyncEvent } from "@reliable-drive-sync/protocol/event";
 
-export type JobState = "dispatch_pending" | "broker_queued" | "syncing" | "synced" | "needs_attention";
+export type JobState = "dispatch_pending" | "dispatching" | "broker_queued" | "syncing" | "synced" | "needs_attention";
 
 export type SyncJob = {
   jobId: string;
@@ -32,14 +32,15 @@ export interface JobRepository {
 
 export interface DispatchRepository {
   claimForDispatch(jobId: string, leaseOwner: string, now: Date, leaseUntil: Date): Promise<DispatchJob | null>;
-  markBrokerQueued(jobId: string, leaseOwner: string, messageId: string, now: Date): Promise<void>;
+  markBrokerQueued(jobId: string, leaseOwner: string, messageId: string, now: Date): Promise<boolean>;
+  markAcknowledgedUncertain(jobId: string, leaseOwner: string, messageId: string, now: Date): Promise<boolean>;
   recordDispatchFailure(jobId: string, leaseOwner: string, errorCode: string, now: Date): Promise<void>;
   listDispatchPending(limit: number): Promise<DispatchJob[]>;
 }
 
 type D1Statement = {
   bind(...values: unknown[]): D1Statement;
-  run(): Promise<unknown>;
+  run(): Promise<{ meta?: { changes?: number } }>;
   first<T = Record<string, unknown>>(): Promise<T | null>;
 };
 
@@ -78,7 +79,7 @@ export class D1JobRepository implements JobRepository, DispatchRepository {
 
     const now = new Date().toISOString();
     const candidateJobId = crypto.randomUUID();
-    await this.database.prepare(`
+    const inserted = await this.database.prepare(`
       INSERT OR IGNORE INTO sync_jobs (
         job_id, event_key, event_id, user_id, event_type, source_skill, destination,
         created_at_source, payload_json, state, created_at, updated_at
@@ -90,7 +91,7 @@ export class D1JobRepository implements JobRepository, DispatchRepository {
 
     const persisted = await this.findByEventKey(event.eventKey);
     if (!persisted) throw new Error("Sync job was not persisted");
-    return { ...persisted, isNew: true };
+    return { ...persisted, isNew: inserted.meta?.changes === 1 };
   }
 
   async listOpenNotices(userId: string): Promise<OpenNotice[]> {
@@ -107,25 +108,34 @@ export class D1JobRepository implements JobRepository, DispatchRepository {
   async claimForDispatch(jobId: string, leaseOwner: string, now: Date, leaseUntil: Date): Promise<DispatchJob | null> {
     await this.database.prepare(`
       UPDATE sync_jobs
-      SET lease_owner = ?, lease_until = ?, updated_at = ?
+      SET state = 'dispatching', lease_owner = ?, lease_until = ?, updated_at = ?
       WHERE job_id = ? AND state = 'dispatch_pending'
-        AND (lease_until IS NULL OR lease_until < ?)
-    `).bind(leaseOwner, leaseUntil.toISOString(), now.toISOString(), jobId, now.toISOString()).run();
+    `).bind(leaseOwner, leaseUntil.toISOString(), now.toISOString(), jobId).run();
     const row = await this.database.prepare(`
       SELECT job_id, event_key, user_id, state, dispatch_attempts, last_error_code,
              broker_message_id, lease_owner, lease_until
-      FROM sync_jobs WHERE job_id = ? AND lease_owner = ? AND state = 'dispatch_pending'
+      FROM sync_jobs WHERE job_id = ? AND lease_owner = ? AND state = 'dispatching'
     `).bind(jobId, leaseOwner).first<DispatchJobRow>();
     return row ? mapDispatchJob(row) : null;
   }
 
-  async markBrokerQueued(jobId: string, leaseOwner: string, messageId: string, now: Date): Promise<void> {
-    await this.database.prepare(`
+  async markBrokerQueued(jobId: string, leaseOwner: string, messageId: string, now: Date): Promise<boolean> {
+    const result = await this.database.prepare(`
       UPDATE sync_jobs
       SET state = 'broker_queued', broker_message_id = ?, lease_owner = NULL,
           lease_until = NULL, last_error_code = NULL, dispatched_at = ?, updated_at = ?
-      WHERE job_id = ? AND state = 'dispatch_pending' AND lease_owner = ?
+      WHERE job_id = ? AND state = 'dispatching' AND lease_owner = ?
     `).bind(messageId, now.toISOString(), now.toISOString(), jobId, leaseOwner).run();
+    return result.meta?.changes === 1;
+  }
+
+  async markAcknowledgedUncertain(jobId: string, leaseOwner: string, messageId: string, now: Date): Promise<boolean> {
+    const result = await this.database.prepare(`
+      UPDATE sync_jobs
+      SET broker_message_id = ?, last_error_code = 'qstash_ack_persist_failed', updated_at = ?
+      WHERE job_id = ? AND state = 'dispatching' AND lease_owner = ?
+    `).bind(messageId, now.toISOString(), jobId, leaseOwner).run();
+    return result.meta?.changes === 1;
   }
 
   async recordDispatchFailure(jobId: string, leaseOwner: string, errorCode: string, now: Date): Promise<void> {
@@ -133,7 +143,7 @@ export class D1JobRepository implements JobRepository, DispatchRepository {
       UPDATE sync_jobs
       SET dispatch_attempts = dispatch_attempts + 1, last_error_code = ?,
           lease_owner = NULL, lease_until = NULL, updated_at = ?
-      WHERE job_id = ? AND state = 'dispatch_pending' AND lease_owner = ?
+      WHERE job_id = ? AND state = 'dispatching' AND lease_owner = ?
     `).bind(errorCode, now.toISOString(), jobId, leaseOwner).run();
   }
 
@@ -194,27 +204,38 @@ export class InMemoryJobRepository implements JobRepository, DispatchRepository 
 
   async claimForDispatch(jobId: string, leaseOwner: string, now: Date, leaseUntil: Date): Promise<DispatchJob | null> {
     const job = this.dispatchJobs.get(jobId);
-    if (!job || job.state !== "dispatch_pending" || (job.leaseUntil && job.leaseUntil >= now.toISOString())) return null;
+    if (!job || job.state !== "dispatch_pending") return null;
+    job.state = "dispatching";
     job.leaseOwner = leaseOwner;
     job.leaseUntil = leaseUntil.toISOString();
     return { ...job };
   }
 
-  async markBrokerQueued(jobId: string, leaseOwner: string, messageId: string): Promise<void> {
+  async markBrokerQueued(jobId: string, leaseOwner: string, messageId: string): Promise<boolean> {
     const job = this.dispatchJobs.get(jobId);
-    if (!job || job.state !== "dispatch_pending" || job.leaseOwner !== leaseOwner) return;
+    if (!job || job.state !== "dispatching" || job.leaseOwner !== leaseOwner) return false;
     job.state = "broker_queued";
     job.brokerMessageId = messageId;
     job.leaseOwner = null;
     job.leaseUntil = null;
     job.lastErrorCode = null;
+    return true;
+  }
+
+  async markAcknowledgedUncertain(jobId: string, leaseOwner: string, messageId: string): Promise<boolean> {
+    const job = this.dispatchJobs.get(jobId);
+    if (!job || job.state !== "dispatching" || job.leaseOwner !== leaseOwner) return false;
+    job.brokerMessageId = messageId;
+    job.lastErrorCode = "qstash_ack_persist_failed";
+    return true;
   }
 
   async recordDispatchFailure(jobId: string, leaseOwner: string, errorCode: string): Promise<void> {
     const job = this.dispatchJobs.get(jobId);
-    if (!job || job.state !== "dispatch_pending" || job.leaseOwner !== leaseOwner) return;
+    if (!job || job.state !== "dispatching" || job.leaseOwner !== leaseOwner) return;
     job.dispatchAttempts += 1;
     job.lastErrorCode = errorCode;
+    job.state = "dispatch_pending";
     job.leaseOwner = null;
     job.leaseUntil = null;
   }

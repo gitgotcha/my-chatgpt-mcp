@@ -33,19 +33,31 @@ export class Dispatcher {
       return;
     }
 
+    let acknowledgementReceived = false;
+    let messageId: string | null = null;
     try {
       const acknowledgement = await this.publisher.publish({
         targetUrl: this.env.SYNC_WORKER_URL,
         failureCallbackUrl: this.env.QSTASH_FAILURE_CALLBACK_URL,
         job: { jobId: claimed.jobId, eventKey: claimed.eventKey, userId: claimed.userId }
       });
-      const messageId = acknowledgedMessageId(acknowledgement);
+      messageId = acknowledgedMessageId(acknowledgement);
       if (!messageId) {
         await this.repository.recordDispatchFailure(jobId, leaseOwner, "qstash_invalid_ack", this.clock());
         return;
       }
-      await this.repository.markBrokerQueued(jobId, leaseOwner, messageId, this.clock());
+      acknowledgementReceived = true;
+      const persisted = await this.repository.markBrokerQueued(jobId, leaseOwner, messageId, this.clock());
+      if (!persisted) await this.repository.markAcknowledgedUncertain(jobId, leaseOwner, messageId, this.clock());
     } catch {
+      if (acknowledgementReceived && messageId) {
+        try {
+          await this.repository.markAcknowledgedUncertain(jobId, leaseOwner, messageId, this.clock());
+        } catch {
+          // The durable dispatching claim remains the no-republish fence until reconciliation.
+        }
+        return;
+      }
       await this.repository.recordDispatchFailure(jobId, leaseOwner, "qstash_publish_failed", this.clock());
     }
   }

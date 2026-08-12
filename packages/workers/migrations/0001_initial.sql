@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
   updated_at TEXT NOT NULL,
   dispatched_at TEXT,
   completed_at TEXT,
-  CHECK (state IN ('dispatch_pending', 'broker_queued', 'syncing', 'synced', 'needs_attention'))
+  CHECK (state IN ('dispatch_pending', 'dispatching', 'broker_queued', 'syncing', 'synced', 'needs_attention'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_state_created_at

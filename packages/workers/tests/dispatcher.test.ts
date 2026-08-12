@@ -108,6 +108,44 @@ describe("durable QStash dispatcher", () => {
     expect(published).toEqual([]);
     expect(repository.getDispatchJob("job-1")).toMatchObject({ state: "dispatch_pending", dispatchAttempts: 1, lastErrorCode: "qstash_config_missing" });
   });
+
+  test("does not re-publish when acknowledgement persistence reports a lost compare-and-set", async () => {
+    class LostAckRepository extends InMemoryJobRepository {
+      override async markBrokerQueued(): Promise<boolean> { return false; }
+    }
+    const repository = new LostAckRepository(() => "unused");
+    repository.addDispatchJob(job());
+    let publishes = 0;
+    const dispatcher = new Dispatcher(repository, { publish: async () => ({ messageId: `msg-${++publishes}` }) }, {
+      QSTASH_TOKEN: "test-token", SYNC_WORKER_URL: "https://sync.example/v1/sync",
+      QSTASH_FAILURE_CALLBACK_URL: "https://ingress.example/v1/qstash/failure"
+    }, () => now, () => "lease-1");
+
+    await dispatcher.dispatch("job-1");
+    await dispatcher.dispatch("job-1");
+
+    expect(publishes).toBe(1);
+    expect(repository.getDispatchJob("job-1")).toMatchObject({ state: "dispatching", brokerMessageId: "msg-1", lastErrorCode: "qstash_ack_persist_failed" });
+  });
+
+  test("keeps an acknowledged job out of retry when acknowledgement persistence throws", async () => {
+    class ThrowingAckRepository extends InMemoryJobRepository {
+      override async markBrokerQueued(): Promise<boolean> { throw new Error("D1 unavailable"); }
+    }
+    const repository = new ThrowingAckRepository(() => "unused");
+    repository.addDispatchJob(job());
+    let publishes = 0;
+    const dispatcher = new Dispatcher(repository, { publish: async () => ({ messageId: `msg-${++publishes}` }) }, {
+      QSTASH_TOKEN: "test-token", SYNC_WORKER_URL: "https://sync.example/v1/sync",
+      QSTASH_FAILURE_CALLBACK_URL: "https://ingress.example/v1/qstash/failure"
+    }, () => now, () => "lease-1");
+
+    await dispatcher.dispatch("job-1");
+    await dispatcher.dispatch("job-1");
+
+    expect(publishes).toBe(1);
+    expect(repository.getDispatchJob("job-1")?.state).toBe("dispatching");
+  });
 });
 
 describe("QStash HTTP boundary", () => {
@@ -175,6 +213,30 @@ describe("ingress and Cron wiring", () => {
     await handler(request(), context);
 
     expect(dispatched).toBe(1);
+  });
+
+  test("interleaved duplicate ingress schedules only the request that inserted the event", async () => {
+    const repository = new InMemoryJobRepository(() => "job-1");
+    const scheduled: Promise<unknown>[] = [];
+    const handler = createIngressHandler(
+      { INGRESS_SHARED_SECRET: "ingress-secret" }, repository,
+      { dispatch: async () => undefined }
+    );
+    const makeRequest = () => new Request("https://ingress.example/v1/jobs", {
+      method: "POST", headers: { authorization: "Bearer ingress-secret" },
+      body: JSON.stringify({
+        schemaVersion: "1", eventId: "evt-1", eventKey: "qiaobingyuan:algorithm:evt-1",
+        type: "algorithm.completed", userId: "qiaobingyuan", sourceSkill: "algorithm-learning",
+        destination: "drive", createdAt: "2026-08-12T08:00:00.000Z", payload: {}
+      })
+    });
+
+    await Promise.all([
+      handler(makeRequest(), { waitUntil: (work) => scheduled.push(work) }),
+      handler(makeRequest(), { waitUntil: (work) => scheduled.push(work) })
+    ]);
+
+    expect(scheduled).toHaveLength(1);
   });
 
   test("scheduled handler scans only a bounded pending batch", async () => {

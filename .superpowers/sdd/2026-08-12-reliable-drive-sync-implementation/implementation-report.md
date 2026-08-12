@@ -101,3 +101,10 @@ The first `pnpm install` skipped `better-sqlite3`'s native build and tests could
 ## Commit
 
 `feat: dispatch durable jobs through QStash`.
+
+## Task 4 reviewer hardening
+
+- Red: interleaved D1 insert test showed both duplicate requests returned `isNew: true`; acknowledgement CAS/throw tests showed a confirmed QStash message could be released back to `dispatch_pending` and republished.
+- Green: `createOrGet` derives `isNew` solely from D1 `meta.changes === 1`; ingress tests prove only one of two interleaved duplicates schedules background dispatch.
+- The durable dispatch claim now changes state from `dispatch_pending` to `dispatching` before QStash is called. If a valid acknowledgement cannot be committed to `broker_queued`, its message id is retained with `qstash_ack_persist_failed` when possible; if even that write fails, the durable `dispatching` state remains the no-republish fence. Future Task 6 reconciliation must inspect `dispatching` records rather than re-dispatch them.
+- Verification: focused Worker tests passed 14/14; full suite passed 35/35; `pnpm typecheck` and `git diff --check` passed.
