@@ -23,7 +23,7 @@ function validEvent(value: unknown, userId: string): value is ImmutableEvent {
   return isRecord(value) && value.kind === "event" && value.schemaVersion === "1" && value.userId === userId && typeof value.eventKey === "string" && isRecord(value.event) && value.eventKey === value.event.eventKey && value.event.userId === userId;
 }
 function validSnapshot(value: unknown, userId: string, keys: string[]): value is Snapshot {
-  return isRecord(value) && value.kind === "snapshot" && value.schemaVersion === "1" && value.userId === userId && typeof value.generatedAt === "string" && Array.isArray(value.sourceEventKeys) && value.sourceEventKeys.every((key) => typeof key === "string") && sameKeys(value.sourceEventKeys, keys);
+  return isRecord(value) && value.kind === "snapshot" && value.schemaVersion === "1" && value.userId === userId && typeof value.generatedAt === "string" && Array.isArray(value.sourceEventKeys) && value.sourceEventKeys.every((key) => typeof key === "string") && Array.isArray(value.events) && value.events.every((event) => isRecord(event) && event.userId === userId && typeof event.eventKey === "string") && sameKeys(value.sourceEventKeys, keys) && sameKeys(value.events.map((event) => String((event as Record<string, unknown>).eventKey)), keys);
 }
 function sameKeys(left: string[], right: string[]): boolean { return left.length === right.length && [...left].sort().every((key, index) => key === [...right].sort()[index]); }
 function problem(error: unknown): SyncOutcome {

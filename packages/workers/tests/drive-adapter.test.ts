@@ -4,10 +4,10 @@ import type { SyncEvent } from "@reliable-drive-sync/protocol/event";
 
 const event: SyncEvent = { schemaVersion: "1", eventId: "e1", eventKey: "u1:lesson:1", type: "lesson", userId: "u1", sourceSkill: "algorithm", destination: "drive", createdAt: "2026-01-01T00:00:00.000Z", payload: { title: "two sum" } };
 class MemoryDrive implements DriveCapability {
-  files: DriveFile[] = []; creates = 0; failSnapshot = false;
+  files: DriveFile[] = []; creates = 0; failSnapshot = false; failSnapshotRead = false;
   async list(parentId: string) { return this.files.filter((file) => file.parentId === parentId); }
   async create(parentId: string, name: string, json: unknown) { this.creates += 1; if (this.failSnapshot && parentId === "snapshots") throw { status: 429, retryAfterMs: 5000 }; const file = { id: String(this.creates), name, parentId, json }; this.files.push(file); return file; }
-  async read(id: string) { return this.files.find((file) => file.id === id) ?? null; }
+  async read(id: string) { const file = this.files.find((file) => file.id === id) ?? null; return this.failSnapshotRead && file?.parentId === "snapshots" ? null : file; }
 }
 describe("DriveDestinationAdapter", () => {
   it("creates a verified immutable event and snapshot, then is duplicate safe", async () => {
@@ -22,5 +22,14 @@ describe("DriveDestinationAdapter", () => {
   it("returns retryable on snapshot rate limiting after the event is stored", async () => {
     const drive = new MemoryDrive(); drive.failSnapshot = true; const result = await new DriveDestinationAdapter(drive, "events", "snapshots").sync(event);
     expect(result).toMatchObject({ kind: "retryable", retryAfterMs: 5000 }); expect(drive.files.filter((f) => f.parentId === "events")).toHaveLength(1);
+  });
+  it("does not report success when snapshot readback fails", async () => { const drive = new MemoryDrive(); drive.failSnapshotRead = true; expect(await new DriveDestinationAdapter(drive, "events", "snapshots").sync(event)).toMatchObject({ kind: "retryable", code: "snapshot_readback_failed" }); });
+  it("ignores corrupt/partial snapshots and selects the newest coherent complete snapshot", async () => {
+    const drive = new MemoryDrive(); const immutable = { schemaVersion: "1", kind: "event", userId: "u1", eventKey: event.eventKey, event }; await drive.create("events", "event", immutable);
+    drive.files.push({ id: "partial", name: "partial", parentId: "snapshots", json: { schemaVersion: "1", kind: "snapshot", userId: "u1", sourceEventKeys: [event.eventKey], generatedAt: "2026-01-03", events: [] } });
+    drive.files.push({ id: "old", name: "old", parentId: "snapshots", json: { schemaVersion: "1", kind: "snapshot", userId: "u1", sourceEventKeys: [event.eventKey], generatedAt: "2026-01-02", events: [event] } });
+    drive.files.push({ id: "new", name: "new", parentId: "snapshots", json: { schemaVersion: "1", kind: "snapshot", userId: "u1", sourceEventKeys: [event.eventKey], generatedAt: "2026-01-04", events: [event] } });
+    const result = await new DriveDestinationAdapter(drive, "events", "snapshots").sync(event);
+    expect(result).toMatchObject({ kind: "success", syncedAt: "2026-01-04" }); expect(drive.creates).toBe(1);
   });
 });
