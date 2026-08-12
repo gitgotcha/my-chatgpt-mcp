@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cachedProductionDriveAdapter, DriveDestinationAdapter, GoogleDriveCapability, type DriveCapability, type DriveFile } from "../src/drive-adapter.js";
+import { cachedProductionDriveAdapter, DriveDestinationAdapter, GoogleDriveCapability, resetDriveAdapterCacheForTest, type DriveCapability, type DriveFile } from "../src/drive-adapter.js";
 import type { SyncEvent } from "@reliable-drive-sync/protocol/event";
 
 const event: SyncEvent = { schemaVersion: "1", eventId: "e1", eventKey: "u1:lesson:1", type: "lesson", userId: "u1", sourceSkill: "algorithm", destination: "drive", createdAt: "2026-01-01T00:00:00.000Z", payload: { title: "two sum" } };
@@ -39,7 +39,15 @@ describe("DriveDestinationAdapter", () => {
 });
 
 it("reuses the isolate-local capability only for the same Drive configuration", () => {
+  resetDriveAdapterCacheForTest();
   const same = { GOOGLE_CLIENT_ID: "client-a", GOOGLE_CLIENT_SECRET: "secret-a", GOOGLE_REFRESH_TOKEN: "refresh-a", DRIVE_EVENTS_PARENT_ID: "events", DRIVE_SNAPSHOTS_PARENT_ID: "snapshots" };
   expect(cachedProductionDriveAdapter(same)).toBe(cachedProductionDriveAdapter({ ...same }));
   expect(cachedProductionDriveAdapter(same)).not.toBe(cachedProductionDriveAdapter({ ...same, GOOGLE_REFRESH_TOKEN: "refresh-b" }));
+});
+
+it("bounds the capability cache and evicts least-recently-used configurations", () => {
+  resetDriveAdapterCacheForTest();
+  const original = cachedProductionDriveAdapter({ GOOGLE_REFRESH_TOKEN: "one" });
+  for (let index = 0; index < 65; index += 1) cachedProductionDriveAdapter({ GOOGLE_REFRESH_TOKEN: `other-${index}` });
+  expect(cachedProductionDriveAdapter({ GOOGLE_REFRESH_TOKEN: "one" })).not.toBe(original);
 });

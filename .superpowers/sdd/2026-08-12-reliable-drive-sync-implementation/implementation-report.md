@@ -154,3 +154,9 @@ The first `pnpm install` skipped `better-sqlite3`'s native build and tests could
 - Added direct signed failure-callback route coverage for current/next key rotation, missing signature, foreign task rejection, terminal 489 header, and idempotent notices.
 - Replaced raw credential concatenation in the isolate-local cache key with a one-way non-secret fingerprint. Tests retain reuse/separation coverage.
 - Final verification: `pnpm typecheck` and `pnpm test` passed (10 files, 61 tests). No external resource, credential, or deployment was used.
+
+## Task 6 final cache/callback hardening
+
+- The module cache now uses a full SHA-256 digest of length-delimited configuration values, never raw credentials, and keeps at most 64 least-recently-used adapters. Same configuration reuses an adapter; a different configuration remains isolated.
+- Failure callback tests now prove tampered raw body, expired JWT, and incorrect audience all return non-retryable failure without mutating the job or notices.
+- `replayAfterRemediation` remains an internal repository primitive only. Its caller must verify operator authorization and remediation evidence externally; the repository enforces only explicit acknowledgement plus atomic `needs_attention` CAS and there is no public route.
