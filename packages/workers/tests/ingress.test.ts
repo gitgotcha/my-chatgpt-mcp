@@ -51,6 +51,27 @@ describe("cloud ingress", () => {
     expect(response.status).toBe(403);
   });
 
+  test("fails closed when the ingress secret is missing or empty", async () => {
+    const emptyRepository = new InMemoryJobRepository(() => "must-not-create");
+    const missingRepository = new InMemoryJobRepository(() => "must-not-create");
+    const emptyHandler = createIngressHandler({ INGRESS_SHARED_SECRET: "" }, emptyRepository);
+    const missingHandler = createIngressHandler({} as WorkerEnvironment, missingRepository);
+    const requestWithEmptyBearer = request("/v1/jobs", {
+      method: "POST",
+      headers: { authorization: "Bearer " },
+      body: JSON.stringify(event())
+    });
+
+    const emptyResponse = await emptyHandler(requestWithEmptyBearer);
+    const missingResponse = await missingHandler(requestWithEmptyBearer);
+
+    expect(emptyResponse.status).toBe(503);
+    await expect(emptyResponse.json()).resolves.toEqual({ error: "Service unavailable" });
+    expect(missingResponse.status).toBe(503);
+    expect(emptyRepository.jobCount).toBe(0);
+    expect(missingRepository.jobCount).toBe(0);
+  });
+
   test("rejects an event that fails shared protocol validation", async () => {
     const { handler } = fixture();
     const response = await handler(request("/v1/jobs", {

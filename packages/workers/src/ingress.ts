@@ -22,6 +22,7 @@ function json(body: unknown, status: number): Response {
 }
 
 function authorizationFailure(request: Request, env: WorkerEnvironment): Response | null {
+  if (!env.INGRESS_SHARED_SECRET) return json({ error: "Service unavailable" }, 503);
   const header = request.headers.get("authorization");
   if (!header?.startsWith("Bearer ")) return json({ error: "Unauthorized" }, 401);
   const token = header.slice("Bearer ".length);
