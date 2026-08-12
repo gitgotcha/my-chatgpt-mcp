@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { GoogleServiceAccountCredential } from "../src/service-account.js";
 
 async function testPrivateKeyPem(): Promise<string> {
@@ -23,7 +23,11 @@ function decodeJwtPayload(assertion: string): Record<string, unknown> {
 describe("GoogleServiceAccountCredential", () => {
   it("signs a Google JWT bearer assertion and caches its access token", async () => {
     const key = await testPrivateKeyPem();
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ access_token: "service-token", expires_in: 3600 })));
+    const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    const fetchMock = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push([input, init]);
+      return new Response(JSON.stringify({ access_token: "service-token", expires_in: 3600 }));
+    }) as typeof fetch;
     const credential = new GoogleServiceAccountCredential(
       { GOOGLE_SERVICE_ACCOUNT_EMAIL: "sync@test.iam.gserviceaccount.com", GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: key },
       fetchMock as typeof fetch,
@@ -32,9 +36,9 @@ describe("GoogleServiceAccountCredential", () => {
 
     expect(await credential.token()).toBe("service-token");
     expect(await credential.token()).toBe("service-token");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0]![0]).toBe("https://oauth2.googleapis.com/token");
-    const body = new URLSearchParams(String(fetchMock.mock.calls[0]![1]?.body));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![0]).toBe("https://oauth2.googleapis.com/token");
+    const body = new URLSearchParams(String(calls[0]![1]?.body));
     expect(body.get("grant_type")).toBe("urn:ietf:params:oauth:grant-type:jwt-bearer");
     expect(decodeJwtPayload(body.get("assertion")!)).toMatchObject({
       iss: "sync@test.iam.gserviceaccount.com",
@@ -56,14 +60,15 @@ describe("GoogleServiceAccountCredential", () => {
   });
 
   it("rejects incomplete service-account configuration without making a token request", async () => {
-    const fetchMock = vi.fn();
+    let requests = 0;
+    const fetchMock = (async () => { requests += 1; throw new Error("must not request Google"); }) as typeof fetch;
     const credential = new GoogleServiceAccountCredential(
       { GOOGLE_SERVICE_ACCOUNT_EMAIL: "sync@test.iam.gserviceaccount.com" },
-      fetchMock as typeof fetch,
+      fetchMock,
     );
 
     await expect(credential.token()).rejects.toMatchObject({ status: 503, configuration: true });
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(requests).toBe(0);
   });
 
   it.each([429, 503, 401])("preserves token endpoint status %i without revealing credentials", async (status) => {

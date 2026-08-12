@@ -6,7 +6,7 @@ import { createIngressHandler, type WaitUntilContext, type WorkerEnvironment } f
 import { createQStashPublisher, type QStashPublisher } from "./qstash.js";
 import { Reconciler } from "./reconciler.js";
 
-export type WorkerConfig = WorkerEnvironment & DispatcherEnvironment & SyncEnvironment & { QSTASH_FAILURE_CALLBACK_URL?: string; GOOGLE_DRIVE_ACCESS_TOKEN?: string; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string; GOOGLE_REFRESH_TOKEN?: string; DRIVE_EVENTS_PARENT_ID?: string; DRIVE_SNAPSHOTS_PARENT_ID?: string };
+export type WorkerConfig = WorkerEnvironment & DispatcherEnvironment & SyncEnvironment & { QSTASH_FAILURE_CALLBACK_URL?: string; GOOGLE_DRIVE_ACCESS_TOKEN?: string; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string; GOOGLE_REFRESH_TOKEN?: string; GOOGLE_SERVICE_ACCOUNT_EMAIL?: string; GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY?: string; DRIVE_EVENTS_PARENT_ID?: string; DRIVE_SNAPSHOTS_PARENT_ID?: string };
 
 export interface Environment extends WorkerConfig {
   DB: D1Database;

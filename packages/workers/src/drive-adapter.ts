@@ -1,4 +1,5 @@
 import type { SyncEvent } from "@reliable-drive-sync/protocol/event";
+import { GoogleServiceAccountCredential, type GoogleServiceAccountEnvironment } from "./service-account.js";
 
 export type SyncOutcome =
   | { kind: "success"; syncedAt: string }
@@ -14,14 +15,29 @@ export interface DriveCapability {
   read(fileId: string): Promise<DriveFile | null>;
 }
 
+type DriveAuthEnvironment = GoogleServiceAccountEnvironment & {
+  GOOGLE_DRIVE_ACCESS_TOKEN?: string;
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
+  GOOGLE_REFRESH_TOKEN?: string;
+};
+
 /** Production-shaped REST boundary; it remains inert until OAuth and folder bindings are configured. */
 export class GoogleDriveCapability implements DriveCapability {
   private cached?: { token: string; expiresAt: number };
-  constructor(private readonly env: { GOOGLE_DRIVE_ACCESS_TOKEN?: string; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string; GOOGLE_REFRESH_TOKEN?: string }, private readonly fetchLike: typeof fetch = fetch, private readonly now: () => number = () => Date.now()) {}
+  private serviceAccount?: GoogleServiceAccountCredential;
+  constructor(private readonly env: DriveAuthEnvironment, private readonly fetchLike: typeof fetch = fetch, private readonly now: () => number = () => Date.now()) {}
+  private serviceCredential(): GoogleServiceAccountCredential {
+    return this.serviceAccount ??= new GoogleServiceAccountCredential(this.env, this.fetchLike, this.now);
+  }
   private async token(): Promise<string> {
+    const hasServiceEmail = Boolean(this.env.GOOGLE_SERVICE_ACCOUNT_EMAIL);
+    const hasServiceKey = Boolean(this.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY);
+    if (hasServiceEmail !== hasServiceKey) throw { status: 503, configuration: true };
+    if (hasServiceEmail && hasServiceKey) return this.serviceCredential().token();
     if (this.env.GOOGLE_DRIVE_ACCESS_TOKEN) return this.env.GOOGLE_DRIVE_ACCESS_TOKEN;
     if (this.cached && this.cached.expiresAt > this.now() + 60_000) return this.cached.token;
-    if (!this.env.GOOGLE_CLIENT_ID || !this.env.GOOGLE_CLIENT_SECRET || !this.env.GOOGLE_REFRESH_TOKEN) throw { status: 503, configuration: true };
+    if (!this.env.GOOGLE_CLIENT_ID || !this.env.GOOGLE_CLIENT_SECRET || !this.env.GOOGLE_REFRESH_TOKEN) throw { status: 503 };
     const body = new URLSearchParams({ client_id: this.env.GOOGLE_CLIENT_ID, client_secret: this.env.GOOGLE_CLIENT_SECRET, refresh_token: this.env.GOOGLE_REFRESH_TOKEN, grant_type: "refresh_token" });
     const response = await this.fetchLike("https://oauth2.googleapis.com/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
     if (!response.ok) throw { status: response.status === 429 ? 429 : response.status >= 500 ? response.status : 401 };
@@ -55,6 +71,7 @@ function sameKeys(left: string[], right: string[]): boolean { return left.length
 function problem(error: unknown): SyncOutcome {
   const status = isRecord(error) && typeof error.status === "number" ? error.status : undefined;
   const retryAfterMs = isRecord(error) && typeof error.retryAfterMs === "number" ? Math.min(Math.max(error.retryAfterMs, 0), 3_600_000) : undefined;
+  if (isRecord(error) && error.configuration === true) return { kind: "retryable", code: "drive_configuration_unavailable" };
   if (status === 429 || (status !== undefined && status >= 500 && status <= 599) || error instanceof TypeError) return { kind: "retryable", code: status === 429 ? "drive_rate_limited" : "drive_unavailable", retryAfterMs };
   return { kind: "permanent", code: status && status >= 400 && status < 500 ? "drive_request_rejected" : "drive_invalid_data" };
 }
@@ -92,7 +109,7 @@ export class DriveDestinationAdapter implements DestinationAdapter {
   }
 }
 
-export function createProductionDriveAdapter(env: { GOOGLE_DRIVE_ACCESS_TOKEN?: string; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string; GOOGLE_REFRESH_TOKEN?: string; DRIVE_EVENTS_PARENT_ID?: string; DRIVE_SNAPSHOTS_PARENT_ID?: string }): DestinationAdapter {
+export function createProductionDriveAdapter(env: DriveAuthEnvironment & { DRIVE_EVENTS_PARENT_ID?: string; DRIVE_SNAPSHOTS_PARENT_ID?: string }): DestinationAdapter {
   return new DriveDestinationAdapter(new GoogleDriveCapability(env), env.DRIVE_EVENTS_PARENT_ID ?? "", env.DRIVE_SNAPSHOTS_PARENT_ID ?? "");
 }
 
@@ -109,8 +126,8 @@ function cacheFingerprint(values: Array<string | undefined>): string {
   return [...h].map((part) => part.toString(16).padStart(8, "0")).join("");
 }
 /** Isolate-local only; the key includes every credential/folder identity to prevent cross-env reuse. */
-export function cachedProductionDriveAdapter(env: { GOOGLE_DRIVE_ACCESS_TOKEN?: string; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string; GOOGLE_REFRESH_TOKEN?: string; DRIVE_EVENTS_PARENT_ID?: string; DRIVE_SNAPSHOTS_PARENT_ID?: string }): DestinationAdapter {
-  const key = cacheFingerprint([env.GOOGLE_DRIVE_ACCESS_TOKEN, env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET, env.GOOGLE_REFRESH_TOKEN, env.DRIVE_EVENTS_PARENT_ID, env.DRIVE_SNAPSHOTS_PARENT_ID]);
+export function cachedProductionDriveAdapter(env: DriveAuthEnvironment & { DRIVE_EVENTS_PARENT_ID?: string; DRIVE_SNAPSHOTS_PARENT_ID?: string }): DestinationAdapter {
+  const key = cacheFingerprint([env.GOOGLE_SERVICE_ACCOUNT_EMAIL, env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY, env.GOOGLE_DRIVE_ACCESS_TOKEN, env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET, env.GOOGLE_REFRESH_TOKEN, env.DRIVE_EVENTS_PARENT_ID, env.DRIVE_SNAPSHOTS_PARENT_ID]);
   let adapter = productionAdapterCache.get(key);
   if (adapter) { productionAdapterCache.delete(key); productionAdapterCache.set(key, adapter); return adapter; }
   adapter = createProductionDriveAdapter(env); productionAdapterCache.set(key, adapter);
