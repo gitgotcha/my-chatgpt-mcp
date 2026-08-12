@@ -1,5 +1,5 @@
 import type { DispatchRepository } from "./db.js";
-import type { QStashPublisher } from "./qstash.js";
+import { QStashPublishError, type QStashPublisher } from "./qstash.js";
 
 export type DispatcherEnvironment = {
   QSTASH_TOKEN?: string;
@@ -49,7 +49,7 @@ export class Dispatcher {
       acknowledgementReceived = true;
       const persisted = await this.repository.markBrokerQueued(jobId, leaseOwner, messageId, this.clock());
       if (!persisted) await this.repository.markAcknowledgedUncertain(jobId, leaseOwner, messageId, this.clock());
-    } catch {
+    } catch (error) {
       if (acknowledgementReceived && messageId) {
         try {
           await this.repository.markAcknowledgedUncertain(jobId, leaseOwner, messageId, this.clock());
@@ -58,7 +58,10 @@ export class Dispatcher {
         }
         return;
       }
-      await this.repository.recordDispatchFailure(jobId, leaseOwner, "qstash_publish_failed", this.clock());
+      const errorCode = error instanceof QStashPublishError
+        ? `qstash_publish_http_${error.status}`
+        : "qstash_publish_failed";
+      await this.repository.recordDispatchFailure(jobId, leaseOwner, errorCode, this.clock());
     }
   }
 

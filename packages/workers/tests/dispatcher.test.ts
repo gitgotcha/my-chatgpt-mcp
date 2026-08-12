@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { InMemoryJobRepository, type DispatchJob } from "../src/db.js";
 import { Dispatcher } from "../src/dispatcher.js";
-import { createQStashPublisher } from "../src/qstash.js";
+import { createQStashPublisher, QStashPublishError } from "../src/qstash.js";
 import { createIngressHandler } from "../src/ingress.js";
 import { createWorker } from "../src/index.js";
 
@@ -61,6 +61,17 @@ describe("durable QStash dispatcher", () => {
     await dispatcher.dispatch("job-1");
 
     expect(repository.getDispatchJob("job-1")).toMatchObject({ state: "dispatch_pending", dispatchAttempts: 1, lastErrorCode: "qstash_publish_failed" });
+  });
+
+  test("records only the QStash HTTP status when publication is rejected", async () => {
+    const { repository, dispatcher } = fixture({ publish: async () => { throw new QStashPublishError(401); } });
+
+    await dispatcher.dispatch("job-1");
+
+    expect(repository.getDispatchJob("job-1")).toMatchObject({
+      state: "dispatch_pending",
+      lastErrorCode: "qstash_publish_http_401"
+    });
   });
 
   test("retains a pending job when QStash acknowledgement has no message id", async () => {

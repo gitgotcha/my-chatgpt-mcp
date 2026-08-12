@@ -10,6 +10,14 @@ export interface QStashPublisher {
   publish(request: QStashPublishRequest): Promise<unknown>;
 }
 
+/** Contains only the upstream status; tokens and response bodies never escape this boundary. */
+export class QStashPublishError extends Error {
+  constructor(readonly status: number) {
+    super(`QStash rejected publish with HTTP ${status}`);
+    this.name = "QStashPublishError";
+  }
+}
+
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 /** The token stays within this boundary and is never added to JSON or errors. */
@@ -26,7 +34,7 @@ export function createQStashPublisher(token: string, fetchLike: FetchLike = fetc
         },
         body: JSON.stringify(request.job)
       });
-      if (!response.ok) throw new Error(`QStash rejected publish with HTTP ${response.status}`);
+      if (!response.ok) throw new QStashPublishError(response.status);
       return response.json();
     }
   };
