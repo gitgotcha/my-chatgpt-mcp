@@ -3,6 +3,7 @@ import { QStashPublishError, type QStashPublisher } from "./qstash.js";
 
 export type DispatcherEnvironment = {
   QSTASH_TOKEN?: string;
+  QSTASH_URL?: string;
   SYNC_WORKER_URL?: string;
   QSTASH_FAILURE_CALLBACK_URL?: string;
 };
