@@ -22,11 +22,12 @@
 ## 1. 创建服务账号和私钥
 
 1. 打开 [Google Cloud Console](https://console.cloud.google.com/)，选择 `Reliable Drive Sync` 项目。
-2. 进入 **IAM & Admin → Service Accounts**。
-3. 点击 **Create service account**，名称填写 `reliable-drive-sync-worker`，点击创建/继续；不需要授予项目 IAM 角色。
-4. 在服务账号列表中打开刚创建的账号，进入 **Keys**。
-5. 选择 **Add key → Create new key → JSON → Create**。浏览器会下载一个 JSON 文件。
-6. 仅在自己的安全界面中打开这个文件，准备其中两个字段：
+2. 进入 **APIs & Services → Library**，搜索并启用 **Google Drive API**；随后在 **Enabled APIs & services** 中确认它确实出现在列表里。
+3. 进入 **IAM & Admin → Service Accounts**。
+4. 点击 **Create service account**，名称填写 `reliable-drive-sync-worker`，点击创建/继续；不需要授予项目 IAM 角色。
+5. 在服务账号列表中打开刚创建的账号，进入 **Keys**。
+6. 选择 **Add key → Create new key → JSON → Create**。浏览器会下载一个 JSON 文件。
+7. 仅在自己的安全界面中打开这个文件，准备其中两个字段：
    - `client_email`：服务账号邮箱。
    - `private_key`：完整 PEM，包括开头、结尾及所有换行。
 

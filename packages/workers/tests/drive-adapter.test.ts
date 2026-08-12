@@ -106,3 +106,20 @@ it("separates service-account adapter cache identities", () => {
   expect(cachedProductionDriveAdapter({ ...base, GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: "key-a" }))
     .not.toBe(cachedProductionDriveAdapter({ ...base, GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: "key-b" }));
 });
+
+it.each([
+  [429, { kind: "retryable", code: "drive_rate_limited" }],
+  [503, { kind: "retryable", code: "drive_unavailable" }],
+  [401, { kind: "permanent", code: "drive_request_rejected" }],
+])("maps service-account token endpoint status %i through the Drive outcome", async (status, expected) => {
+  const adapter = new DriveDestinationAdapter(
+    new GoogleDriveCapability(
+      { GOOGLE_SERVICE_ACCOUNT_EMAIL: "sync@test.iam.gserviceaccount.com", GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: await servicePrivateKeyPem() },
+      (async () => new Response("", { status })) as typeof fetch,
+    ),
+    "events",
+    "snapshots",
+  );
+
+  await expect(adapter.sync(event)).resolves.toMatchObject(expected);
+});
