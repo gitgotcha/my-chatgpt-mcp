@@ -2,5 +2,9 @@
   "name": "@reliable-drive-sync/protocol",
   "version": "0.1.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "exports": {
+    "./event": "./src/event.ts",
+    "./result": "./src/result.ts"
+  }
 }
