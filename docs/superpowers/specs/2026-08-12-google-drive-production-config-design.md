@@ -1,4 +1,6 @@
-# Google Drive 生产配置设计
+# Google Drive 生产配置设计（已被服务账号方案取代）
+
+> **状态：已取代。** 该方案使用外部 OAuth Client 与 `https://www.googleapis.com/auth/drive`。在实际发布阶段，Google 要求受限范围验证；改用服务账号方案，详见 [2026-08-12-google-drive-service-account-design.md](2026-08-12-google-drive-service-account-design.md)。本文件保留为决策记录，不应按本文继续配置 OAuth Client、Refresh Token 或 Drive scope。
 
 ## 目标与当前边界
 
