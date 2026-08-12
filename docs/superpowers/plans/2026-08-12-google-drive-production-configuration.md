@@ -1,4 +1,6 @@
-# Google Drive Production Configuration Implementation Plan
+# Google Drive Production Configuration Implementation Plan（已被服务账号方案取代）
+
+> **状态：已取代。** 不要继续使用本计划创建 OAuth Client、Refresh Token 或配置 `GOOGLE_CLIENT_SECRET`。请改按 [Google Drive 服务账号配置](../../google-drive-service-account-setup.md) 操作；对应实现计划为 [2026-08-12-google-drive-service-account.md](2026-08-12-google-drive-service-account.md)。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
