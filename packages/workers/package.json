@@ -1,0 +1,13 @@
+{
+  "name": "@reliable-drive-sync/workers",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@reliable-drive-sync/protocol": "workspace:*"
+  }
+}

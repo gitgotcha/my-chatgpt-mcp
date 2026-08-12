@@ -36,6 +36,12 @@ importers:
 
   packages/protocol: {}
 
+  packages/workers:
+    dependencies:
+      '@reliable-drive-sync/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
 packages:
 
   '@esbuild/aix-ppc64@0.28.2':

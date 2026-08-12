@@ -1,0 +1,10 @@
+name = "reliable-drive-sync"
+main = "src/index.ts"
+compatibility_date = "2026-08-12"
+
+# Provision D1 first, then replace the placeholder values locally. Do not commit
+# a real database id or any secret to this repository.
+[[d1_databases]]
+binding = "DB"
+database_name = "REPLACE_AFTER_CLOUDFLARE_PROVISIONING"
+database_id = "REPLACE_AFTER_CLOUDFLARE_PROVISIONING"
