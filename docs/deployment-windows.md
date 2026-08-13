@@ -118,7 +118,9 @@ foreach ($name in $secretNames) {
 pnpm exec wrangler deploy
 ```
 
-`wrangler.toml` 已包含非敏感配置：Worker 名称、D1 绑定、QStash 地址、同步回调地址，以及 Drive 的两个顶层父文件夹 ID。不要把 OAuth 或 QStash 密钥写进该文件。
+`wrangler.toml` 已包含非敏感配置：Worker 名称、D1 绑定、QStash 地址、同步回调地址，以及 Drive 的顶层父文件夹 ID。不要把 OAuth 或 QStash 密钥写进该文件。
+
+面试复盘产物不需要 R2：JSON、Markdown 与不超过 1 MiB 的 DOCX 会先进入 D1，再由 QStash 异步同步到 `事件父文件夹/interview/<candidateId>/<sessionId>/`。因此换电脑或重新部署时无需创建 R2 bucket，也无需新增密钥。
 
 ## 3. 发布后的快速验证
 
@@ -133,6 +135,7 @@ pnpm exec wrangler deploy
 ```text
 事件父文件夹/<sourceSkill>/<userId>/event-*.json
 快照父文件夹/<sourceSkill>/<userId>/snapshot-*.json
+事件父文件夹/interview/<candidateId>/<sessionId>/{session.json,raw_transcript.md,review.json,profile_update_event.json,review_report.docx}
 ```
 
 若返回 `pending`，事件仍安全留在本机 Outbox；重启 Codex 或下一次提交事件时会自动补发。
