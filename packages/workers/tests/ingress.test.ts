@@ -108,6 +108,13 @@ describe("cloud ingress", () => {
     expect(response.status).toBe(202); expect(acceptedBytes).toEqual(new TextEncoder().encode("hello")); expect(scheduled).toEqual(["artifact-job"]);
   });
 
+  test("rejects an artifact over the D1 one MiB boundary with payload-too-large", async () => {
+    const repository = new InMemoryJobRepository();
+    const handler = createIngressHandler({ INGRESS_SHARED_SECRET: sharedSecret }, repository, undefined, { repository: { createOrGet: async () => { throw new Error("must not persist") } } as unknown as D1ArtifactRepository, dispatcher: { dispatch: async () => undefined } });
+    const response = await handler(request("/v1/artifacts", { method: "POST", headers: { authorization: `Bearer ${sharedSecret}`, "content-type": "application/json" }, body: JSON.stringify({ schemaVersion: "1", artifactId: "a1", artifactKey: "candidate1:interview:MOCK-1:session:v1", candidateId: "candidate1", sourceSkill: "interview", sessionId: "MOCK-1", artifactType: "session", fileName: "session.json", contentType: "application/json", contentBase64: "A".repeat(4 * Math.ceil((1024 * 1024 + 1) / 3)), sha256: "0".repeat(64), createdAt: "2026-08-13T00:00:00.000Z" }) }));
+    expect(response.status).toBe(413);
+  });
+
   test("returns a synchronized text artifact to the authenticated candidate", async () => {
     const repository = new InMemoryJobRepository();
     const artifacts = {

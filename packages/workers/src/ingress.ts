@@ -68,7 +68,7 @@ export function createIngressHandler(env: WorkerEnvironment, repository: JobRepo
         if (job.isNew && context) context.waitUntil(artifacts.dispatcher.dispatch(job.jobId));
         return json({ jobId: job.jobId, state: job.state }, 202);
       } catch (error) {
-        if (error instanceof TypeError) return json({ error: "Invalid artifact submission" }, 400);
+        if (error instanceof TypeError) return json({ error: error.message.includes("exceeds 1 MiB") ? "Artifact exceeds 1 MiB" : "Invalid artifact submission" }, error.message.includes("exceeds 1 MiB") ? 413 : 400);
         return json({ error: "Unable to accept artifact" }, 500);
       }
     }
