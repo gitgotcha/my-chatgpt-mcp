@@ -9,7 +9,7 @@
 - 采用 D1 作为云端暂存层；不使用 R2、KV 或新增第三方服务。
 - 单个 `submit_artifact` 解码后产物最大 **1 MiB**；超限返回明确的 413，不创建任务或残留内容。
 - 支持现有六类不可变产物；DOCX 同样暂存并最终上传 Drive。
-- D1 暂存内容只用于可靠投递，最终归档为 Google Drive 文件；同步成功后删除 D1 字节，保留任务元数据、校验和与 Drive 文件 ID。
+- D1 暂存内容同时作为受认证 MCP 的小型文本读取副本；最终归档仍为 Google Drive 文件。同步成功后保留不超过 1 MiB 的内容，便于复盘 Skill 读取 JSON/Markdown；DOCX 仅返回元数据。
 - 现有 `/v1/jobs` 事件链路、事件文件与快照行为完全不变。
 
 ## 数据模型
@@ -40,11 +40,11 @@ flowchart LR
   G --> C["D1 标记 synced 并清理 BLOB"]
 ```
 
-Worker 仅在 D1 中成功保存元数据和 BLOB 后返回 202 并发起 QStash 投递。QStash 签名、租约、状态机、重试与失败通知沿用现有逻辑。同步 Worker 先从 D1 读取内容，上传 Drive，确认成功后以同一 lease 原子标记 `synced` 并删除对应内容。
+Worker 仅在 D1 中成功保存元数据和 BLOB 后返回 202 并发起 QStash 投递。QStash 签名、租约、状态机、重试与失败通知沿用现有逻辑。同步 Worker 先从 D1 读取内容，上传 Drive，确认成功后以同一 lease 原子标记 `synced`；小型内容保留用于受认证读取。
 
 ## 读取与错误处理
 
-- `read_artifact` 只读取 `synced` 的 JSON / Markdown；数据来源改为 Google Drive，D1 已清理的 BLOB 不能作为公开读取源。
+- `read_artifact` 只读取 `synced` 的 JSON / Markdown；数据来源是受认证的 D1 内容副本，绝不对未认证调用暴露。
 - DOCX 继续不可通过 MCP 正文读取；返回其元数据。
 - 空间/配置/网络/Drive 5xx 为 503 可重试；校验失败、超限、任务内容缺失或 Drive 4xx 为可见的永久失败。
 - 若同步后清理 BLOB 失败，任务不应重传文件；保留 `synced` 并由后续低优先级清理。重复 QStash 投递对 `synced` 返回 204。

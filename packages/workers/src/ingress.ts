@@ -1,8 +1,7 @@
 import { parseSyncEvent } from "@reliable-drive-sync/protocol/event";
-import { artifactObjectKey, parseArtifactSubmission } from "@reliable-drive-sync/protocol/artifact";
+import { parseArtifactSubmission } from "@reliable-drive-sync/protocol/artifact";
 import type { JobRepository } from "./db.js";
 import type { D1ArtifactRepository } from "./artifact-jobs.js";
-import type { R2Bucket } from "./artifact-flow.js";
 
 export type WorkerEnvironment = { INGRESS_SHARED_SECRET: string };
 export type WaitUntilContext = { waitUntil(work: Promise<unknown>): void };
@@ -35,7 +34,7 @@ function authorizationFailure(request: Request, env: WorkerEnvironment): Respons
   return null;
 }
 
-export function createIngressHandler(env: WorkerEnvironment, repository: JobRepository, dispatcher?: ImmediateDispatcher, artifacts?: { repository: D1ArtifactRepository; bucket?: R2Bucket; dispatcher: ImmediateDispatcher }) {
+export function createIngressHandler(env: WorkerEnvironment, repository: JobRepository, dispatcher?: ImmediateDispatcher, artifacts?: { repository: D1ArtifactRepository; dispatcher: ImmediateDispatcher }) {
   return async (request: Request, context?: WaitUntilContext): Promise<Response> => {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/v1/jobs") {
@@ -61,10 +60,9 @@ export function createIngressHandler(env: WorkerEnvironment, repository: JobRepo
     if (request.method === "POST" && url.pathname === "/v1/artifacts") {
       const denied = authorizationFailure(request, env);
       if (denied) return denied;
-      if (!artifacts?.bucket) return json({ error: "Artifact staging unavailable" }, 503);
+      if (!artifacts) return json({ error: "Artifact staging unavailable" }, 503);
       try {
         const artifact = await parseArtifactSubmission(await request.json());
-        await artifacts.bucket.put(artifactObjectKey(artifact), artifact.bytes, { httpMetadata: { contentType: artifact.contentType } });
         const job = await artifacts.repository.createOrGet(artifact);
         if (job === "conflict") return json({ error: "Artifact key conflicts with existing content" }, 409);
         if (job.isNew && context) context.waitUntil(artifacts.dispatcher.dispatch(job.jobId));
@@ -101,12 +99,10 @@ export function createIngressHandler(env: WorkerEnvironment, repository: JobRepo
     const artifactMatch = url.pathname.match(/^\/v1\/artifacts\/([^/]+)$/);
     if (request.method === "GET" && artifactMatch) {
       const denied = authorizationFailure(request, env); if (denied) return denied;
-      const candidateId = url.searchParams.get("candidateId"); if (!candidateId || !artifacts?.bucket) return json({ error: "Artifact API unavailable" }, 503);
+      const candidateId = url.searchParams.get("candidateId"); if (!candidateId || !artifacts) return json({ error: "Artifact API unavailable" }, 503);
       const artifact = await artifacts.repository.artifactForRead(candidateId, decodeURIComponent(artifactMatch[1]));
       if (!artifact) return json({ error: "Artifact not found" }, 404);
-      const object = await artifacts.bucket.get(artifact.r2Key); if (!object) return json({ error: "Artifact staging object not found" }, 503);
-      const bytes = new Uint8Array(await object.arrayBuffer());
-      if (artifact.contentType === "application/json" || artifact.contentType === "text/markdown") return json({ content: new TextDecoder().decode(bytes), contentType: artifact.contentType, fileName: artifact.fileName }, 200);
+      if (artifact.contentType === "application/json" || artifact.contentType === "text/markdown") { const bytes = await artifacts.repository.loadContentForRead(candidateId, decodeURIComponent(artifactMatch[1])); if (!bytes) return json({ error: "Artifact content not found" }, 503); return json({ content: new TextDecoder().decode(bytes), contentType: artifact.contentType, fileName: artifact.fileName }, 200); }
       return json({ error: "Binary artifacts are not readable through MCP" }, 415);
     }
 

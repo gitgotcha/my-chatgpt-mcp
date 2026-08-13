@@ -98,15 +98,29 @@ describe("cloud ingress", () => {
 
   test("stages a checksum-verified interview artifact before scheduling its job", async () => {
     const repository = new InMemoryJobRepository(() => "event-job");
-    const stored = new Map<string, Uint8Array>(); const scheduled: string[] = [];
+    let acceptedBytes: Uint8Array | undefined; const scheduled: string[] = [];
     const artifacts = {
-      repository: { createOrGet: async () => ({ jobId: "artifact-job", artifactKey: "candidate1:interview:MOCK-1:session:v1", candidateId: "candidate1", sessionId: "MOCK-1", state: "dispatch_pending" as const, isNew: true }) } as unknown as D1ArtifactRepository,
-      bucket: { put: async (key: string, bytes: Uint8Array) => { stored.set(key, bytes); }, get: async () => null },
+      repository: { createOrGet: async (artifact: { bytes: Uint8Array }) => { acceptedBytes = artifact.bytes; return { jobId: "artifact-job", artifactKey: "candidate1:interview:MOCK-1:session:v1", candidateId: "candidate1", sessionId: "MOCK-1", state: "dispatch_pending" as const, isNew: true }; } } as unknown as D1ArtifactRepository,
       dispatcher: { dispatch: async (jobId: string) => { scheduled.push(jobId); } }
     };
     const handler = createIngressHandler({ INGRESS_SHARED_SECRET: sharedSecret }, repository, undefined, artifacts);
     const response = await handler(request("/v1/artifacts", { method: "POST", headers: { authorization: `Bearer ${sharedSecret}`, "content-type": "application/json" }, body: JSON.stringify({ schemaVersion: "1", artifactId: "a1", artifactKey: "candidate1:interview:MOCK-1:session:v1", candidateId: "candidate1", sourceSkill: "interview", sessionId: "MOCK-1", artifactType: "session", fileName: "session.json", contentType: "application/json", contentBase64: "aGVsbG8=", sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", createdAt: "2026-08-13T00:00:00.000Z" }) }), { waitUntil: (work) => { void work; } });
-    expect(response.status).toBe(202); expect(stored.size).toBe(1); expect(scheduled).toEqual(["artifact-job"]);
+    expect(response.status).toBe(202); expect(acceptedBytes).toEqual(new TextEncoder().encode("hello")); expect(scheduled).toEqual(["artifact-job"]);
+  });
+
+  test("returns a synchronized text artifact to the authenticated candidate", async () => {
+    const repository = new InMemoryJobRepository();
+    const artifacts = {
+      repository: {
+        artifactForRead: async () => ({ r2Key: "legacy", contentType: "text/markdown", fileName: "raw_transcript.md" }),
+        loadContentForRead: async () => new TextEncoder().encode("# transcript")
+      } as unknown as D1ArtifactRepository,
+      dispatcher: { dispatch: async () => undefined }
+    };
+    const handler = createIngressHandler({ INGRESS_SHARED_SECRET: sharedSecret }, repository, undefined, artifacts);
+    const response = await handler(request("/v1/artifacts/candidate1%3Ainterview%3AMOCK-1%3Araw_transcript%3Av1?candidateId=candidate1", { headers: { authorization: `Bearer ${sharedSecret}` } }));
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ content: "# transcript", contentType: "text/markdown", fileName: "raw_transcript.md" });
   });
 
   test("returns the original job for a duplicate event key", async () => {
