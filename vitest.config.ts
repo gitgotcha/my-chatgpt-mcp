@@ -8,6 +8,7 @@ export default defineConfig({
   resolve: {
     alias: [
       { find: "@reliable-drive-sync/protocol/event", replacement: `${root}packages/protocol/src/event.ts` },
+      { find: "@reliable-drive-sync/protocol/artifact", replacement: `${root}packages/protocol/src/artifact.ts` },
       { find: "@reliable-drive-sync/protocol/result", replacement: `${root}packages/protocol/src/result.ts` }
     ]
   }
