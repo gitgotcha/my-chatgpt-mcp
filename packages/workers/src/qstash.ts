@@ -1,4 +1,4 @@
-export type QStashJobMessage = { jobId: string; eventKey: string; userId: string };
+export type QStashJobMessage = { jobId: string; eventKey: string; userId: string } | { kind: "artifact"; jobId: string; artifactKey: string; candidateId: string };
 
 export type QStashPublishRequest = {
   targetUrl: string;

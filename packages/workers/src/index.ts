@@ -1,12 +1,15 @@
 import { D1JobRepository, type D1Database, type DispatchRepository, type FailureRepository, type JobRepository, type SyncRepository } from "./db.js";
 import { cachedProductionDriveAdapter, type DestinationAdapter } from "./drive-adapter.js";
+import { createProductionArtifactAdapter } from "./drive-adapter.js";
+import { D1ArtifactRepository } from "./artifact-jobs.js";
+import { ArtifactDispatcher, createArtifactSyncHandler, type R2Bucket } from "./artifact-flow.js";
 import { createFailureCallbackHandler, createSyncHandler, type SyncEnvironment } from "./sync.js";
 import { Dispatcher, type DispatcherEnvironment } from "./dispatcher.js";
 import { createIngressHandler, type WaitUntilContext, type WorkerEnvironment } from "./ingress.js";
 import { createQStashPublisher, type QStashPublisher } from "./qstash.js";
 import { Reconciler } from "./reconciler.js";
 
-export type WorkerConfig = WorkerEnvironment & DispatcherEnvironment & SyncEnvironment & { QSTASH_FAILURE_CALLBACK_URL?: string; GOOGLE_DRIVE_ACCESS_TOKEN?: string; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string; GOOGLE_REFRESH_TOKEN?: string; GOOGLE_SERVICE_ACCOUNT_EMAIL?: string; GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY?: string; DRIVE_EVENTS_PARENT_ID?: string; DRIVE_SNAPSHOTS_PARENT_ID?: string };
+export type WorkerConfig = WorkerEnvironment & DispatcherEnvironment & SyncEnvironment & { QSTASH_FAILURE_CALLBACK_URL?: string; GOOGLE_DRIVE_ACCESS_TOKEN?: string; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string; GOOGLE_REFRESH_TOKEN?: string; GOOGLE_SERVICE_ACCOUNT_EMAIL?: string; GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY?: string; DRIVE_EVENTS_PARENT_ID?: string; DRIVE_SNAPSHOTS_PARENT_ID?: string; DRIVE_ARTIFACTS_PARENT_ID?: string; ARTIFACTS?: R2Bucket };
 
 export interface Environment extends WorkerConfig {
   DB: D1Database;
@@ -27,15 +30,19 @@ export function createWorker(
   adapter?: DestinationAdapter
 ): WorkerShape {
   const jobRepository = repository ?? new D1JobRepository((env as Environment).DB);
+  const artifactRepository = new D1ArtifactRepository((env as Environment).DB);
   const dispatcher = new Dispatcher(jobRepository, publisher, env);
-  const ingress = createIngressHandler(env, jobRepository, dispatcher);
+  const artifactDispatcher = new ArtifactDispatcher(artifactRepository, publisher, env);
+  const ingress = createIngressHandler(env, jobRepository, dispatcher, { repository: artifactRepository, bucket: env.ARTIFACTS, dispatcher: artifactDispatcher });
   const sync = createSyncHandler(env, jobRepository, adapter ?? cachedProductionDriveAdapter(env));
+  const artifactSync = createArtifactSyncHandler(env, artifactRepository, env.ARTIFACTS, createProductionArtifactAdapter(env));
   const failure = createFailureCallbackHandler(env, jobRepository, () => new Date());
   const reconciler = new Reconciler(jobRepository, dispatcher, cronBatchSize);
   return {
-    fetch(request, _env, context) {
+    async fetch(request, _env, context) {
       if (request.method === "POST" && new URL(request.url).pathname === "/v1/sync") {
-        return sync(request);
+        try { const body = await request.clone().json() as { kind?: unknown }; return body.kind === "artifact" ? artifactSync(request) : sync(request); }
+        catch { return sync(request); }
       }
       if (request.method === "POST" && new URL(request.url).pathname === "/v1/qstash/failure") return failure(request);
       return ingress(request, context);

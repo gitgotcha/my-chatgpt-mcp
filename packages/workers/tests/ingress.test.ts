@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { InMemoryJobRepository } from "../src/db.js";
 import { createIngressHandler, secureEquals, type WorkerEnvironment } from "../src/ingress.js";
+import type { D1ArtifactRepository } from "../src/artifact-jobs.js";
 
 const sharedSecret = "a-very-secret-test-value";
 
@@ -93,6 +94,19 @@ describe("cloud ingress", () => {
 
     expect(response.status).toBe(202);
     await expect(response.json()).resolves.toEqual({ jobId: "job-opaque-1", state: "dispatch_pending" });
+  });
+
+  test("stages a checksum-verified interview artifact before scheduling its job", async () => {
+    const repository = new InMemoryJobRepository(() => "event-job");
+    const stored = new Map<string, Uint8Array>(); const scheduled: string[] = [];
+    const artifacts = {
+      repository: { createOrGet: async () => ({ jobId: "artifact-job", artifactKey: "candidate1:interview:MOCK-1:session:v1", candidateId: "candidate1", sessionId: "MOCK-1", state: "dispatch_pending" as const, isNew: true }) } as unknown as D1ArtifactRepository,
+      bucket: { put: async (key: string, bytes: Uint8Array) => { stored.set(key, bytes); }, get: async () => null },
+      dispatcher: { dispatch: async (jobId: string) => { scheduled.push(jobId); } }
+    };
+    const handler = createIngressHandler({ INGRESS_SHARED_SECRET: sharedSecret }, repository, undefined, artifacts);
+    const response = await handler(request("/v1/artifacts", { method: "POST", headers: { authorization: `Bearer ${sharedSecret}`, "content-type": "application/json" }, body: JSON.stringify({ schemaVersion: "1", artifactId: "a1", artifactKey: "candidate1:interview:MOCK-1:session:v1", candidateId: "candidate1", sourceSkill: "interview", sessionId: "MOCK-1", artifactType: "session", fileName: "session.json", contentType: "application/json", contentBase64: "aGVsbG8=", sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", createdAt: "2026-08-13T00:00:00.000Z" }) }), { waitUntil: (work) => { void work; } });
+    expect(response.status).toBe(202); expect(stored.size).toBe(1); expect(scheduled).toEqual(["artifact-job"]);
   });
 
   test("returns the original job for a duplicate event key", async () => {

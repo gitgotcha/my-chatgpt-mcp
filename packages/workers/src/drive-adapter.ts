@@ -1,4 +1,5 @@
 import type { SyncEvent } from "@reliable-drive-sync/protocol/event";
+import type { ArtifactSubmission } from "@reliable-drive-sync/protocol/artifact";
 import { GoogleServiceAccountCredential, type GoogleServiceAccountEnvironment } from "./service-account.js";
 
 export type SyncOutcome =
@@ -18,6 +19,9 @@ export interface DriveCapability {
   create(parentId: string, name: string, json: unknown): Promise<DriveFile>;
   ensureFolder(parentId: string, name: string): Promise<DriveFile>;
   read(fileId: string): Promise<DriveFile | null>;
+}
+export interface ArtifactDriveCapability extends DriveCapability {
+  createBinary(parentId: string, name: string, contentType: string, bytes: Uint8Array): Promise<DriveFile>;
 }
 
 type DriveAuthEnvironment = GoogleServiceAccountEnvironment & {
@@ -76,6 +80,7 @@ export class GoogleDriveCapability implements DriveCapability {
   }
   async list(parentId: string): Promise<DriveFile[]> { const response = await this.request(`files?q=${encodeURIComponent(`'${parentId}' in parents and trashed = false`)}&fields=files(id,name,parents,mimeType)`); const body = await response.json() as { files?: Array<{ id: string; name: string; parents?: string[]; mimeType?: string }> }; return Promise.all((body.files ?? []).map(async (file) => { const mimeType = file.mimeType ?? ""; const json = mimeType === "application/json" ? await (await this.request(`files/${encodeURIComponent(file.id)}?alt=media`)).json() : null; return { id: file.id, name: file.name, parentId: file.parents?.[0] ?? "", mimeType, json }; })); }
   async create(parentId: string, name: string, json: unknown): Promise<DriveFile> { const boundary = `reliable-${crypto.randomUUID()}`; const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name, parents: [parentId], mimeType: "application/json" })}\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(json)}\r\n--${boundary}--`; const response = await this.request("files?uploadType=multipart&fields=id,name,parents,mimeType", { method: "POST", headers: { "content-type": `multipart/related; boundary=${boundary}` }, body }, true); const file = await response.json() as { id: string; name: string; parents?: string[]; mimeType?: string }; return { id: file.id, name: file.name, parentId: file.parents?.[0] ?? parentId, mimeType: file.mimeType ?? "application/json", json }; }
+  async createBinary(parentId: string, name: string, contentType: string, bytes: Uint8Array): Promise<DriveFile> { const boundary = `reliable-${crypto.randomUUID()}`; const header = new TextEncoder().encode(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name, parents: [parentId], mimeType: contentType })}\r\n--${boundary}\r\nContent-Type: ${contentType}\r\n\r\n`); const footer = new TextEncoder().encode(`\r\n--${boundary}--`); const body = new Uint8Array(header.length + bytes.length + footer.length); body.set(header); body.set(bytes, header.length); body.set(footer, header.length + bytes.length); const response = await this.request("files?uploadType=multipart&fields=id,name,parents,mimeType", { method: "POST", headers: { "content-type": `multipart/related; boundary=${boundary}` }, body }, true); const file = await response.json() as { id: string; name: string; parents?: string[]; mimeType?: string }; return { id: file.id, name: file.name, parentId: file.parents?.[0] ?? parentId, mimeType: file.mimeType ?? contentType, json: null }; }
   async ensureFolder(parentId: string, name: string): Promise<DriveFile> { const existing = (await this.list(parentId)).filter((file) => file.name === name && file.mimeType === DRIVE_FOLDER_MIME_TYPE).sort((left, right) => left.id.localeCompare(right.id))[0]; if (existing) return existing; const response = await this.request("files?fields=id,name,parents,mimeType", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, parents: [parentId], mimeType: DRIVE_FOLDER_MIME_TYPE }) }); const file = await response.json() as { id: string; name: string; parents?: string[]; mimeType?: string }; return { id: file.id, name: file.name, parentId: file.parents?.[0] ?? parentId, mimeType: file.mimeType ?? DRIVE_FOLDER_MIME_TYPE, json: null }; }
   async read(fileId: string): Promise<DriveFile | null> { try { const metadata = await (await this.request(`files/${encodeURIComponent(fileId)}?fields=id,name,parents,mimeType`)).json() as { id: string; name: string; parents?: string[]; mimeType?: string }; if (metadata.mimeType !== "application/json") return null; const json = await (await this.request(`files/${encodeURIComponent(fileId)}?alt=media`)).json(); return { id: metadata.id, name: metadata.name, parentId: metadata.parents?.[0] ?? "", mimeType: metadata.mimeType, json }; } catch (error) { if (isRecord(error) && error.status === 404) return null; throw error; } }
 }
@@ -141,6 +146,26 @@ export class DriveDestinationAdapter implements DestinationAdapter {
       return { kind: "success", syncedAt: generatedAt };
     } catch (error) { return problem(error); }
   }
+}
+
+/** Immutable interview output files are stored below a fixed interview/candidate/session hierarchy. */
+export class DriveArtifactAdapter {
+  constructor(private readonly drive: ArtifactDriveCapability, private readonly parentId: string) {}
+  async syncArtifact(artifact: ArtifactSubmission, bytes: Uint8Array): Promise<SyncOutcome> {
+    try {
+      if (!this.parentId) return { kind: "retryable", code: "drive_configuration_unavailable" };
+      const interview = await this.drive.ensureFolder(this.parentId, "interview");
+      const candidate = await this.drive.ensureFolder(interview.id, artifact.candidateId);
+      const session = await this.drive.ensureFolder(candidate.id, artifact.sessionId);
+      const existing = (await this.drive.list(session.id)).filter((file) => file.name === artifact.fileName && file.parentId === session.id).sort((a, b) => a.id.localeCompare(b.id))[0];
+      if (!existing) await this.drive.createBinary(session.id, artifact.fileName, artifact.contentType, bytes);
+      return { kind: "success", syncedAt: new Date().toISOString() };
+    } catch (error) { return problem(error); }
+  }
+}
+
+export function createProductionArtifactAdapter(env: DriveAuthEnvironment & { DRIVE_ARTIFACTS_PARENT_ID?: string }): DriveArtifactAdapter {
+  return new DriveArtifactAdapter(new GoogleDriveCapability(env), env.DRIVE_ARTIFACTS_PARENT_ID ?? "");
 }
 
 export function createProductionDriveAdapter(env: DriveAuthEnvironment & { DRIVE_EVENTS_PARENT_ID?: string; DRIVE_SNAPSHOTS_PARENT_ID?: string }): DestinationAdapter {
