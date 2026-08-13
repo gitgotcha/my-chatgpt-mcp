@@ -1,4 +1,5 @@
-const MAX_ARTIFACT_BYTES = 10 * 1024 * 1024;
+/** D1 cannot safely stage rows above this size; keep every immutable artifact below one MiB. */
+const MAX_ARTIFACT_BYTES = 1024 * 1024;
 const component = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const contentTypes = new Set([
   "application/json",
@@ -36,10 +37,10 @@ function required(value: Record<string, unknown>, field: string): string {
 function decodeBase64(value: string): Uint8Array {
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) throw new TypeError("Artifact contentBase64 is invalid");
   const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
-  if (value.length / 4 * 3 - padding > MAX_ARTIFACT_BYTES) throw new TypeError("Artifact size exceeds 10 MiB");
+  if (value.length / 4 * 3 - padding > MAX_ARTIFACT_BYTES) throw new TypeError("Artifact size exceeds 1 MiB");
   const binary = atob(value);
   const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-  if (bytes.byteLength > MAX_ARTIFACT_BYTES) throw new TypeError("Artifact size exceeds 10 MiB");
+  if (bytes.byteLength > MAX_ARTIFACT_BYTES) throw new TypeError("Artifact size exceeds 1 MiB");
   return bytes;
 }
 

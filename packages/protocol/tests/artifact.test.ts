@@ -35,8 +35,8 @@ describe("parseArtifactSubmission", () => {
     await expect(parseArtifactSubmission({ ...valid, ...change })).rejects.toThrow();
   });
 
-  it("rejects decoded artifacts larger than ten MiB", async () => {
-    const hugeBase64 = "A".repeat(14 * 1024 * 1024);
-    await expect(parseArtifactSubmission({ ...valid, contentBase64: hugeBase64, sha256: checksum })).rejects.toThrow(/size|checksum/i);
+  it("rejects decoded artifacts larger than one MiB before persistence", async () => {
+    const hugeBase64 = "A".repeat(4 * Math.ceil((1024 * 1024 + 1) / 3));
+    await expect(parseArtifactSubmission({ ...valid, contentBase64: hugeBase64, sha256: checksum })).rejects.toThrow(/1 MiB/i);
   });
 });
