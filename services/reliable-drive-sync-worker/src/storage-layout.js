@@ -1,3 +1,5 @@
+import { validateGenericProfileDomain } from "./generic-profile-contract.js";
+
 export const DEFAULT_PLUGIN_ROOT_NAME = "my-chatGPT-skills";
 export const USERS_FOLDER_NAME = "users";
 export const REGISTRY_FOLDER_NAME = "user-registry";
@@ -13,6 +15,22 @@ const DOMAIN_PATHS = new Map([
     ["plans", "daily"]
   ]]
 ]);
+
+// Generic profile domains only ever expose these two leaf directories, so a
+// generic domain can never grow specialized folders by name guessing.
+const GENERIC_PROFILE_PATHS = [
+  ["events"],
+  ["profile", "snapshots"]
+];
+
+function resolveGenericProfileSegments(segments) {
+  if (!Array.isArray(segments) || segments.length === 0) throw new Error("invalid_path");
+  const permitted = GENERIC_PROFILE_PATHS.some((candidate) =>
+    candidate.length === segments.length
+    && candidate.every((part, index) => part === segments[index]));
+  if (!permitted) throw new Error("invalid_path");
+  return [...segments];
+}
 
 const TRAVERSAL = new Set([".", ".."]);
 const hasSeparator = (value) => value.includes("/") || value.includes("\\");
@@ -89,6 +107,29 @@ export function createStorageLayout({ drive, pluginRootName = DEFAULT_PLUGIN_ROO
     return parent;
   }
 
+  async function ensureGenericProfilePath(userId, domain, segments) {
+    const safeDomain = validateGenericProfileDomain(domain);
+    const path = resolveGenericProfileSegments(segments);
+    let parent = await ensureUserRoot(userId);
+    parent = await drive.ensureFolder(parent.id, safeDomain);
+    for (const segment of path) parent = await drive.ensureFolder(parent.id, segment);
+    return parent;
+  }
+
+  async function findGenericProfilePath(userId, domain, segments) {
+    const safeDomain = validateGenericProfileDomain(domain);
+    const path = resolveGenericProfileSegments(segments);
+    let parent = await findUserRoot(userId);
+    if (!parent) return null;
+    parent = await drive.findFolder(parent.id, safeDomain);
+    if (!parent) return null;
+    for (const segment of path) {
+      parent = await drive.findFolder(parent.id, segment);
+      if (!parent) return null;
+    }
+    return parent;
+  }
+
   async function ensureRegistry() {
     const base = await ensureBase();
     return drive.ensureFolder(base.id, REGISTRY_FOLDER_NAME);
@@ -107,6 +148,8 @@ export function createStorageLayout({ drive, pluginRootName = DEFAULT_PLUGIN_ROO
     findUserRoot,
     ensureDomainPath,
     findDomainPath,
+    ensureGenericProfilePath,
+    findGenericProfilePath,
     ensureRegistry,
     findRegistry
   };
