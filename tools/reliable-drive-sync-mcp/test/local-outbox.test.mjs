@@ -16,24 +16,42 @@ const envelope = (overrides = {}) => ({
   ...overrides
 });
 
+const CLEANUP = {
+  recursive: true,
+  force: true,
+  maxRetries: 5,
+  retryDelay: 50
+};
+
 async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), "reliable-drive-sync-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const handles = [];
+  const track = (handle) => {
+    handles.push(handle);
+    return handle;
+  };
   const filename = join(directory, "outbox.sqlite");
-  const outbox = new LocalOutbox(filename, () => "2026-09-01T00:00:00.000Z");
-  t.after(() => outbox.close());
-  return { filename, outbox };
+  const outbox = track(new LocalOutbox(filename, () => "2026-09-01T00:00:00.000Z"));
+
+  // Node runs `t.after` hooks in registration order, so every SQLite handle
+  // must be closed inside the same hook that removes the directory. Closing
+  // in a later hook leaves the file locked on Windows and `rm` fails EBUSY.
+  t.after(async () => {
+    for (const handle of handles.reverse()) handle.close();
+    await rm(directory, CLEANUP);
+  });
+
+  return { filename, outbox, track };
 }
 
 test("enqueue is durable and identical requestId retries are idempotent", async (t) => {
-  const { filename, outbox } = await fixture(t);
+  const { filename, outbox, track } = await fixture(t);
   outbox.enqueue(envelope());
   outbox.enqueue(envelope());
   assert.equal(outbox.listPending().length, 1);
   outbox.close();
 
-  const reopened = new LocalOutbox(filename);
-  t.after(() => reopened.close());
+  const reopened = track(new LocalOutbox(filename));
   assert.equal(reopened.listPending()[0].requestId, "request-1");
 });
 
@@ -47,14 +65,13 @@ test("same requestId with different content is rejected", async (t) => {
 });
 
 test("sending rows recover after restart and only a valid cloud job acknowledgement deletes them", async (t) => {
-  const { filename, outbox } = await fixture(t);
+  const { filename, outbox, track } = await fixture(t);
   outbox.enqueue(envelope());
   outbox.markSending("request-1");
   assert.equal(outbox.acknowledge("request-1", ""), false);
   outbox.close();
 
-  const reopened = new LocalOutbox(filename);
-  t.after(() => reopened.close());
+  const reopened = track(new LocalOutbox(filename));
   assert.equal(reopened.listPending()[0].state, "pending");
   reopened.markSending("request-1");
   assert.equal(reopened.acknowledge("request-1", "job-1"), true);
@@ -62,11 +79,10 @@ test("sending rows recover after restart and only a valid cloud job acknowledgem
 });
 
 test("identity cache survives restart", async (t) => {
-  const { filename, outbox } = await fixture(t);
+  const { filename, outbox, track } = await fixture(t);
   outbox.rememberIdentity(" 乔炳源 ", "11111111-1111-4111-8111-111111111111");
   outbox.close();
-  const reopened = new LocalOutbox(filename);
-  t.after(() => reopened.close());
+  const reopened = track(new LocalOutbox(filename));
   assert.deepEqual(reopened.findIdentity("乔炳源"), {
     username: "乔炳源",
     userId: "11111111-1111-4111-8111-111111111111"
@@ -88,7 +104,11 @@ test("blocked rows are not retried", async (t) => {
 
 test("legacy event_key outboxes are upgraded without losing their rows", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "reliable-drive-sync-legacy-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const handles = [];
+  t.after(async () => {
+    for (const handle of handles.reverse()) handle.close();
+    await rm(directory, CLEANUP);
+  });
   const filename = join(directory, "outbox.sqlite");
   const legacy = new DatabaseSync(filename);
   legacy.exec(`CREATE TABLE local_outbox_events (
@@ -99,13 +119,15 @@ test("legacy event_key outboxes are upgraded without losing their rows", async (
   legacy.prepare(`INSERT INTO local_outbox_events
     (event_key, event_json, state, created_at, updated_at) VALUES (?, ?, 'pending', ?, ?)`)
     .run("legacy-event", JSON.stringify({ eventKey: "legacy-event", payload: {} }), "2026-09-01", "2026-09-01");
+  // `legacy` must be released before the file is reopened on Windows, so it is
+  // closed here instead of being tracked for the final hook.
   legacy.close();
 
   const outbox = new LocalOutbox(filename, () => "2026-09-01T00:00:00.000Z");
-  t.after(() => outbox.close());
+  handles.push(outbox);
   assert.deepEqual(outbox.listPending(), []);
   const check = new DatabaseSync(filename);
+  handles.push(check);
   assert.equal(check.prepare("SELECT state, last_error_code FROM local_outbox_events WHERE request_id = ?")
     .get("legacy-event").last_error_code, "legacy_outbox_requires_resubmit");
-  check.close();
 });
