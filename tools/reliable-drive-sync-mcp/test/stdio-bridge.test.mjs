@@ -1,6 +1,48 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { deriveWorkerUrl, handleRequest } from "../stdio-bridge.mjs";
+
+const bridgePath = fileURLToPath(new URL("../stdio-bridge.mjs", import.meta.url));
+
+function initializeBridgeWithEnvironment(environmentOverrides = {}) {
+  return new Promise((resolve, reject) => {
+    const env = { ...process.env };
+    delete env.RELIABLE_DRIVE_SYNC_WORKER_URL;
+    delete env.RELIABLE_DRIVE_SYNC_INGRESS_URL;
+    delete env.RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET;
+    Object.assign(env, environmentOverrides);
+    const child = spawn(process.execPath, [bridgePath], { env, stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    const timeout = setTimeout(() => {
+      child.kill();
+      reject(new Error(`bridge initialization timed out; stderr=${stderr}`));
+    }, 3000);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      const lineEnd = stdout.indexOf("\n");
+      if (lineEnd === -1) return;
+      clearTimeout(timeout);
+      child.kill();
+      resolve({ response: JSON.parse(stdout.slice(0, lineEnd)), stderr });
+    });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("exit", (code) => {
+      if (!stdout) {
+        clearTimeout(timeout);
+        reject(new Error(`bridge exited before initialization (code=${code}); stderr=${stderr}`));
+      }
+    });
+    child.stdin.end(`${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 99,
+      method: "initialize",
+      params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "1" } }
+    })}\n`);
+  });
+}
 
 test("derives Worker origin from the legacy ingress URL", () => {
   assert.equal(deriveWorkerUrl("https://reliable-drive-sync.qiaobingyuan886.workers.dev/v1/jobs"), "https://reliable-drive-sync.qiaobingyuan886.workers.dev");
@@ -10,6 +52,46 @@ test("tools/list exposes only submit_event", async () => {
   const response = await handleRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" });
   assert.deepEqual(response.result.tools.map(({ name }) => name), ["submit_event"]);
   assert.equal(response.result.tools[0].inputSchema.additionalProperties, false);
+  assert.deepEqual(response.result.tools[0].inputSchema.properties.identity.required, ["username"]);
+  assert.equal(response.result.tools[0].inputSchema.properties.identity.properties.userId.type, "string");
+});
+
+test("the MCP server initializes before delivery configuration is available", async () => {
+  const { response, stderr } = await initializeBridgeWithEnvironment();
+  assert.equal(response.id, 99);
+  assert.equal(response.result.serverInfo.name, "reliable-drive-sync");
+  assert.equal(stderr, "");
+});
+
+test("an invalid Worker URL does not prevent MCP initialization", async () => {
+  const { response, stderr } = await initializeBridgeWithEnvironment({
+    RELIABLE_DRIVE_SYNC_INGRESS_URL: "[https://worker.example](https://worker.example)",
+    RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET: "secret"
+  });
+  assert.equal(response.id, 99);
+  assert.equal(stderr, "");
+});
+
+test("an invalid Worker URL fails only when submit_event is called", async () => {
+  const response = await handleRequest({
+    jsonrpc: "2.0",
+    id: 101,
+    method: "tools/call",
+    params: { name: "submit_event", arguments: {} }
+  }, { workerUrl: "[https://worker.example](https://worker.example)", token: "secret" });
+  assert.equal(response.error.code, -32603);
+  assert.match(response.error.message, /Worker URL is invalid/);
+});
+
+test("submit_event reports incomplete delivery configuration after initialization", async () => {
+  const response = await handleRequest({
+    jsonrpc: "2.0",
+    id: 100,
+    method: "tools/call",
+    params: { name: "submit_event", arguments: {} }
+  });
+  assert.equal(response.error.code, -32603);
+  assert.match(response.error.message, /configuration is incomplete/i);
 });
 
 // The bridge is a pass-through for one tool only. Removed candidate and

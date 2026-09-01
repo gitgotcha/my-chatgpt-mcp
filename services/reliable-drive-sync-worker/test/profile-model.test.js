@@ -18,6 +18,7 @@ test("session events, pending reviews, and narrative do not change profile", () 
   ]);
   assert.deepEqual(snapshot.domainProfiles, {});
 });
+
 test("a weakness closes after two sessions and two variants pass", () => {
   const failed = { ...approvedReview, sessionId: "MOCK-1" };
   const passedA = { ...approvedReview, eventId: "33333333-3333-4333-8333-333333333333", eventKey: "review-2", sessionId: "MOCK-2", reviewVersion: 1, completedAt: "2026-08-15T10:00:00.000Z", profileChanges: [{ domain: "java_backend", weaknessId: "W-001", status: "passed", variantId: "scenario-a" }] };
@@ -34,3 +35,4 @@ test("a higher review version replaces an earlier review for the same session", 
   assert.deepEqual(snapshot.domainProfiles, {});
   assert.deepEqual(snapshot.sourceEventKeys, ["review:v2"]);
 });
+

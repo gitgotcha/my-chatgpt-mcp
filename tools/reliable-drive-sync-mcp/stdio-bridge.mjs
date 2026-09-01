@@ -2,7 +2,7 @@ import readline from "node:readline";
 
 const TOOL = {
   name: "submit_event",
-  description: "Submit a validated interview or algorithm event.",
+  description: "Submit a validated system, interview, algorithm or resume-knowledge event. The Worker resolves or registers the stable userId from the display name.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -14,7 +14,7 @@ const TOOL = {
       identity: {
         type: "object",
         additionalProperties: false,
-        required: ["userId", "username"],
+        required: ["username"],
         properties: {
           userId: { type: "string" },
           username: { type: "string" },
@@ -31,14 +31,21 @@ export function deriveWorkerUrl(configuredUrl) {
   const url = new URL(configuredUrl);
   return url.origin;
 }
+
 const reply = (id, result) => ({ jsonrpc: "2.0", id, result });
 const failure = (id, code, message) => ({ jsonrpc: "2.0", id, error: { code, message } });
 
 async function forwardSubmitEvent(id, args, { workerUrl, token, fetchImpl = fetch }) {
   if (!workerUrl || !token) return failure(id, -32603, "Bridge configuration is incomplete");
+  let destination;
+  try {
+    destination = deriveWorkerUrl(workerUrl);
+  } catch {
+    return failure(id, -32603, "Bridge Worker URL is invalid");
+  }
   let response;
   try {
-    response = await fetchImpl(workerUrl, {
+    response = await fetchImpl(destination, {
       method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: JSON.stringify({
@@ -82,36 +89,25 @@ export async function handleRequest(request, options = {}) {
 function configurationFromEnvironment() {
   const configuredUrl = process.env.RELIABLE_DRIVE_SYNC_WORKER_URL
     ?? process.env.RELIABLE_DRIVE_SYNC_INGRESS_URL;
-  if (!configuredUrl || !process.env.RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET) {
-    throw new Error("RELIABLE_DRIVE_SYNC_INGRESS_URL and RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET are required");
-  }
   return {
-    workerUrl: deriveWorkerUrl(configuredUrl),
+    workerUrl: configuredUrl,
     token: process.env.RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET
   };
 }
 
 if (process.argv[1] && new URL(import.meta.url).pathname.toLowerCase() === new URL(`file://${process.argv[1].replaceAll("\\", "/")}`).pathname.toLowerCase()) {
-  let config;
-  try {
-    config = configurationFromEnvironment();
-  } catch (cause) {
-    process.stderr.write(`${cause.message}\n`);
-    process.exitCode = 1;
-  }
-  if (config) {
-    const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
-    input.on("line", async (line) => {
-      if (!line.trim()) return;
-      let request;
-      try {
-        request = JSON.parse(line);
-      } catch {
-        process.stdout.write(`${JSON.stringify(failure(null, -32700, "Parse error"))}\n`);
-        return;
-      }
-      const response = await handleRequest(request, config);
-      if (response) process.stdout.write(`${JSON.stringify(response)}\n`);
-    });
-  }
+  const config = configurationFromEnvironment();
+  const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+  input.on("line", async (line) => {
+    if (!line.trim()) return;
+    let request;
+    try {
+      request = JSON.parse(line);
+    } catch {
+      process.stdout.write(`${JSON.stringify(failure(null, -32700, "Parse error"))}\n`);
+      return;
+    }
+    const response = await handleRequest(request, config);
+    if (response) process.stdout.write(`${JSON.stringify(response)}\n`);
+  });
 }

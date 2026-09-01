@@ -98,9 +98,24 @@ identity returns `-32602`.
    wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON
    ```
 
-3. Deploy with `npx wrangler deploy`.
-4. Configure the published HTTPS endpoint as the `reliable-drive-sync` remote
-   MCP in the eligible Codex workspace.
+3. For ChatGPT Work, run the one-step PowerShell setup from this directory:
+
+   ```powershell
+   .\setup-chatgpt-work.ps1
+   ```
+
+   It generates a new 256-bit URL token, stores it as the Cloudflare secret
+   `MCP_URL_TOKEN`, deploys the Worker, and copies the complete MCP URL to the
+   clipboard. It never prints or commits the token.
+
+4. In ChatGPT Work, enable Developer mode, open Plugins, choose `+`, select an
+   HTTPS/Streamable HTTP connection, paste the clipboard URL, and choose
+   **No Authentication**. Tool discovery must show only `submit_event`.
+
+The URL itself is the credential. Do not publish, screenshot, or commit it. If
+it is exposed, run `setup-chatgpt-work.ps1` again; the new secret immediately
+invalidates the prior URL after deployment. The original Worker root remains a
+Bearer-authenticated JSON-RPC endpoint for the local Codex and WorkBuddy bridge.
 
 ## Statuses and outputs
 

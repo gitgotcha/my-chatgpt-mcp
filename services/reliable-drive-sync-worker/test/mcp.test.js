@@ -1,10 +1,36 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { handleRequest } from "../src/index.js";
+import worker, { handleRemoteRequest, handleRequest } from "../src/index.js";
 import { validateEnvelope, ALLOWED_NAMESPACES } from "../src/protocol.js";
 
 function env() {
-  return { MCP_BEARER_TOKEN: "secret", GOOGLE_DRIVE_FOLDER_ID: "root" };
+  return {
+    MCP_BEARER_TOKEN: "secret",
+    MCP_URL_TOKEN: "0123456789abcdefghijklmnopqrstuvwxyzABCDEFG",
+    GOOGLE_DRIVE_FOLDER_ID: "root"
+  };
+}
+
+const REMOTE_TOKEN = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFG";
+
+function remoteRequest(method, params, {
+  token = REMOTE_TOKEN,
+  httpMethod = "POST",
+  id = 1,
+  protocolVersion = "2025-03-26"
+} = {}) {
+  const init = {
+    method: httpMethod,
+    headers: {
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+      "mcp-protocol-version": protocolVersion
+    }
+  };
+  if (httpMethod === "POST") {
+    init.body = JSON.stringify({ jsonrpc: "2.0", id, method, params });
+  }
+  return new Request(`https://example.test/mcp/${token}`, init);
 }
 
 function request(method, params, token = "secret") {
@@ -95,6 +121,68 @@ test("MCP exposes only submit_event", async () => {
   assert.equal(payload.result.tools[0].inputSchema.additionalProperties, false);
   assert.equal(payload.result.tools[0].inputSchema.properties.payload.type, "object");
   assert.deepEqual(payload.result.tools[0].inputSchema.properties.identity.required, ["username"]);
+});
+
+test("remote MCP initializes through its capability URL without bearer auth", async () => {
+  const response = await worker.fetch(remoteRequest("initialize", {
+    protocolVersion: "2025-03-26",
+    capabilities: {},
+    clientInfo: { name: "chatgpt", version: "1" }
+  }), env());
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /application\/json/);
+  assert.equal(payload.result.protocolVersion, "2025-03-26");
+  assert.equal(payload.result.serverInfo.name, "reliable-drive-sync");
+});
+
+test("remote MCP exposes only submit_event", async () => {
+  const response = await worker.fetch(remoteRequest("tools/list", {}), env());
+  const payload = await response.json();
+  assert.equal(response.headers.get("mcp-protocol-version"), "2025-03-26");
+  assert.deepEqual(payload.result.tools.map((tool) => tool.name), ["submit_event"]);
+  assert.deepEqual(payload.result.tools[0].inputSchema.properties.identity.required, ["username"]);
+});
+
+test("remote MCP hides the endpoint when the URL token is wrong or missing", async () => {
+  const wrong = await worker.fetch(remoteRequest("tools/list", {}, { token: "wrong" }), env());
+  const missing = await worker.fetch(remoteRequest("tools/list", {}), {
+    MCP_BEARER_TOKEN: "secret",
+    GOOGLE_DRIVE_FOLDER_ID: "root"
+  });
+  assert.equal(wrong.status, 404);
+  assert.equal(missing.status, 404);
+});
+
+test("remote MCP rejects non-POST transport methods", async () => {
+  const response = await worker.fetch(remoteRequest("tools/list", {}, { httpMethod: "GET" }), env());
+  assert.equal(response.status, 405);
+  assert.equal(response.headers.get("allow"), "POST");
+});
+
+test("remote MCP accepts notifications without returning JSON-RPC content", async () => {
+  const response = await worker.fetch(remoteRequest("notifications/initialized", {}, { id: undefined }), env());
+  assert.equal(response.status, 202);
+  assert.equal(await response.text(), "");
+});
+
+test("remote MCP submit_event reuses the existing validated dispatcher", async () => {
+  const drive = algorithmDrive();
+  const response = await handleRemoteRequest(remoteRequest("tools/call", {
+    name: "submit_event",
+    arguments: {
+      schemaVersion: "1.2",
+      namespace: "system",
+      eventType: "system.user-registered",
+      identity: { username: "Ada" },
+      payload: { displayName: "Ada" },
+      requestId: "00000000-0000-4000-8000-000000000099"
+    }
+  }), env(), { drive });
+  const payload = await response.json();
+  const value = JSON.parse(payload.result.content[0].text);
+  assert.equal(value.status, "ok");
+  assert.equal(value.identity.username, "Ada");
 });
 
 test("MCP rejects an incorrect bearer token", async () => {
