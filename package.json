@@ -1,25 +1,13 @@
 {
   "name": "reliable-drive-sync",
-  "version": "0.1.0",
   "private": true,
-  "packageManager": "pnpm@10.20.0",
-  "engines": {
-    "node": ">=22"
-  },
+  "version": "2.0.0",
+  "type": "module",
+  "engines": { "node": ">=22" },
   "scripts": {
-    "build": "pnpm --filter @reliable-drive-sync/protocol build && pnpm --filter @reliable-drive-sync/mcp-server build",
-    "verify:build": "node scripts/verify-build.mjs",
-    "test": "vitest run",
-    "typecheck": "tsc --noEmit"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3"
-    ]
-  },
-  "devDependencies": {
-    "typescript": "^5.9.3",
-    "vitest": "^3.2.4",
-    "wrangler": "^4.121.0"
+    "test": "npm run test:worker && npm run test:bridge",
+    "test:worker": "node --test services/reliable-drive-sync-worker/test/*.js",
+    "test:bridge": "node --test tools/reliable-drive-sync-mcp/test/*.mjs",
+    "deploy:worker": "npx wrangler deploy --config services/reliable-drive-sync-worker/wrangler.toml"
   }
 }

@@ -1,19 +1,17 @@
 {
   "name": "reliable-drive-sync",
-  "version": "0.1.0",
-  "description": "Reliable local event protocol for Drive sync requests.",
-  "author": {
-    "name": "Reliable Drive Sync"
-  },
+  "version": "2.0.0",
+  "description": "Single-tool event persistence boundary for Reliable Drive Sync.",
+  "author": { "name": "Reliable Drive Sync" },
   "license": "MIT",
-  "keywords": ["drive", "sync", "protocol"],
+  "keywords": ["drive", "sync", "submit_event"],
   "interface": {
     "displayName": "Reliable Drive Sync",
-    "shortDescription": "Validate local Drive sync events.",
-    "longDescription": "Provides a safe, local protocol foundation for reliable Google Drive sync requests.",
+    "shortDescription": "Persist validated skill events through one MCP tool.",
+    "longDescription": "Provides the submit_event MCP boundary for schema-1.2 events and canonical Google Drive snapshots.",
     "developerName": "Reliable Drive Sync",
     "category": "Productivity",
-    "capabilities": ["Read"],
-    "defaultPrompt": ["Validate a local Drive sync event."]
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": ["Submit a validated event through Reliable Drive Sync."]
   }
 }
