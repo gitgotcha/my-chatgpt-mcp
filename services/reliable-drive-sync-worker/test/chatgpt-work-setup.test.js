@@ -14,3 +14,10 @@ test("ChatGPT Work setup generates a secret, deploys, and copies the capability 
   assert.doesNotMatch(script, /MCP_URL_TOKEN\s*=\s*['"][A-Za-z0-9_-]{32,}/);
   assert.doesNotMatch(script, /Write-Output\s+\$mcpUrl/);
 });
+
+test("ChatGPT Work setup stays ASCII for Windows PowerShell 5.1", async () => {
+  const scriptPath = fileURLToPath(new URL("../setup-chatgpt-work.ps1", import.meta.url));
+  const script = await readFile(scriptPath, "utf8");
+  const nonAscii = [...script].filter((character) => character.codePointAt(0) > 0x7f);
+  assert.deepEqual(nonAscii, []);
+});

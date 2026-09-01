@@ -35,4 +35,4 @@ try {
 
 $mcpUrl = $WorkerUrl.TrimEnd('/') + '/mcp/' + $token
 Set-Clipboard -Value $mcpUrl
-Write-Output '部署成功。GPT Work MCP 地址已复制到剪贴板，请勿公开或截图该地址。'
+Write-Output 'Deployment complete. The ChatGPT Work MCP URL is in your clipboard. Keep it private.'
