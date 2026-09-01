@@ -5,7 +5,7 @@ import { DeliveryService } from "./delivery-service.mjs";
 
 const TOOL = {
   name: "submit_event",
-  description: "Durably queue a validated system, interview, algorithm or resume-knowledge event in the local SQLite Outbox before cloud delivery.",
+  description: "Discover generic profile capabilities, read profiles, or durably queue a validated system, interview, algorithm, resume-knowledge or profile evidence event in the local SQLite Outbox before cloud delivery.",
   inputSchema: {
     type: "object",
     additionalProperties: false,

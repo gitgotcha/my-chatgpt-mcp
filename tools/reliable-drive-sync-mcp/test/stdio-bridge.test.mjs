@@ -330,3 +330,18 @@ test("concurrent submit_event calls in the real bridge share one durable Outbox"
   handles.push(check);
   assert.equal(check.prepare("SELECT COUNT(*) AS total FROM local_outbox_events").get().total, 2);
 });
+
+test("the submit_event tool description advertises generic profile capability and read/write operations", async () => {
+  const response = await handleRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  const [tool] = response.result.tools;
+  assert.equal(tool.name, "submit_event");
+  assert.match(tool.description, /profile capabilit/);
+  assert.match(tool.description, /read/i);
+  assert.match(tool.description, /delivery/i);
+});
+
+test("calling a tool other than submit_event is rejected", async () => {
+  const response = await handleRequest({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "read_profile", arguments: {} } });
+  assert.equal(response.error.code, -32601);
+  assert.match(response.error.message, /Tool not implemented/);
+});

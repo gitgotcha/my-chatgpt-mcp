@@ -1,8 +1,28 @@
 import { randomUUID } from "node:crypto";
+import { validateGenericProfileDomain, validateGenericProfileEvent } from "../../services/reliable-drive-sync-worker/src/generic-profile-contract.js";
 
 const READ_ONLY_EVENTS = new Set([
   "interview.session.list",
-  "interview.session.load"
+  "interview.session.load",
+  "system.capabilities.read",
+  "system.user.resolve",
+  "profile.snapshot.read"
+]);
+
+// Generic profile evidence must never auto-register a stranger; resolve an
+// existing identity before any durable enqueue and never fabricate a UUID.
+const EXISTING_IDENTITY_WRITES = new Set(["profile.evidence.recorded"]);
+
+const PERMANENT_ERRORS = new Set([
+  "identity_mismatch",
+  "identity_conflict",
+  "user_conflict",
+  "invalid_display_name",
+  "invalid_user_id",
+  "unsupported_capability",
+  "invalid_domain",
+  "invalid_profile_event",
+  "identity_not_found"
 ]);
 
 function isReadOnly(envelope) {
@@ -28,6 +48,9 @@ function bindIdentity(envelope, identity) {
   bound.payload = { ...(bound.payload ?? {}), userId: identity.userId, username: identity.username };
   if (bound.payload.event && typeof bound.payload.event === "object") {
     bound.payload.event = { ...bound.payload.event, userId: identity.userId, username: identity.username };
+    if (bound.eventType === "profile.evidence.recorded" && bound.payload.domain !== undefined) {
+      bound.payload.event.domain = bound.payload.domain;
+    }
   }
   return bound;
 }
@@ -37,8 +60,7 @@ function verifiedIdentity(identity) {
 }
 
 function permanentIdentityError(error) {
-  return ["identity_mismatch", "identity_conflict", "user_conflict", "invalid_display_name", "invalid_user_id"]
-    .includes(error instanceof Error ? error.message : String(error));
+  return PERMANENT_ERRORS.has(error instanceof Error ? error.message : String(error));
 }
 
 function safeErrorCode(error, fallback = "delivery_failed") {
@@ -72,6 +94,9 @@ export class DeliveryService {
 
   async submit(input) {
     if (isReadOnly(input)) return this.query(input);
+    if (EXISTING_IDENTITY_WRITES.has(input.eventType)) {
+      return this.submitExistingIdentityWrite(input);
+    }
 
     const username = usernameOf(input);
     let identity = this.outbox.findIdentity(username);
@@ -124,6 +149,79 @@ export class DeliveryService {
         if (!permanentIdentityError(error)) throw error;
       }
     }
+  }
+
+  async resolveExistingIdentity(username, preferredUserId) {
+    let response;
+    try {
+      response = await this.fetchWithDeadline(`${workerOrigin(this.workerUrl)}/v1/identity?username=${encodeURIComponent(username)}`, {
+        headers: { authorization: `Bearer ${this.token}` }
+      });
+    } catch (error) {
+      // Generic profile writes never fabricate a UUID on a slow lookup.
+      throw new Error(safeErrorCode(error, "identity_lookup_failed"));
+    }
+    if (response.status === 200) {
+      const body = await responseBody(response);
+      const identity = body?.identity;
+      if (!identity?.userId || !identity?.username) throw new Error("invalid_identity_response");
+      if (preferredUserId && preferredUserId !== identity.userId) throw new Error("identity_mismatch");
+      return verifiedIdentity(this.outbox.rememberIdentity(identity.username, identity.userId));
+    }
+    if (response.status === 404) throw new Error("identity_not_found");
+    const body = await responseBody(response);
+    throw new Error(body?.error ?? `identity_${response.status}`);
+  }
+
+  async submitExistingIdentityWrite(input) {
+    // Validate the caller shape and domain before any durable enqueue so a
+    // malformed profile event never produces a retryable job.
+    try {
+      validateGenericProfileDomain(input.payload?.domain);
+    } catch {
+      throw new Error("invalid_domain");
+    }
+    try {
+      validateGenericProfileEvent(input.payload?.event);
+    } catch (cause) {
+      throw new Error(cause instanceof Error && cause.message === "invalid_domain" ? "invalid_domain" : "invalid_profile_event");
+    }
+    const userId = input.identity?.userId;
+    const rawUsername = input.identity?.username;
+    if (typeof userId !== "string" || typeof rawUsername !== "string" || !rawUsername.trim()) {
+      throw new Error("invalid_identity");
+    }
+    const username = rawUsername.normalize("NFKC").trim();
+    const cached = this.outbox.findIdentity(username);
+    if (cached && cached.userId !== userId) throw new Error("identity_mismatch");
+
+    let identity;
+    if (cached) {
+      identity = cached;
+    } else {
+      identity = await this.resolveExistingIdentity(username, userId);
+    }
+
+    const bound = bindIdentity(input, identity);
+    this.outbox.enqueue(input);
+    if (typeof this.outbox.bindEnvelope === "function") this.outbox.bindEnvelope(input.requestId, bound);
+    else if (this.outbox.rows instanceof Map) this.outbox.rows.set(input.requestId, bound);
+
+    const records = this.outbox.listPending().slice(0, this.maxFlushEvents);
+    let accepted = false;
+    for (const record of records) {
+      const delivered = await this.deliver(record);
+      if (record.requestId === input.requestId) accepted = delivered;
+    }
+    return accepted ? {
+      status: "queued",
+      accepted: true,
+      deliveryState: "cloud_accepted",
+      eventKey: input.payload?.event?.eventKey ?? input.requestId,
+      requestId: input.requestId,
+      identity: verifiedIdentity(identity),
+      persistence: { localOutbox: "acknowledged", cloudOutbox: "accepted", drive: "pending" }
+    } : this.pendingResult(input, identity);
   }
 
   async resolveIdentity(username, preferredUserId) {
