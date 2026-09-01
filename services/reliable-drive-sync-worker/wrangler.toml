@@ -6,6 +6,7 @@ compatibility_date = "2026-08-13"
 SYNC_WORKER_URL = "https://reliable-drive-sync.qiaobingyuan886.workers.dev/v1/sync"
 QSTASH_FAILURE_CALLBACK_URL = "https://reliable-drive-sync.qiaobingyuan886.workers.dev/v1/qstash/failure"
 QSTASH_URL = "https://qstash-us-east-1.upstash.io"
+GENERIC_PROFILE_ENABLED = "false"
 
 [[d1_databases]]
 binding = "DB"

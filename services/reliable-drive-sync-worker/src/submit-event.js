@@ -1,4 +1,6 @@
 import { ProtocolError, inspectEnvelope, validateEventForBoundary, hasEventPayload } from "./protocol.js";
+import { capabilitiesFor } from "./capabilities.js";
+import { validateGenericProfileDomain, validateGenericProfileEvent } from "./generic-profile-contract.js";
 import { createDriveRepository } from "./google-drive.js";
 import { createStorageLayout } from "./storage-layout.js";
 import { createUserStore } from "./user-store.js";
@@ -8,6 +10,7 @@ import { createInterviewStore } from "./interview-store.js";
 import { createAlgorithmStore } from "./algorithm-store.js";
 import { createResumeKnowledgeStore } from "./resume-knowledge-store.js";
 import { createMigrationStore } from "./migration-store.js";
+import { createGenericProfileStore } from "./generic-profile-store.js";
 
 const DOMAIN_BY_NAMESPACE = new Map([
   ["algorithm", "algorithm"],
@@ -23,6 +26,20 @@ const READ_ONLY_IDENTITY_EVENTS = new Set([
   "interview.session.load"
 ]);
 
+// Generic profile operations only ever read or write for an already-verified
+// user; they must never auto-register a stranger as a side effect.
+const EXISTING_IDENTITY_EVENTS = new Set([
+  "system.user.resolve",
+  "profile.evidence.recorded",
+  "profile.snapshot.read"
+]);
+
+const GENERIC_EVENTS = new Set([
+  "system.user.resolve",
+  "profile.evidence.recorded",
+  "profile.snapshot.read"
+]);
+
 const toProtocolError = (cause) => {
   if (cause instanceof ProtocolError) return cause;
   const status = cause instanceof Error && cause.message ? cause.message : "invalid_event";
@@ -30,6 +47,7 @@ const toProtocolError = (cause) => {
 };
 
 function displayNameOf(envelope) {
+  if (envelope.eventType === "system.user.resolve") return envelope.payload?.displayName;
   if (envelope.eventType.startsWith("system.")) return envelope.payload?.displayName;
   return envelope.identity?.username ?? envelope.payload?.username ?? envelope.payload?.event?.username;
 }
@@ -40,6 +58,18 @@ async function bindIdentity(envelope, userStore) {
     throw new ProtocolError("invalid_display_name");
   }
   const preferredUserId = envelope.identity?.userId ?? envelope.payload?.userId;
+  if (EXISTING_IDENTITY_EVENTS.has(envelope.eventType)) {
+    try {
+      const checked = preferredUserId
+        ? (await userStore.verify({ userId: preferredUserId, displayName })).identity
+        : await userStore.findByDisplayName(displayName);
+      if (!checked) throw new ProtocolError("identity_not_found");
+      const { userId, displayName: name, nameKey } = checked;
+      return { userId, username: name, displayName: name, nameKey, verified: true };
+    } catch (cause) {
+      throw toProtocolError(cause);
+    }
+  }
   // A read-only binding refuses to materialise a registration, so an unknown
   // user is reported instead of silently created as a side effect.
   if (READ_ONLY_IDENTITY_EVENTS.has(envelope.eventType)) {
@@ -66,24 +96,41 @@ async function bindIdentity(envelope, userStore) {
 function withIdentity(envelope, identity) {
   const bound = structuredClone(envelope);
   bound.identity = { userId: identity.userId, username: identity.username };
-  bound.payload.userId = identity.userId;
-  bound.payload.username = identity.username;
+  if (bound.payload) {
+    bound.payload.userId = identity.userId;
+    bound.payload.username = identity.username;
+  }
   if (hasEventPayload(bound.eventType) && bound.payload.event) {
     bound.payload.event.userId = identity.userId;
     bound.payload.event.username = identity.username;
+    if (bound.eventType === "profile.evidence.recorded" && bound.payload.domain !== undefined) {
+      bound.payload.event.domain = bound.payload.domain;
+    }
   }
   return bound;
 }
 
 export async function dispatchSubmitEvent(env, args, deps) {
   const envelope = inspectEnvelope(args);
+
+  if (envelope.eventType === "system.capabilities.read") {
+    return capabilitiesFor(env);
+  }
+
+  const genericProfileEnabledFlag = env.GENERIC_PROFILE_ENABLED === "true";
+  if (!genericProfileEnabledFlag && GENERIC_EVENTS.has(envelope.eventType)) {
+    throw new ProtocolError("unsupported_capability");
+  }
+
   const drive = deps.drive ?? createDriveRepository(env, deps);
   const layout = deps.layout ?? createStorageLayout({ drive });
   const userStore = deps.userStore ?? createUserStore({ layout, drive });
   const identity = await bindIdentity(envelope, userStore);
   const bound = withIdentity(envelope, identity);
 
-  if (hasEventPayload(bound.eventType)) {
+  if (bound.eventType === "profile.evidence.recorded") {
+    validateGenericProfileEvent(bound.payload.event, { boundIdentity: identity, domain: bound.payload.domain });
+  } else if (hasEventPayload(bound.eventType)) {
     validateEventForBoundary(bound.payload.event, bound.eventType);
   }
 
@@ -104,8 +151,29 @@ export async function dispatchSubmitEvent(env, args, deps) {
     drive
   });
   const migrationStore = () => createMigrationStore({ legacyReader, layout, drive, userStore });
+  const genericProfileStore = () => deps.genericProfileStore
+    ?? createGenericProfileStore({ userStore, layout, drive });
 
   const handlers = {
+    "system.capabilities.read": async () => capabilitiesFor(env),
+    "system.user.resolve": async () => ({
+      status: "ok",
+      data: { userId: identity.userId, username: identity.username }
+    }),
+    "profile.evidence.recorded": async (_env, { payload }) => {
+      try {
+        return await genericProfileStore().submitEvidence(identity, payload.domain, payload.event);
+      } catch (cause) {
+        throw toProtocolError(cause);
+      }
+    },
+    "profile.snapshot.read": async (_env, { payload }) => {
+      try {
+        return await genericProfileStore().readProfile(identity, payload.domain);
+      } catch (cause) {
+        throw toProtocolError(cause);
+      }
+    },
     "system.user-registered": async () => ({
       status: "ok",
       data: { registered: true, userId: identity.userId }

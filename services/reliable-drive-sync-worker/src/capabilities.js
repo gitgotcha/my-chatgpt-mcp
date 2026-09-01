@@ -7,6 +7,8 @@ export const GENERIC_PROFILE_EVENT_TYPES = Object.freeze([
   "profile.snapshot.read"
 ]);
 
+export const genericProfileEnabled = (env = {}) => env?.GENERIC_PROFILE_ENABLED === "true";
+
 export function capabilitiesFor(env = {}) {
   const enabled = env.GENERIC_PROFILE_ENABLED === "true";
   return {

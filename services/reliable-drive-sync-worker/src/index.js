@@ -30,6 +30,9 @@ export function createWorker(env, deps = {}) {
   const identityLookup = deps.identityLookup
     ?? ((username) => services().userStore.findByDisplayName(username));
   const query = deps.query ?? ((envelope) => {
+    if (envelope.eventType === "system.capabilities.read") {
+      return dispatchSubmitEvent(env, envelope, deps.submitEventDeps ?? {});
+    }
     const runtime = services();
     return dispatchSubmitEvent(env, envelope, {
       ...(deps.submitEventDeps ?? {}),
