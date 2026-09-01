@@ -41,6 +41,11 @@ function permanentIdentityError(error) {
     .includes(error instanceof Error ? error.message : String(error));
 }
 
+function safeErrorCode(error, fallback = "delivery_failed") {
+  const value = error instanceof Error ? error.message : String(error ?? "");
+  return /^[a-z][a-z0-9_]{0,80}$/.test(value) ? value : fallback;
+}
+
 async function responseBody(response) {
   try { return await response.json(); }
   catch { return null; }
@@ -89,7 +94,9 @@ export class DeliveryService {
           this.outbox.markBlocked?.(input.requestId, error.message);
           throw error;
         }
-        return this.pendingResult(input, identity);
+        const code = safeErrorCode(error, "identity_lookup_failed");
+        this.outbox.markPending(input.requestId, code);
+        return this.pendingResult(input, identity, code);
       }
     }
 
@@ -178,7 +185,7 @@ export class DeliveryService {
     return body;
   }
 
-  pendingResult(input, identity) {
+  pendingResult(input, identity, lastErrorCode) {
     return {
       status: "queued_locally",
       accepted: false,
@@ -186,6 +193,7 @@ export class DeliveryService {
       eventKey: input.payload?.event?.eventKey ?? input.requestId,
       requestId: input.requestId,
       ...(identity ? { identity: verifiedIdentity(identity) } : {}),
+      ...(lastErrorCode ? { lastErrorCode } : {}),
       persistence: { localOutbox: "durable", cloudOutbox: "pending", drive: "pending" }
     };
   }

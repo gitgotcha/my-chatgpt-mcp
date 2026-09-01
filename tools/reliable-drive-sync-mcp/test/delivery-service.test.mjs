@@ -97,6 +97,21 @@ test("a transport failure leaves the event durable and reports pending", async (
   assert.equal(outbox.rows.size, 1);
 });
 
+test("identity lookup failures are visible without exposing request details", async () => {
+  const outbox = new MemoryOutbox();
+  const service = new DeliveryService({
+    outbox,
+    workerUrl: "https://worker.example",
+    token: "secret",
+    fetchImpl: async () => { throw new Error("identity_dns_failed"); }
+  });
+
+  const result = await service.submit(registration({ requestId: "identity-failure" }));
+
+  assert.equal(result.deliveryState, "pending");
+  assert.equal(result.lastErrorCode, "identity_dns_failed");
+});
+
 test("a hung network call respects the local deadline and leaves the event durable", async () => {
   const outbox = new MemoryOutbox();
   const service = new DeliveryService({
