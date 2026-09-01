@@ -321,8 +321,8 @@ test("concurrent submit_event calls in the real bridge share one durable Outbox"
     responses.slice(1).map((response) => response.result.structuredContent.requestId).sort(),
     ["req-a", "req-b"]
   );
-  // The Outbox is loaded lazily, so the warning may only appear once two
-  // concurrent calls have shared a single lazily created service.
+  // The Outbox is loaded lazily, so the experimental SQLite warning may only
+  // appear once a submit_event call actually needs durable storage.
   assert.equal((stderr.match(/SQLite is an experimental feature/g) ?? []).length, 1);
 
   const { DatabaseSync } = await import("node:sqlite");
