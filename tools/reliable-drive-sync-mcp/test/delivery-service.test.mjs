@@ -112,6 +112,25 @@ test("identity lookup failures are visible without exposing request details", as
   assert.equal(result.lastErrorCode, "identity_dns_failed");
 });
 
+test("a new user can submit when the optional identity lookup times out", async () => {
+  const outbox = new MemoryOutbox();
+  const service = new DeliveryService({
+    outbox,
+    workerUrl: "https://worker.example",
+    token: "secret",
+    timeoutMs: 5,
+    uuid: () => "11111111-1111-4111-8111-111111111111",
+    fetchImpl: async (url) => url.includes("/v1/identity")
+      ? new Promise(() => {})
+      : Response.json({ jobId: "job-after-lookup-timeout" }, { status: 202 })
+  });
+
+  const result = await service.submit(registration({ requestId: "lookup-timeout" }));
+
+  assert.equal(result.deliveryState, "cloud_accepted");
+  assert.equal(result.identity.userId, "11111111-1111-4111-8111-111111111111");
+});
+
 test("a hung network call respects the local deadline and leaves the event durable", async () => {
   const outbox = new MemoryOutbox();
   const service = new DeliveryService({

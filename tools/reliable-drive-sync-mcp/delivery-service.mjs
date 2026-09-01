@@ -59,7 +59,7 @@ export class DeliveryService {
     fetchImpl = fetch,
     uuid = randomUUID,
     maxFlushEvents = 20,
-    timeoutMs = 2_000
+    timeoutMs = 10_000
   }) {
     this.outbox = outbox;
     this.workerUrl = workerUrl;
@@ -127,9 +127,20 @@ export class DeliveryService {
   }
 
   async resolveIdentity(username, preferredUserId) {
-    const response = await this.fetchWithDeadline(`${workerOrigin(this.workerUrl)}/v1/identity?username=${encodeURIComponent(username)}`, {
-      headers: { authorization: `Bearer ${this.token}` }
-    });
+    let response;
+    try {
+      response = await this.fetchWithDeadline(`${workerOrigin(this.workerUrl)}/v1/identity?username=${encodeURIComponent(username)}`, {
+        headers: { authorization: `Bearer ${this.token}` }
+      });
+    } catch (error) {
+      // For a new user without an explicit id, the Worker is authoritative and
+      // will resolve/create the identity when it dispatches the accepted job.
+      // Do not make a slow identity lookup prevent durable cloud acceptance.
+      if (preferredUserId === undefined && safeErrorCode(error) === "ingress_timeout") {
+        return verifiedIdentity(this.outbox.rememberIdentity(username, this.uuid()));
+      }
+      throw error;
+    }
     if (response.status === 200) {
       const body = await responseBody(response);
       const identity = body?.identity;
