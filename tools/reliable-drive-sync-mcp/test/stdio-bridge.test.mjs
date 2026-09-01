@@ -1,10 +1,44 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { deriveWorkerUrl, handleRequest } from "../stdio-bridge.mjs";
 
 const bridgePath = fileURLToPath(new URL("../stdio-bridge.mjs", import.meta.url));
+
+const CLEANUP = {
+  recursive: true,
+  force: true,
+  maxRetries: 5,
+  retryDelay: 50
+};
+
+const initializeRequest = (id) => ({
+  jsonrpc: "2.0",
+  id,
+  method: "initialize",
+  params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "1" } }
+});
+
+const submitCall = (id, requestId) => ({
+  jsonrpc: "2.0",
+  id,
+  method: "tools/call",
+  params: {
+    name: "submit_event",
+    arguments: {
+      schemaVersion: "1.2",
+      namespace: "system",
+      eventType: "system.user-registered",
+      identity: { username: "乔炳源" },
+      payload: { displayName: "乔炳源" },
+      requestId
+    }
+  }
+});
 
 function initializeBridgeWithEnvironment(environmentOverrides = {}) {
   return new Promise((resolve, reject) => {
@@ -35,12 +69,48 @@ function initializeBridgeWithEnvironment(environmentOverrides = {}) {
         reject(new Error(`bridge exited before initialization (code=${code}); stderr=${stderr}`));
       }
     });
-    child.stdin.end(`${JSON.stringify({
-      jsonrpc: "2.0",
-      id: 99,
-      method: "initialize",
-      params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "1" } }
-    })}\n`);
+    child.stdin.end(`${JSON.stringify(initializeRequest(99))}\n`);
+  });
+}
+
+// Runs the real bridge process and resolves once it has exited, so any SQLite
+// file it opened is released before the test inspects or deletes it.
+function runBridge(requests, environmentOverrides = {}, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    const env = { ...process.env };
+    for (const key of [
+      "RELIABLE_DRIVE_SYNC_WORKER_URL",
+      "RELIABLE_DRIVE_SYNC_INGRESS_URL",
+      "RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET",
+      "RELIABLE_DRIVE_SYNC_OUTBOX_PATH"
+    ]) delete env[key];
+    Object.assign(env, environmentOverrides);
+    const child = spawn(process.execPath, [bridgePath], { env, stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timeout = setTimeout(() => {
+      child.kill();
+      reject(new Error(`bridge timed out; stderr=${stderr}`));
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      const lines = stdout.split("\n").filter(Boolean);
+      if (lines.length >= requests.length && !settled) child.kill();
+    });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("exit", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      const lines = stdout.split("\n").filter(Boolean);
+      if (lines.length < requests.length) {
+        reject(new Error(`bridge exited (code=${code}) after ${lines.length}/${requests.length} responses; stderr=${stderr}`));
+        return;
+      }
+      resolve({ responses: lines.map((line) => JSON.parse(line)), stderr });
+    });
+    child.stdin.end(requests.map((request) => `${JSON.stringify(request)}\n`).join(""));
   });
 }
 
@@ -69,6 +139,18 @@ test("an invalid Worker URL does not prevent MCP initialization", async () => {
     RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET: "secret"
   });
   assert.equal(response.id, 99);
+  assert.equal(stderr, "");
+});
+
+// The two cases above only prove the Outbox stays unloaded while configuration
+// is unusable. This one proves it stays unloaded even with a usable config:
+// `node:sqlite` warns on load, so any stderr at startup would be a regression.
+test("a usable configuration still initializes without loading the local Outbox", async () => {
+  const { responses, stderr } = await runBridge([initializeRequest(99)], {
+    RELIABLE_DRIVE_SYNC_WORKER_URL: "https://127.0.0.1:1/v1/jobs",
+    RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET: "secret"
+  });
+  assert.equal(responses[0].result.serverInfo.name, "reliable-drive-sync");
   assert.equal(stderr, "");
 });
 
@@ -177,4 +259,74 @@ test("submit_event hands a canonical business envelope to the local delivery ser
 
 test("notifications do not produce a response", async () => {
   assert.equal(await handleRequest({ jsonrpc: "2.0", method: "notifications/initialized" }), null);
+});
+
+test("submit_event lazily loads the local Outbox and keeps concurrent calls durable", async (t) => {
+  const { LocalOutbox } = await import("../local-outbox.mjs");
+  const outbox = new LocalOutbox(":memory:");
+  t.after(() => outbox.close());
+  const options = { workerUrl: "https://127.0.0.1:1/v1/jobs", token: "secret", outbox };
+  const responses = await Promise.all(
+    ["req-a", "req-b"].map((requestId, index) => handleRequest(submitCall(index + 1, requestId), options))
+  );
+  assert.deepEqual(
+    responses.map((response) => response.result.structuredContent.deliveryState),
+    ["pending", "pending"]
+  );
+  assert.deepEqual(
+    responses.map((response) => response.result.structuredContent.requestId).sort(),
+    ["req-a", "req-b"]
+  );
+  assert.equal(outbox.listPending().length, 2);
+});
+
+test("a failed submit_event does not prevent a later successful one", async () => {
+  const failing = { async submit() { throw new Error("ingress_transport_error"); } };
+  const working = { async submit(value) { return { deliveryState: "cloud_accepted", requestId: value.requestId }; } };
+
+  const failed = await handleRequest(submitCall(1, "req-a"), { service: failing });
+  assert.equal(failed.error.code, -32603);
+  assert.match(failed.error.message, /ingress_transport_error/);
+
+  const retried = await handleRequest(submitCall(2, "req-b"), { service: working });
+  assert.equal(retried.result.structuredContent.deliveryState, "cloud_accepted");
+  assert.equal(retried.result.structuredContent.requestId, "req-b");
+});
+
+test("concurrent submit_event calls in the real bridge share one durable Outbox", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "reliable-drive-sync-bridge-"));
+  const handles = [];
+  t.after(async () => {
+    for (const handle of handles.reverse()) handle.close();
+    await rm(directory, CLEANUP);
+  });
+  const outboxPath = join(directory, "outbox.sqlite");
+
+  const { responses, stderr } = await runBridge([
+    initializeRequest(99),
+    submitCall(1, "req-a"),
+    submitCall(2, "req-b")
+  ], {
+    RELIABLE_DRIVE_SYNC_WORKER_URL: "https://127.0.0.1:1/v1/jobs",
+    RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET: "secret",
+    RELIABLE_DRIVE_SYNC_OUTBOX_PATH: outboxPath
+  });
+
+  assert.equal(responses[0].result.serverInfo.name, "reliable-drive-sync");
+  assert.deepEqual(
+    responses.slice(1).map((response) => response.result.structuredContent.deliveryState),
+    ["pending", "pending"]
+  );
+  assert.deepEqual(
+    responses.slice(1).map((response) => response.result.structuredContent.requestId).sort(),
+    ["req-a", "req-b"]
+  );
+  // The Outbox is loaded lazily, so the warning may only appear once two
+  // concurrent calls have shared a single lazily created service.
+  assert.equal((stderr.match(/SQLite is an experimental feature/g) ?? []).length, 1);
+
+  const { DatabaseSync } = await import("node:sqlite");
+  const check = new DatabaseSync(outboxPath);
+  handles.push(check);
+  assert.equal(check.prepare("SELECT COUNT(*) AS total FROM local_outbox_events").get().total, 2);
 });
