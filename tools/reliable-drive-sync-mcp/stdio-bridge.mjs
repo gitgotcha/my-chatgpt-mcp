@@ -1,8 +1,12 @@
 import readline from "node:readline";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { DeliveryService } from "./delivery-service.mjs";
+import { LocalOutbox } from "./local-outbox.mjs";
 
 const TOOL = {
   name: "submit_event",
-  description: "Submit a validated system, interview, algorithm or resume-knowledge event. The Worker resolves or registers the stable userId from the display name.",
+  description: "Durably queue a validated system, interview, algorithm or resume-knowledge event in the local SQLite Outbox before cloud delivery.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -17,8 +21,7 @@ const TOOL = {
         required: ["username"],
         properties: {
           userId: { type: "string" },
-          username: { type: "string" },
-          verified: { type: "boolean" }
+          username: { type: "string" }
         }
       },
       payload: { type: "object" },
@@ -35,38 +38,40 @@ export function deriveWorkerUrl(configuredUrl) {
 const reply = (id, result) => ({ jsonrpc: "2.0", id, result });
 const failure = (id, code, message) => ({ jsonrpc: "2.0", id, error: { code, message } });
 
-async function forwardSubmitEvent(id, args, { workerUrl, token, fetchImpl = fetch }) {
-  if (!workerUrl || !token) return failure(id, -32603, "Bridge configuration is incomplete");
-  let destination;
+function defaultOutboxPath() {
+  const base = process.env.LOCALAPPDATA
+    ?? process.env.XDG_DATA_HOME
+    ?? join(homedir(), ".local", "share");
+  return join(base, "ReliableDriveSync", "outbox.sqlite");
+}
+
+function createService(options) {
+  if (!options.workerUrl || !options.token) throw new Error("Bridge configuration is incomplete");
   try {
-    destination = deriveWorkerUrl(workerUrl);
+    deriveWorkerUrl(options.workerUrl);
   } catch {
-    return failure(id, -32603, "Bridge Worker URL is invalid");
+    throw new Error("Bridge Worker URL is invalid");
   }
-  let response;
+  const outbox = options.outbox ?? new LocalOutbox(options.outboxPath ?? defaultOutboxPath());
+  return new DeliveryService({
+    outbox,
+    workerUrl: options.workerUrl,
+    token: options.token,
+    fetchImpl: options.fetchImpl
+  });
+}
+
+async function submitEvent(id, args, options) {
   try {
-    response = await fetchImpl(destination, {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id,
-        method: "tools/call",
-        params: { name: "submit_event", arguments: args }
-      })
+    const service = options.service ?? createService(options);
+    const result = await service.submit(args);
+    return reply(id, {
+      content: [{ type: "text", text: JSON.stringify(result) }],
+      structuredContent: result
     });
   } catch (cause) {
-    return failure(id, -32603, `Worker request failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+    return failure(id, -32603, cause instanceof Error ? cause.message : String(cause));
   }
-  const text = await response.text();
-  let payload;
-  try {
-    payload = JSON.parse(text);
-  } catch {
-    return failure(id, -32603, `Worker returned non-JSON response (HTTP ${response.status})`);
-  }
-  if (!response.ok) return failure(id, -32603, payload?.error?.message ?? `Worker HTTP ${response.status}`);
-  return payload;
 }
 
 export async function handleRequest(request, options = {}) {
@@ -83,7 +88,7 @@ export async function handleRequest(request, options = {}) {
   if (request.method === "tools/list") return reply(request.id, { tools: [TOOL] });
   if (request.method !== "tools/call") return failure(request.id, -32601, "Method not found");
   if (request.params?.name !== "submit_event") return failure(request.id, -32601, "Tool not implemented");
-  return forwardSubmitEvent(request.id, request.params?.arguments ?? {}, options);
+  return submitEvent(request.id, request.params?.arguments ?? {}, options);
 }
 
 function configurationFromEnvironment() {
@@ -91,12 +96,30 @@ function configurationFromEnvironment() {
     ?? process.env.RELIABLE_DRIVE_SYNC_INGRESS_URL;
   return {
     workerUrl: configuredUrl,
-    token: process.env.RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET
+    token: process.env.RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET,
+    outboxPath: process.env.RELIABLE_DRIVE_SYNC_OUTBOX_PATH
   };
 }
 
 if (process.argv[1] && new URL(import.meta.url).pathname.toLowerCase() === new URL(`file://${process.argv[1].replaceAll("\\", "/")}`).pathname.toLowerCase()) {
   const config = configurationFromEnvironment();
+  let service;
+  const runtime = {
+    ...config,
+    get service() {
+      if (!service && config.workerUrl && config.token) {
+        try {
+          service = createService(config);
+          const timer = setInterval(() => { void service.flushPending(); }, 30_000);
+          timer.unref();
+        } catch {
+          // Keep initialization and tool discovery available; the call returns
+          // the concrete configuration error through JSON-RPC.
+        }
+      }
+      return service;
+    }
+  };
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   input.on("line", async (line) => {
     if (!line.trim()) return;
@@ -107,7 +130,7 @@ if (process.argv[1] && new URL(import.meta.url).pathname.toLowerCase() === new U
       process.stdout.write(`${JSON.stringify(failure(null, -32700, "Parse error"))}\n`);
       return;
     }
-    const response = await handleRequest(request, config);
+    const response = await handleRequest(request, runtime);
     if (response) process.stdout.write(`${JSON.stringify(response)}\n`);
   });
 }

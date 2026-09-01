@@ -1,3 +1,16 @@
 name = "reliable-drive-sync"
 main = "src/index.js"
 compatibility_date = "2026-08-13"
+
+[vars]
+SYNC_WORKER_URL = "https://reliable-drive-sync.qiaobingyuan886.workers.dev/v1/sync"
+QSTASH_FAILURE_CALLBACK_URL = "https://reliable-drive-sync.qiaobingyuan886.workers.dev/v1/qstash/failure"
+QSTASH_URL = "https://qstash-us-east-1.upstash.io"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "reliable-drive-sync"
+database_id = "64e7d63f-9275-45d3-be73-9e8cd4908ccd"
+
+[triggers]
+crons = ["*/5 * * * *", "0 * * * *", "0 */6 * * *"]

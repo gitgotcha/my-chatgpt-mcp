@@ -16,4 +16,5 @@ test("the Windows launcher can recover persistent user environment values", asyn
   assert.match(launcher, /RELIABLE_DRIVE_SYNC_INGRESS_URL/);
   assert.match(launcher, /RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET/);
   assert.doesNotMatch(launcher, /echo\s+%RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET%/i);
+  assert.doesNotMatch(launcher, /exit \/b 2/i);
 });

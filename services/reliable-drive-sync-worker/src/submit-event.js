@@ -17,7 +17,11 @@ const DOMAIN_BY_NAMESPACE = new Map([
 
 // Migration only reads the legacy roots and must stay side-effect free in
 // dry-run mode, so its identity is never resolved by create-on-demand.
-const READ_ONLY_IDENTITY_EVENTS = new Set(["system.legacy-migration-requested"]);
+const READ_ONLY_IDENTITY_EVENTS = new Set([
+  "system.legacy-migration-requested",
+  "interview.session.list",
+  "interview.session.load"
+]);
 
 const toProtocolError = (cause) => {
   if (cause instanceof ProtocolError) return cause;
@@ -39,10 +43,12 @@ async function bindIdentity(envelope, userStore) {
   // A read-only binding refuses to materialise a registration, so an unknown
   // user is reported instead of silently created as a side effect.
   if (READ_ONLY_IDENTITY_EVENTS.has(envelope.eventType)) {
-    if (!preferredUserId) throw new ProtocolError("invalid_identity");
     try {
-      const checked = await userStore.verify({ userId: preferredUserId, displayName });
-      const { userId, displayName: name, nameKey } = checked.identity;
+      const checked = preferredUserId
+        ? (await userStore.verify({ userId: preferredUserId, displayName })).identity
+        : await userStore.findByDisplayName(displayName);
+      if (!checked) throw new Error("invalid_identity");
+      const { userId, displayName: name, nameKey } = checked;
       return { userId, username: name, displayName: name, nameKey, verified: true };
     } catch (cause) {
       throw toProtocolError(cause);

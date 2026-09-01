@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { handleRequest } from "../src/index.js";
+import { handleRequest } from "./submit-event-adapter.js";
 import { canonicalHash } from "../src/event-store.js";
 
 const SESSION_EVENT_ID = "22222222-2222-4222-8222-222222222222";

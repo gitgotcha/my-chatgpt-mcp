@@ -14,6 +14,21 @@ export function createUserStore({ layout, drive, now = () => new Date().toISOStr
   if (!drive?.rootFolderId) throw new Error("invalid_drive");
 
   const identityOf = (userId, displayName) => ({ userId, displayName, nameKey: displayName, verified: true });
+  const nameReservations = new Map();
+
+  async function withNameReservation(name, work) {
+    const previous = nameReservations.get(name) ?? Promise.resolve();
+    let release;
+    const current = new Promise((resolve) => { release = resolve; });
+    nameReservations.set(name, current);
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+      if (nameReservations.get(name) === current) nameReservations.delete(name);
+    }
+  }
 
   async function registryFiles() {
     const registry = await layout.findRegistry();
@@ -64,6 +79,18 @@ export function createUserStore({ layout, drive, now = () => new Date().toISOStr
     return { file: read, identity: identityOf(userId, name), fileId: read.id };
   }
 
+  async function findByDisplayName(displayName) {
+    const name = normalizeDisplayName(displayName);
+    if (!name) throw new Error("invalid_display_name");
+    const registrations = await listRegistrations();
+    const byName = registrations.filter((record) => record.displayName === name);
+    if (byName.length > 1) throw new Error("user_conflict");
+    if (byName.length === 0) return null;
+    const stored = await readIdentity(byName[0].userId);
+    if (!stored || stored.identity.displayName !== name) throw new Error("identity_mismatch");
+    return stored.identity;
+  }
+
   async function verify({ userId, displayName } = {}) {
     const name = normalizeDisplayName(displayName);
     if (!name) throw new Error("invalid_display_name");
@@ -88,7 +115,9 @@ export function createUserStore({ layout, drive, now = () => new Date().toISOStr
     if (!name) throw new Error("invalid_display_name");
     if (preferredUserId !== undefined && !isUuid(preferredUserId)) throw new Error("invalid_user_id");
 
-    const registrations = await listRegistrations();
+    return withNameReservation(name, async () => {
+
+      const registrations = await listRegistrations();
     const byName = registrations.filter((record) => record.displayName === name);
     if (byName.length > 1) throw new Error("user_conflict");
 
@@ -125,9 +154,10 @@ export function createUserStore({ layout, drive, now = () => new Date().toISOStr
       throw new Error("registration_readback_failed");
     }
 
-    const identity = identityOf(userId, name);
-    return { status: "ok", ...identity, identity };
+      const identity = identityOf(userId, name);
+      return { status: "ok", ...identity, identity };
+    });
   }
 
-  return { listRegistrations, resolveOrCreate, verify };
+  return { listRegistrations, findByDisplayName, resolveOrCreate, verify };
 }

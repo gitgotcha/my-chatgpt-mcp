@@ -1,9 +1,10 @@
 # Reliable Drive Sync Worker
 
-This Cloudflare Worker exposes one JSON-RPC tool: `submit_event`. It stores
-schema-1.2 JSON events in a Google Shared Drive and verifies every created file
-by reading it back. Everything is written below one canonical root,
-`DriveRoot/my-chatGPT-skills/`, and identity is global rather than per namespace.
+This Cloudflare Worker accepts validated schema-1.2 envelopes at `/v1/jobs`,
+stores them durably in a D1 Outbox, and delivers them asynchronously through
+QStash to Google Drive. It does not expose a remote MCP endpoint. Everything is
+written below one canonical root, `DriveRoot/my-chatGPT-skills/`, and identity
+is global rather than per namespace.
 
 ## Canonical layout
 
@@ -56,8 +57,8 @@ resume-knowledge.daily-plan-created
 resume-knowledge.answer-scored
 ```
 
-Calling a removed tool returns JSON-RPC `-32601`; an invalid envelope, payload or
-identity returns `-32602`.
+Invalid envelopes are rejected before D1 persistence. Local MCP tool discovery
+and JSON-RPC errors are handled by `tools/reliable-drive-sync-mcp`.
 
 ## Error statuses
 
@@ -84,6 +85,9 @@ identity returns `-32602`.
 
    ```text
    wrangler secret put MCP_BEARER_TOKEN
+   wrangler secret put QSTASH_TOKEN
+   wrangler secret put QSTASH_CURRENT_SIGNING_KEY
+   wrangler secret put QSTASH_NEXT_SIGNING_KEY
    wrangler secret put GOOGLE_DRIVE_FOLDER_ID
    wrangler secret put GOOGLE_OAUTH_CLIENT_ID
    wrangler secret put GOOGLE_OAUTH_CLIENT_SECRET
@@ -94,38 +98,32 @@ identity returns `-32602`.
 
    ```text
    wrangler secret put MCP_BEARER_TOKEN
+   wrangler secret put QSTASH_TOKEN
+   wrangler secret put QSTASH_CURRENT_SIGNING_KEY
+   wrangler secret put QSTASH_NEXT_SIGNING_KEY
    wrangler secret put GOOGLE_DRIVE_FOLDER_ID
    wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON
    ```
 
-3. For ChatGPT Work, run the one-step PowerShell setup from this directory:
+3. Apply D1 migrations and deploy:
 
-   ```powershell
-   .\setup-chatgpt-work.ps1
+   ```bash
+   npx wrangler d1 migrations apply reliable-drive-sync --remote
+   npx wrangler deploy
    ```
 
-   It generates a new 256-bit URL token, stores it as the Cloudflare secret
-   `MCP_URL_TOKEN`, deploys the Worker, and copies the complete MCP URL to the
-   clipboard. It never prints or commits the token.
-
-4. In ChatGPT Work, enable Developer mode, open Plugins, choose `+`, select an
-   HTTPS/Streamable HTTP connection, paste the clipboard URL, and choose
-   **No Authentication**. Tool discovery must show only `submit_event`.
-
-The URL itself is the credential. Do not publish, screenshot, or commit it. If
-it is exposed, run `setup-chatgpt-work.ps1` again; the new secret immediately
-invalidates the prior URL after deployment. The original Worker root remains a
-Bearer-authenticated JSON-RPC endpoint for the local Codex and WorkBuddy bridge.
+4. Configure ChatGPT desktop Work, Codex, and WorkBuddy through
+   `tools/reliable-drive-sync-mcp/setup-local-clients.ps1`. All three use the
+   same local stdio process and SQLite Outbox.
 
 ## Statuses and outputs
 
-`status: "ok"` is returned only after the event and any profile snapshot are
-confirmed by Drive readback. If the event cannot be written, local Skills still
-write JSON with `cloud_persistence_pending`. If the event is durable but the
-rebuildable profile cache fails, the response is `profile_cache_pending` and the
-event remains the source of truth. `already_scored_today` means the answer was
-fed back but a second event for the same local date is never persisted.
-`resume_required` means a resume snapshot must be ingested first.
+`POST /v1/jobs` returns HTTP 202 only after D1 stores or idempotently finds the
+job. This is cloud-Outbox acceptance, not Drive completion. QStash invokes
+`/v1/sync`; a signed terminal result then marks the job synced. Transient
+`profile_cache_pending`, `cloud_persistence_pending`, and `resume_required`
+results release the lease for retry. `already_scored_today` is terminal and does
+not create a second score event for the same local date.
 
 Session and review copies are saved locally at:
 

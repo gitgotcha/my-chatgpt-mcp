@@ -149,6 +149,31 @@ test("listRegistrations returns every active registration", async () => {
   assert.deepEqual(registrations.map((record) => record.displayName), ["乔炳源", "李四"]);
 });
 
+test("findByDisplayName returns an existing identity without creating Drive objects", async () => {
+  const { drive, store } = setup();
+  await store.resolveOrCreate({ displayName: "乔炳源" });
+  const writesBeforeLookup = drive.createdJsonFiles.length;
+
+  const found = await store.findByDisplayName(" 乔炳源 ");
+
+  assert.deepEqual(found, {
+    userId: USER_ID,
+    displayName: "乔炳源",
+    nameKey: "乔炳源",
+    verified: true
+  });
+  assert.equal(drive.createdJsonFiles.length, writesBeforeLookup);
+});
+
+test("findByDisplayName returns null for an unknown name without registering it", async () => {
+  const { drive, store } = setup();
+
+  const found = await store.findByDisplayName("未注册用户");
+
+  assert.equal(found, null);
+  assert.equal(drive.createdJsonFiles.length, 0);
+});
+
 test("a blank display name is rejected", async () => {
   const { store } = setup();
   await assert.rejects(() => store.resolveOrCreate({ displayName: "" }), /invalid_display_name/);
@@ -163,6 +188,7 @@ test("duplicate registration files for one display name stop resolution", async 
   await drive.createJson(registry.id, `registration-${OTHER_ID}.json`, registrationRecord(OTHER_ID, "乔炳源", "2026-08-29T00:01:00.000Z"));
   await assert.rejects(() => store.resolveOrCreate({ displayName: "乔炳源" }), /user_conflict/);
   await assert.rejects(() => store.verify({ userId: USER_ID, displayName: "乔炳源" }), /user_conflict/);
+  await assert.rejects(() => store.findByDisplayName("乔炳源"), /user_conflict/);
 });
 
 test("registration files with an unexpected parent are rejected", async () => {

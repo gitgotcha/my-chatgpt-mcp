@@ -103,11 +103,19 @@ test("every tool except submit_event is rejected", async () => {
   }
 });
 
-test("submit_event forwards a registration envelope with bearer authentication", async () => {
-  let request;
-  const fetchImpl = async (url, init) => {
-    request = { url, init };
-    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 3, result: { content: [{ type: "text", text: "ok" }] } }), { status: 200 });
+test("submit_event returns the local/cloud Outbox receipt from the delivery service", async () => {
+  let submitted;
+  const service = {
+    async submit(value) {
+      submitted = value;
+      return {
+        status: "queued",
+        accepted: true,
+        deliveryState: "cloud_accepted",
+        requestId: value.requestId,
+        persistence: { localOutbox: "acknowledged", cloudOutbox: "accepted", drive: "pending" }
+      };
+    }
   };
   const payload = { displayName: "乔炳源" };
   const response = await handleRequest({
@@ -123,19 +131,16 @@ test("submit_event forwards a registration envelope with bearer authentication",
         requestId: "req-1"
       }
     }
-  }, { workerUrl: "https://worker.example", token: "secret", fetchImpl });
-  assert.equal(response.result.content[0].text, "ok");
-  assert.equal(request.url, "https://worker.example");
-  assert.equal(request.init.headers.authorization, "Bearer secret");
-  assert.deepEqual(JSON.parse(request.init.body).params.arguments.payload, payload);
+  }, { service });
+  const receipt = JSON.parse(response.result.content[0].text);
+  assert.equal(receipt.deliveryState, "cloud_accepted");
+  assert.equal(receipt.persistence.drive, "pending");
+  assert.deepEqual(submitted.payload, payload);
 });
 
-test("submit_event forwards a canonical business event unchanged", async () => {
-  let request;
-  const fetchImpl = async (url, init) => {
-    request = { url, init };
-    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 4, result: { content: [{ type: "text", text: "ok" }] } }), { status: 200 });
-  };
+test("submit_event hands a canonical business envelope to the local delivery service unchanged", async () => {
+  let submitted;
+  const service = { async submit(value) { submitted = value; return { deliveryState: "pending" }; } };
   const payload = {
     event: {
       schemaVersion: "1.2",
@@ -164,11 +169,10 @@ test("submit_event forwards a canonical business event unchanged", async () => {
         requestId: "req-2"
       }
     }
-  }, { workerUrl: "https://worker.example", token: "secret", fetchImpl });
-  const forwarded = JSON.parse(request.init.body).params.arguments;
-  assert.equal(forwarded.namespace, "algorithm");
-  assert.equal(forwarded.eventType, "algorithm.learning.completed");
-  assert.deepEqual(forwarded.payload, payload);
+  }, { service });
+  assert.equal(submitted.namespace, "algorithm");
+  assert.equal(submitted.eventType, "algorithm.learning.completed");
+  assert.deepEqual(submitted.payload, payload);
 });
 
 test("notifications do not produce a response", async () => {
