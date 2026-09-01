@@ -1,11 +1,14 @@
 import { SCORE_DIMENSIONS, SCORE_DIMENSION_KEYS, SCORE_TOTAL, EVIDENCE_LEVELS, QUESTION_TYPES } from "./resume-knowledge-model.js";
 import { DAILY_SLOT_PLAN } from "./daily-plan-selector.js";
+import { validateGenericProfileDomain, validateGenericProfileEvent } from "./generic-profile-contract.js";
 
 export const SCHEMA_VERSION = "1.2";
-export const ALLOWED_NAMESPACES = new Set(["system", "algorithm", "interview", "resume-knowledge"]);
+export const ALLOWED_NAMESPACES = new Set(["system", "algorithm", "interview", "resume-knowledge", "profile"]);
 export const ALLOWED_EVENT_TYPES = new Set([
   "system.user-registered",
   "system.legacy-migration-requested",
+  "system.capabilities.read",
+  "system.user.resolve",
   "algorithm.learning.completed",
   "algorithm.daily-plan-created",
   "interview.session.list",
@@ -17,7 +20,9 @@ export const ALLOWED_EVENT_TYPES = new Set([
   "resume-knowledge.claim-rejected",
   "resume-knowledge.question-bank-created",
   "resume-knowledge.daily-plan-created",
-  "resume-knowledge.answer-scored"
+  "resume-knowledge.answer-scored",
+  "profile.evidence.recorded",
+  "profile.snapshot.read"
 ]);
 const ALLOWED_ENVELOPE_FIELDS = new Set(["schemaVersion", "namespace", "eventType", "identity", "payload", "requestId"]);
 const IDENTITY_FIELDS = new Set(["userId", "username"]);
@@ -27,6 +32,8 @@ const LEGACY_MIGRATION_DOMAINS = new Set(["algorithm", "interview"]);
 const COMMON_OPTIONAL = ["userId", "username"];
 const PAYLOAD_SCHEMA = new Map([
   ["system.user-registered", { required: ["displayName"], optional: [...COMMON_OPTIONAL] }],
+  ["system.capabilities.read", { required: [], optional: [] }],
+  ["system.user.resolve", { required: ["displayName"], optional: [] }],
   ["system.legacy-migration-requested", {
     required: ["displayName", "mode"],
     optional: [...COMMON_OPTIONAL, "domains", "migrationId", "approvedPlanHash"]
@@ -42,7 +49,9 @@ const PAYLOAD_SCHEMA = new Map([
   ["resume-knowledge.claim-rejected", { required: ["event"], optional: [...COMMON_OPTIONAL] }],
   ["resume-knowledge.question-bank-created", { required: ["event"], optional: [...COMMON_OPTIONAL] }],
   ["resume-knowledge.daily-plan-created", { required: ["event"], optional: [...COMMON_OPTIONAL] }],
-  ["resume-knowledge.answer-scored", { required: ["event"], optional: [...COMMON_OPTIONAL] }]
+  ["resume-knowledge.answer-scored", { required: ["event"], optional: [...COMMON_OPTIONAL] }],
+  ["profile.evidence.recorded", { required: ["domain", "event"], optional: [...COMMON_OPTIONAL] }],
+  ["profile.snapshot.read", { required: ["domain"], optional: [...COMMON_OPTIONAL] }]
 ]);
 const namespaceFor = (eventType) => eventType.split(".")[0];
 
@@ -334,7 +343,15 @@ export function validateEventForBoundary(event, eventType) {
   else if (eventType === "resume-knowledge.question-bank-created") validateResumeQuestionBankEvent(event);
   else if (eventType === "resume-knowledge.daily-plan-created") validateResumePlanEvent(event);
   else if (eventType === "resume-knowledge.answer-scored") validateAnswerScoredEvent(event);
-  else throw new ProtocolError("invalid_event_type");
+  else if (eventType === "profile.evidence.recorded") {
+    // The caller-shaped event is validated without server-owned identity
+    // fields here; dispatch binds identity before the final bound validation.
+    try {
+      validateGenericProfileEvent(event);
+    } catch (cause) {
+      throw new ProtocolError(cause.message === "invalid_domain" ? "invalid_domain" : "invalid_profile_event");
+    }
+  } else throw new ProtocolError("invalid_event_type");
 }
 
 export class ProtocolError extends Error {
@@ -384,6 +401,14 @@ export function inspectEnvelope(input) {
   if (payload.userId !== undefined && !uuid(payload.userId)) throw new ProtocolError("invalid_payload");
   if (payload.username !== undefined && !nonEmptyString(payload.username)) throw new ProtocolError("invalid_payload");
   if (input.eventType === "system.user-registered" && !nonEmptyString(payload.displayName)) throw new ProtocolError("invalid_payload");
+  if (input.eventType === "system.user.resolve" && !nonEmptyString(payload.displayName)) throw new ProtocolError("invalid_payload");
+  if (input.eventType === "profile.evidence.recorded" || input.eventType === "profile.snapshot.read") {
+    try {
+      validateGenericProfileDomain(payload.domain);
+    } catch {
+      throw new ProtocolError("invalid_domain");
+    }
+  }
   if (input.eventType === "system.legacy-migration-requested") {
     if (!LEGACY_MODES.has(payload.mode)) throw new ProtocolError("invalid_payload");
     if (payload.domains !== undefined && (!Array.isArray(payload.domains) || payload.domains.length === 0

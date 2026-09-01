@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { handleRequest } from "./submit-event-adapter.js";
-import { validateEnvelope, ALLOWED_NAMESPACES } from "../src/protocol.js";
+import { validateEnvelope, inspectEnvelope, ALLOWED_NAMESPACES } from "../src/protocol.js";
 
 function env() {
   return {
@@ -430,4 +430,276 @@ test("a missing display name is rejected before any write", async () => {
   assert.equal(body.error.code, -32602);
   assert.match(body.error.message, /invalid_display_name|invalid_payload/);
   assert.equal(drive.createdJsonFiles.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Generic profile protocol surface
+// ---------------------------------------------------------------------------
+
+const PROFILE_USER_ID = "11111111-1111-4111-8111-111111111111";
+
+function profileEvidenceEvent(overrides = {}) {
+  return {
+    schemaVersion: "1.0",
+    eventId: "11111111-1111-4111-8111-111111111111",
+    eventKey: "english-learning:vocabulary:concurrency:2026-09-01:1",
+    observedAt: "2026-09-01T10:00:00.000Z",
+    sourceSkill: "english-learning",
+    action: "observe",
+    observations: [{
+      dimensionKey: "vocabulary",
+      subjectKey: "concurrency",
+      outcome: "stuck",
+      evidence: "用户无法解释 concurrency 的含义。",
+      confidence: "high",
+      sourceRef: "conversation:2026-09-01:turn-18"
+    }],
+    ...overrides
+  };
+}
+
+const GENERIC_EVENT_ENVELOPES = [
+  ["system.capabilities.read", {
+    schemaVersion: "1.2", namespace: "system", eventType: "system.capabilities.read",
+    requestId: "capabilities-1"
+  }],
+  ["system.user.resolve", {
+    schemaVersion: "1.2", namespace: "system", eventType: "system.user.resolve",
+    payload: { displayName: "乔炳源" },
+    requestId: "resolve-1"
+  }],
+  ["profile.evidence.recorded", {
+    schemaVersion: "1.2", namespace: "profile", eventType: "profile.evidence.recorded",
+    payload: { domain: "english-learning", event: profileEvidenceEvent() },
+    requestId: "evidence-1"
+  }],
+  ["profile.snapshot.read", {
+    schemaVersion: "1.2", namespace: "profile", eventType: "profile.snapshot.read",
+    payload: { domain: "english-learning" },
+    requestId: "read-1"
+  }],
+  ["system.user-registered", {
+    schemaVersion: "1.2", namespace: "system", eventType: "system.user-registered",
+    payload: { displayName: "乔炳源" },
+    requestId: "register-2"
+  }]
+];
+
+for (const [label, envelope] of GENERIC_EVENT_ENVELOPES) {
+  test(`protocol accepts the logical event ${label}`, () => {
+    const validated = validateEnvelope(envelope);
+    assert.equal(validated.eventType, label);
+    assert.deepEqual(validated.payload, envelope.payload);
+  });
+}
+
+test("protocol exposes the profile namespace alongside the specialized ones", () => {
+  assert.ok(ALLOWED_NAMESPACES.has("profile"));
+  assert.ok(ALLOWED_NAMESPACES.has("system"));
+  assert.ok(ALLOWED_NAMESPACES.has("algorithm"));
+  assert.ok(ALLOWED_NAMESPACES.has("interview"));
+  assert.ok(ALLOWED_NAMESPACES.has("resume-knowledge"));
+});
+
+test("profile events outside the profile namespace are rejected", () => {
+  assert.throws(() => validateEnvelope({
+    schemaVersion: "1.2", namespace: "system", eventType: "profile.snapshot.read",
+    payload: { domain: "english-learning" },
+    requestId: "mismatch-1"
+  }), /invalid_event_type/);
+  assert.throws(() => validateEnvelope({
+    schemaVersion: "1.2", namespace: "profile", eventType: "system.user-registered",
+    payload: { displayName: "乔炳源" },
+    requestId: "mismatch-2"
+  }), /invalid_event_type/);
+});
+
+test("profile read events require a domain payload and reject extra payload fields", () => {
+  assert.throws(() => validateEnvelope({
+    schemaVersion: "1.2", namespace: "profile", eventType: "profile.snapshot.read",
+    payload: {},
+    requestId: "read-2"
+  }), /invalid_payload/);
+  assert.throws(() => validateEnvelope({
+    schemaVersion: "1.2", namespace: "profile", eventType: "profile.snapshot.read",
+    payload: { domain: "english-learning", path: "../escape" },
+    requestId: "read-3"
+  }), /invalid_payload/);
+});
+
+test("system.user.resolve requires a non-empty displayName and nothing else", () => {
+  assert.throws(() => validateEnvelope({
+    schemaVersion: "1.2", namespace: "system", eventType: "system.user.resolve",
+    payload: { displayName: "  " },
+    requestId: "resolve-2"
+  }), /invalid_payload/);
+  assert.throws(() => validateEnvelope({
+    schemaVersion: "1.2", namespace: "system", eventType: "system.user.resolve",
+    payload: { displayName: "乔炳源", userId: PROFILE_USER_ID },
+    requestId: "resolve-3"
+  }), /invalid_payload/);
+});
+
+test("system.capabilities.read tolerates an empty payload but no payload fields", () => {
+  validateEnvelope({
+    schemaVersion: "1.2", namespace: "system", eventType: "system.capabilities.read",
+    payload: {},
+    requestId: "capabilities-2"
+  });
+  assert.throws(() => validateEnvelope({
+    schemaVersion: "1.2", namespace: "system", eventType: "system.capabilities.read",
+    payload: { domain: "english-learning" },
+    requestId: "capabilities-3"
+  }), /invalid_payload/);
+});
+
+for (const domain of ["algorithm", "interview", "resume-knowledge", "system", "profile", "English-Learning", "../interview", "english%2flearning", "a", "a".repeat(65), "english_learning"]) {
+  test(`protocol rejects the invalid profile domain ${JSON.stringify(domain)}`, () => {
+    assert.throws(() => validateEnvelope({
+      schemaVersion: "1.2", namespace: "profile", eventType: "profile.snapshot.read",
+      payload: { domain },
+      requestId: "domain-1"
+    }), /invalid_domain/);
+    assert.throws(() => validateEnvelope({
+      schemaVersion: "1.2", namespace: "profile", eventType: "profile.evidence.recorded",
+      payload: { domain, event: profileEvidenceEvent() },
+      requestId: "domain-2"
+    }), /invalid_domain/);
+  });
+}
+
+test("profile.evidence.recorded requires both domain and the inner event", () => {
+  assert.throws(() => validateEnvelope({
+    schemaVersion: "1.2", namespace: "profile", eventType: "profile.evidence.recorded",
+    payload: { event: profileEvidenceEvent() },
+    requestId: "evidence-2"
+  }), /invalid_payload/);
+  assert.throws(() => validateEnvelope({
+    schemaVersion: "1.2", namespace: "profile", eventType: "profile.evidence.recorded",
+    payload: { domain: "english-learning" },
+    requestId: "evidence-3"
+  }), /invalid_payload/);
+});
+
+test("the inner profile event is validated at the protocol boundary", () => {
+  assert.throws(() => validateEnvelope({
+    schemaVersion: "1.2", namespace: "profile", eventType: "profile.evidence.recorded",
+    payload: { domain: "english-learning", event: profileEvidenceEvent({ action: "explode" }) },
+    requestId: "inner-1"
+  }), /invalid_profile_event/);
+  assert.throws(() => validateEnvelope({
+    schemaVersion: "1.2", namespace: "profile", eventType: "profile.evidence.recorded",
+    payload: { domain: "english-learning", event: profileEvidenceEvent({ eventId: "not-a-uuid" }) },
+    requestId: "inner-2"
+  }), /invalid_profile_event/);
+  assert.throws(() => validateEnvelope({
+    schemaVersion: "1.2", namespace: "profile", eventType: "profile.evidence.recorded",
+    payload: { domain: "english-learning", event: profileEvidenceEvent({ observedAt: "2026-09-01 10:00:00" }) },
+    requestId: "inner-3"
+  }), /invalid_profile_event/);
+});
+
+test("caller-supplied identity inside the inner profile event is rejected at the boundary", () => {
+  assert.throws(() => validateEnvelope({
+    schemaVersion: "1.2", namespace: "profile", eventType: "profile.evidence.recorded",
+    payload: {
+      domain: "english-learning",
+      event: profileEvidenceEvent({ userId: PROFILE_USER_ID, username: "乔炳源", domain: "english-learning" })
+    },
+    requestId: "inner-4"
+  }), /invalid_profile_event/);
+});
+
+test("unknown fields on the inner profile event are rejected", () => {
+  assert.throws(() => validateEnvelope({
+    schemaVersion: "1.2", namespace: "profile", eventType: "profile.evidence.recorded",
+    payload: { domain: "english-learning", event: profileEvidenceEvent({ extra: true }) },
+    requestId: "inner-5"
+  }), /invalid_profile_event/);
+  assert.throws(() => validateEnvelope({
+    schemaVersion: "1.2", namespace: "profile", eventType: "profile.evidence.recorded",
+    payload: {
+      domain: "english-learning",
+      event: profileEvidenceEvent({
+        observations: [{
+          dimensionKey: "vocabulary",
+          subjectKey: "concurrency",
+          outcome: "stuck",
+          evidence: "用户无法解释 concurrency 的含义。",
+          confidence: "high",
+          sourceRef: "conversation:2026-09-01:turn-18",
+          fileId: "drive-file-id"
+        }]
+      })
+    },
+    requestId: "inner-6"
+  }), /invalid_profile_event/);
+});
+
+for (const [label, event] of [
+  ["observe with a targetEventKey", profileEvidenceEvent({ targetEventKey: "english-learning:vocabulary:concurrency:2026-09-01:1" })],
+  ["observe without observations", profileEvidenceEvent({ observations: [] })],
+  ["supersede without observations", profileEvidenceEvent({ action: "supersede", targetEventKey: "english-learning:vocabulary:concurrency:2026-09-01:1", observations: [] })],
+  ["supersede without a target", profileEvidenceEvent({ action: "supersede", targetEventKey: "  " })],
+  ["invalidate with observations", profileEvidenceEvent({ action: "invalidate", targetEventKey: "english-learning:vocabulary:concurrency:2026-09-01:1" })]
+]) {
+  test(`protocol rejects the invalid profile action shape: ${label}`, () => {
+    assert.throws(() => validateEnvelope({
+      schemaVersion: "1.2", namespace: "profile", eventType: "profile.evidence.recorded",
+      payload: { domain: "english-learning", event },
+      requestId: "action-1"
+    }), /invalid_profile_event/);
+  });
+}
+
+test("every allowed profile outcome and confidence passes the boundary", () => {
+  for (const outcome of ["observed", "consulted", "stuck", "incorrect", "partial", "completed", "correct", "passed", "failed"]) {
+    for (const confidence of ["high", "medium", "low"]) {
+      validateEnvelope({
+        schemaVersion: "1.2", namespace: "profile", eventType: "profile.evidence.recorded",
+        payload: {
+          domain: "english-learning",
+          event: profileEvidenceEvent({
+            observations: [{
+              dimensionKey: "vocabulary",
+              subjectKey: "concurrency",
+              outcome,
+              evidence: "用户无法解释 concurrency 的含义。",
+              confidence,
+              sourceRef: "conversation:2026-09-01:turn-18"
+            }]
+          })
+        },
+        requestId: `outcome-${outcome}-${confidence}`
+      });
+    }
+  }
+});
+
+test("old valid envelopes survive inspectEnvelope cloning byte-for-byte", () => {
+  const algorithmEnvelope = {
+    schemaVersion: "1.2",
+    namespace: "algorithm",
+    eventType: "algorithm.learning.completed",
+    identity: { username: "算法用户" },
+    payload: { event: learningEvent("00000000-0000-4000-8000-000000000001", "算法用户") },
+    requestId: "clone-1"
+  };
+  assert.deepEqual(inspectEnvelope(algorithmEnvelope), algorithmEnvelope);
+  const interviewEnvelope = {
+    schemaVersion: "1.2",
+    namespace: "interview",
+    eventType: "interview.session.load",
+    payload: { userId: "00000000-0000-4000-8000-000000000001", username: "Ada", sessionId: "MOCK-1" },
+    requestId: "clone-2"
+  };
+  assert.deepEqual(inspectEnvelope(interviewEnvelope), interviewEnvelope);
+  const registrationEnvelope = {
+    schemaVersion: "1.2",
+    namespace: "system",
+    eventType: "system.user-registered",
+    payload: { displayName: "乔炳源" },
+    requestId: "clone-3"
+  };
+  assert.deepEqual(inspectEnvelope(registrationEnvelope), registrationEnvelope);
 });
