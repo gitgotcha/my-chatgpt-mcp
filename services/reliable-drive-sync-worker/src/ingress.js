@@ -1,7 +1,15 @@
 import { inspectEnvelope, ProtocolError } from "./protocol.js";
+import { genericProfileEnabled } from "./capabilities.js";
+import { validateGenericProfileDomain, validateGenericProfileEvent } from "./generic-profile-contract.js";
 import { JobRepositoryError } from "./job-repository.js";
 
 const encoder = new TextEncoder();
+
+const GENERIC_READ_EVENTS = new Set([
+  "system.capabilities.read",
+  "system.user.resolve",
+  "profile.snapshot.read"
+]);
 
 export function secureEquals(left, right) {
   const leftBytes = encoder.encode(left);
@@ -27,6 +35,7 @@ function authorize(request, env) {
 }
 
 function readOnlyQuery(envelope) {
+  if (GENERIC_READ_EVENTS.has(envelope.eventType)) return true;
   if (["interview.session.list", "interview.session.load"].includes(envelope.eventType)) return true;
   return envelope.eventType === "system.legacy-migration-requested"
     && envelope.payload?.mode === "dry-run";
@@ -35,6 +44,7 @@ function readOnlyQuery(envelope) {
 function identityError(cause) {
   const code = cause instanceof Error ? cause.message : "identity_lookup_failed";
   if (code === "invalid_display_name") return json({ error: code }, 400);
+  if (code === "identity_not_found") return json({ error: code }, 404);
   if (code === "user_conflict" || code === "identity_mismatch") return json({ error: code }, 409);
   return json({ error: "identity_lookup_failed" }, 500);
 }
@@ -97,6 +107,26 @@ export function createIngressHandler(env, repository, dispatcher, services = {})
 
     try {
       const envelope = inspectEnvelope(body);
+      if (readOnlyQuery(envelope)) return json({ error: "read_requires_query" }, 405);
+      if (envelope.eventType === "profile.evidence.recorded") {
+        if (!genericProfileEnabled(env)) return json({ error: "unsupported_capability" }, 400);
+        try {
+          validateGenericProfileDomain(envelope.payload?.domain);
+        } catch {
+          return json({ error: "invalid_domain" }, 400);
+        }
+        if (!envelope.identity?.userId || !envelope.identity?.username) {
+          return json({ error: "invalid_identity" }, 400);
+        }
+        try {
+          validateGenericProfileEvent(envelope.payload.event, {
+            boundIdentity: envelope.identity,
+            domain: envelope.payload.domain
+          });
+        } catch (cause) {
+          return json({ error: cause instanceof Error && cause.message === "invalid_domain" ? "invalid_domain" : "invalid_profile_event" }, 400);
+        }
+      }
       const job = await repository.createOrGet(envelope);
       if (job.isNew && dispatcher && context?.waitUntil) {
         context.waitUntil(dispatcher.dispatch(job.jobId));

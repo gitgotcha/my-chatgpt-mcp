@@ -80,3 +80,26 @@ test("the deployed Worker exposes no root or capability-URL MCP endpoint", async
     assert.equal(response.status, 404);
   }
 });
+
+test("a capability query through createWorker does not construct Drive, layout or user-store", async () => {
+  const repository = new InMemoryJobRepository(() => "job-1");
+  const throwProxy = new Proxy({}, { get() { throw new Error("service_constructed"); } });
+  const worker = createWorker(environment(), {
+    repository,
+    publisher: { async publish() { return { messageId: "m" }; } },
+    drive: throwProxy,
+    layout: throwProxy,
+    userStore: throwProxy
+  });
+  const response = await worker.fetch(new Request("https://worker.example/v1/query", {
+    method: "POST",
+    headers: { authorization: "Bearer secret", "content-type": "application/json" },
+    body: JSON.stringify({
+      schemaVersion: "1.2", namespace: "system", eventType: "system.capabilities.read", requestId: "cap-1"
+    })
+  }), environment(), { waitUntil(work) { void work; } });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.status, "ok");
+  assert.equal(body.data.genericProfile.enabled, false);
+});

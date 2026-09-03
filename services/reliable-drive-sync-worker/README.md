@@ -151,3 +151,49 @@ data, and it never runs automatically.
   different content stops the whole run before any file is written.
 - Source objects are only ever read: never updated, moved or deleted. The run
   writes an auditable `migration-<migrationId>-receipt.json` below the user root.
+
+## Generic profile capability
+
+An opt-in generic user-profile protocol shares `submit_event`. It is gated by
+the `GENERIC_PROFILE_ENABLED` variable: only the exact string `"true"` enables
+it. When disabled, `system.user.resolve`, `profile.snapshot.read` and
+`profile.evidence.recorded` return `unsupported_capability`; every existing
+event and Drive layout is unchanged.
+
+Logical events and routes:
+
+- `system.capabilities.read` → `/v1/query`, returns the protocol revision and
+  the supported event-type list. Side-effect free.
+- `system.user.resolve` → `/v1/query`, resolves a normalized display name to a
+  stable `userId`. Never registers; unknown users return
+  `identity_not_found`.
+- `profile.snapshot.read` → `/v1/query`, returns the rebuilt profile for a
+  verified user and domain. Selects the newest snapshot whose
+  `sourceEventKeys` exactly equal the verified event-key set; otherwise
+  rebuilds in memory and creates no file (`projectionState:
+  "rebuilt_in_memory"`).
+- `profile.evidence.recorded` → `/v1/jobs`, the only durable generic write.
+  Ingress validates the bound inner event, domain and identity before
+  `repository.createOrGet`, so a malformed request never creates a D1 job.
+
+Generic domains are kebab-case, length 2–64, matching
+`^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$`, and reject `algorithm`, `interview`,
+`resume-knowledge`, `system` and `profile`. The generic store persists events
+under `users/<userId>/<domain>/events/event-<eventId>.json` and snapshots under
+`users/<userId>/<domain>/profile/snapshots/profile-<headEventId>.json`. Both
+carry a SHA-256 `contentHash`; readback verifies the hash, single-parent
+ownership, identity and domain before trusting any record.
+
+The reducer is a pure, deterministic projection: a negative outcome opens a
+weakness; only two positive outcomes from distinct `sourceRef` values after the
+most recent negative close it into a stable strength; a partial after a
+negative is an improving signal; `observed`/`consulted` never create or close
+anything. Corrections (`supersede`/`invalidate`) target strictly earlier active
+evidence and are sealed through `ProtocolError` so they become non-retryable
+`needs_attention` jobs.
+
+A `cloud_accepted` MCP receipt means D1 accepted the durable job; Drive delivery
+remains asynchronous and the receipt never carries a Drive `fileId`.
+`profile_cache_pending` is a Worker-internal state returned when the durable
+event was accepted but the snapshot could not yet be cached; it is not an MCP
+acknowledgement.

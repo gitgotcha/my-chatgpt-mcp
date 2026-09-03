@@ -4390,7 +4390,41 @@ Storage
 
 ---
 
-<p align="center">
-  <b>my-chatgpt-mcp</b><br/>
-  Reliable persistence infrastructure for a long-lived personal AI ecosystem.
-</p>
+Direct Drive writes and the removed artifact/candidate tools are intentionally
+unsupported.
+
+## Generic profile capability
+
+The single `submit_event` tool also serves an opt-in generic user-profile
+protocol. Five logical events share the existing tool:
+
+- `system.capabilities.read` — discover whether the deployed runtime supports
+  the generic profile protocol. Read-only via `/v1/query`.
+- `system.user.resolve` — resolve a normalized display name to a stable
+  `userId` without registering. Read-only via `/v1/query`.
+- `system.user-registered` — explicit registration (unchanged behavior).
+- `profile.snapshot.read` — read the rebuilt profile for a verified user and
+  domain. Read-only via `/v1/query`.
+- `profile.evidence.recorded` — append immutable profile evidence. Write via
+  `/v1/jobs`; only this event is durable.
+
+The protocol is gated by the Worker variable `GENERIC_PROFILE_ENABLED`. Only
+the exact string `"true"` enables it; unset, empty, `"false"` and any other
+value keep it off, and the three generic read/write events return
+`unsupported_capability` while all existing events behave exactly as before.
+
+Generic profile domains are kebab-case, length 2–64, matching
+`^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$`, and reject the reserved names
+`algorithm`, `interview`, `resume-knowledge`, `system` and `profile`. The
+generic store writes only under `users/<userId>/<domain>/{events,profile/snapshots}`;
+it never reuses the specialized domain folders.
+
+A successful write acknowledgement reports only `deliveryState: "pending"`
+(local SQLite durable) or `"cloud_accepted"` (D1 accepted). It never promises a
+Drive `fileId`; Drive delivery is asynchronous. `profile_cache_pending` is a
+Worker-internal projection state returned when the durable event was accepted
+but the snapshot could not yet be cached; it is not an MCP acknowledgement.
+
+Existing `algorithm`, `interview` and `resume-knowledge` domains remain
+specialized and unchanged; their protocols, stores and reducers are not
+migrated.

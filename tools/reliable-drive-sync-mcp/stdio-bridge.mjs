@@ -2,11 +2,10 @@ import readline from "node:readline";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { DeliveryService } from "./delivery-service.mjs";
-import { LocalOutbox } from "./local-outbox.mjs";
 
 const TOOL = {
   name: "submit_event",
-  description: "Durably queue a validated system, interview, algorithm or resume-knowledge event in the local SQLite Outbox before cloud delivery.",
+  description: "Discover generic profile capabilities, read profiles, or durably queue a validated system, interview, algorithm, resume-knowledge or profile evidence event in the local SQLite Outbox before cloud delivery.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -45,13 +44,18 @@ function defaultOutboxPath() {
   return join(base, "ReliableDriveSync", "outbox.sqlite");
 }
 
-function createService(options) {
+async function createService(options) {
   if (!options.workerUrl || !options.token) throw new Error("Bridge configuration is incomplete");
   try {
     deriveWorkerUrl(options.workerUrl);
   } catch {
     throw new Error("Bridge Worker URL is invalid");
   }
+  // `local-outbox.mjs` loads `node:sqlite`, which makes Node print an
+  // ExperimentalWarning. Import it here rather than at module scope so
+  // initialization and tool discovery keep a clean stderr; only a real
+  // submit_event call needs durable storage.
+  const { LocalOutbox } = await import("./local-outbox.mjs");
   const outbox = options.outbox ?? new LocalOutbox(options.outboxPath ?? defaultOutboxPath());
   return new DeliveryService({
     outbox,
@@ -63,7 +67,7 @@ function createService(options) {
 
 async function submitEvent(id, args, options) {
   try {
-    const service = options.service ?? createService(options);
+    const service = await (options.service ?? createService(options));
     const result = await service.submit(args);
     return reply(id, {
       content: [{ type: "text", text: JSON.stringify(result) }],
@@ -104,20 +108,26 @@ function configurationFromEnvironment() {
 if (process.argv[1] && new URL(import.meta.url).pathname.toLowerCase() === new URL(`file://${process.argv[1].replaceAll("\\", "/")}`).pathname.toLowerCase()) {
   const config = configurationFromEnvironment();
   let service;
+  let pendingService;
   const runtime = {
     ...config,
     get service() {
-      if (!service && config.workerUrl && config.token) {
-        try {
-          service = createService(config);
-          const timer = setInterval(() => { void service.flushPending(); }, 30_000);
+      if (service) return service;
+      if (!config.workerUrl || !config.token) return undefined;
+      // Memoize the promise so concurrent submit_event calls share one
+      // Outbox; clear it on failure so the next call retries.
+      if (!pendingService) {
+        pendingService = createService(config).then((created) => {
+          service = created;
+          const timer = setInterval(() => { void created.flushPending(); }, 30_000);
           timer.unref();
-        } catch {
-          // Keep initialization and tool discovery available; the call returns
-          // the concrete configuration error through JSON-RPC.
-        }
+          return created;
+        }).catch(() => {
+          pendingService = undefined;
+          return undefined;
+        });
       }
-      return service;
+      return pendingService;
     }
   };
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });

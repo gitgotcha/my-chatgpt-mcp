@@ -158,3 +158,96 @@ test("a custom plugin root name is honoured", async () => {
   const folder = await layout.ensureDomainPath(USER_ID, "interview", ["events"]);
   assert.deepEqual(drive.ancestry(folder.id), ["root", "custom-root", "users", USER_ID, "interview", "events"]);
 });
+
+// ---------------------------------------------------------------------------
+// Generic profile storage isolation
+// ---------------------------------------------------------------------------
+
+test("generic profile events create only the exact generic domain path", async () => {
+  const { drive, layout } = setup();
+  const folder = await layout.ensureGenericProfilePath(USER_ID, "english-learning", ["events"]);
+  assert.deepEqual(drive.ancestry(folder.id), [
+    "root", "my-chatGPT-skills", "users", USER_ID, "english-learning", "events"
+  ]);
+  // Nothing else is created beside the canonical chain.
+  assert.equal(drive.createdFolders.filter((entry) => entry.name === "events").length, 1);
+  assert.equal(drive.createdFolders.filter((entry) => entry.name === "english-learning").length, 1);
+  assert.equal(drive.createdFolders.filter((entry) => entry.name === "profile").length, 0);
+});
+
+test("generic profile snapshots create only the exact snapshot path", async () => {
+  const { drive, layout } = setup();
+  const folder = await layout.ensureGenericProfilePath(USER_ID, "english-learning", ["profile", "snapshots"]);
+  assert.deepEqual(drive.ancestry(folder.id), [
+    "root", "my-chatGPT-skills", "users", USER_ID, "english-learning", "profile", "snapshots"
+  ]);
+});
+
+test("findGenericProfilePath is read-only and returns null when absent", async () => {
+  const { drive, layout } = setup();
+  assert.equal(await layout.findGenericProfilePath(USER_ID, "english-learning", ["profile", "snapshots"]), null);
+  assert.equal(drive.createdFolders.length, 0);
+
+  await layout.ensureGenericProfilePath(USER_ID, "english-learning", ["events"]);
+  const before = drive.createdFolders.length;
+  const found = await layout.findGenericProfilePath(USER_ID, "english-learning", ["events"]);
+  assert.equal(found.id, drive.findPath(`root/my-chatGPT-skills/users/${USER_ID}/english-learning/events`).id);
+  assert.equal(drive.createdFolders.length, before);
+});
+
+test("findGenericProfilePath returns null on a partial tree", async () => {
+  const { drive, layout } = setup();
+  await layout.ensureGenericProfilePath(USER_ID, "english-learning", ["events"]);
+  assert.equal(await layout.findGenericProfilePath(USER_ID, "english-learning", ["profile", "snapshots"]), null);
+  assert.equal(await layout.findGenericProfilePath(USER_ID, "another-domain", ["events"]), null);
+});
+
+test("unlisted generic segment sequences are rejected", async () => {
+  const { layout } = setup();
+  for (const segments of [["plans"], ["plans", "daily"], ["events", "extra"], ["profile"], ["profile", "snapshots", "extra"], [], "events", null]) {
+    await assert.rejects(() => layout.ensureGenericProfilePath(USER_ID, "english-learning", segments), /invalid_path/);
+    await assert.rejects(() => layout.findGenericProfilePath(USER_ID, "english-learning", segments), /invalid_path/);
+  }
+});
+
+test("generic profile paths reject all five reserved domains", async () => {
+  const { layout } = setup();
+  for (const domain of ["algorithm", "interview", "resume-knowledge", "system", "profile"]) {
+    await assert.rejects(() => layout.ensureGenericProfilePath(USER_ID, domain, ["events"]), /invalid_domain/);
+    await assert.rejects(() => layout.findGenericProfilePath(USER_ID, domain, ["events"]), /invalid_domain/);
+  }
+});
+
+test("generic profile domains reject traversal, encoding and malformed values", async () => {
+  const { layout } = setup();
+  for (const domain of [
+    "../interview", "english/learning", "english\\learning", "english%2flearning", "english%5clearning",
+    "English-Learning", "english_learning", "english.learning", ".english", "english-", "-english",
+    "a", "a".repeat(65), "", null, undefined, 42
+  ]) {
+    await assert.rejects(() => layout.ensureGenericProfilePath(USER_ID, domain, ["events"]), /invalid_domain/, `domain: ${String(domain)}`);
+    await assert.rejects(() => layout.findGenericProfilePath(USER_ID, domain, ["events"]), /invalid_domain/, `domain: ${String(domain)}`);
+  }
+});
+
+test("the old domain interface still rejects generic domains", async () => {
+  const { layout } = setup();
+  await assert.rejects(() => layout.ensureDomainPath(USER_ID, "english-learning", ["events"]), /invalid_domain/);
+  await assert.rejects(() => layout.findDomainPath(USER_ID, "english-learning", ["events"]), /invalid_domain/);
+});
+
+test("the old domain interface still accepts only its documented paths", async () => {
+  const { layout } = setup();
+  await layout.ensureDomainPath(USER_ID, "algorithm", ["events"]);
+  await layout.ensureDomainPath(USER_ID, "algorithm", ["profile", "snapshots"]);
+  await layout.ensureDomainPath(USER_ID, "algorithm", ["plans", "daily"]);
+  await layout.ensureDomainPath(USER_ID, "interview", ["events"]);
+  await assert.rejects(() => layout.ensureDomainPath(USER_ID, "algorithm", ["sources"]), /invalid_path/);
+  await assert.rejects(() => layout.ensureDomainPath(USER_ID, "interview", ["plans", "daily"]), /invalid_path/);
+});
+
+test("generic profile paths reject user ids carrying separators", async () => {
+  const { layout } = setup();
+  await assert.rejects(() => layout.ensureGenericProfilePath("../escape", "english-learning", ["events"]), /invalid_user_id/);
+  await assert.rejects(() => layout.findGenericProfilePath("", "english-learning", ["events"]), /invalid_user_id/);
+});

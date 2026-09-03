@@ -64,3 +64,28 @@ Environment variables read by `start.cmd`:
 
 There is deliberately no public `/mcp` endpoint, capability URL, OAuth flow, or
 Secure MCP Tunnel in this architecture.
+
+## Generic profile reads and writes
+
+The local server also routes the opt-in generic profile protocol over the same
+`submit_event` tool. `tools/list` still exposes exactly one tool.
+
+- `system.capabilities.read`, `system.user.resolve` and `profile.snapshot.read`
+  flow directly to `/v1/query` and never enter the SQLite Outbox. Capability
+  discovery works without `identity` or `displayName`.
+- `profile.evidence.recorded` is a durable write. Before enqueue, the local
+  delivery service validates the caller event shape and domain, requires an
+  explicit `identity.userId`/`identity.username`, and resolves an existing
+  identity through `/v1/identity`. A `404` returns `identity_not_found` before
+  any enqueue and never fabricates a local UUID; the old timeout/404 fallback
+  that auto-registers strangers remains untouched for legacy event types.
+- Bound identity and domain are written into `payload.event` before the
+  envelope is sent to `/v1/jobs`, matching the shape the Worker ingress
+  validates.
+- `unsupported_capability`, `invalid_domain`, `invalid_profile_event` and
+  `identity_not_found` are permanent (non-retryable) local results.
+
+A `cloud_accepted` receipt means D1 accepted the durable job; it never promises
+a Drive `fileId`. A `pending` receipt means SQLite still holds the event for
+retry. `profile_cache_pending` is a Worker-internal projection state, not an
+immediate MCP acknowledgement.
