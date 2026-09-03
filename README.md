@@ -2,7 +2,7 @@
 
 > **Reliable persistence infrastructure for a long-lived personal AI Skill ecosystem.**
 >
-> 一个面向长期个人 AI 系统的统一事件提交、身份解析、可靠队列、状态投影与持久化基础设施。
+> 面向长期个人 AI 系统的统一事件提交、身份解析、可靠队列、状态投影与持久化基础设施。
 
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
@@ -13,144 +13,228 @@
 
 ---
 
+# Table of Contents
+
+- [1. What is this?](#1-what-is-this)
+- [2. Why does this project exist?](#2-why-does-this-project-exist)
+- [3. Core Contract](#3-core-contract)
+- [4. Architecture Overview](#4-architecture-overview)
+- [5. Persistence Semantics](#5-persistence-semantics)
+- [6. Complete Write Sequence](#6-complete-write-sequence)
+- [7. Local MCP](#7-local-mcp)
+- [8. Local SQLite Outbox](#8-local-sqlite-outbox)
+- [9. Identity System](#9-identity-system)
+- [10. Event Protocol](#10-event-protocol)
+- [11. Worker API](#11-worker-api)
+- [12. D1 Cloud Outbox](#12-d1-cloud-outbox)
+- [13. QStash](#13-qstash)
+- [14. Reconciler and Recovery](#14-reconciler-and-recovery)
+- [15. Domain Dispatcher](#15-domain-dispatcher)
+- [16. Canonical Google Drive Layout](#16-canonical-google-drive-layout)
+- [17. Event Store](#17-event-store)
+- [18. Algorithm Domain](#18-algorithm-domain)
+- [19. Interview Domain](#19-interview-domain)
+- [20. Resume Knowledge Domain](#20-resume-knowledge-domain)
+- [21. Projection Model](#21-projection-model)
+- [22. Readback Verification](#22-readback-verification)
+- [23. Legacy Migration](#23-legacy-migration)
+- [24. Failure Model](#24-failure-model)
+- [25. Security Boundaries](#25-security-boundaries)
+- [26. Repository Structure](#26-repository-structure)
+- [27. Quick Start](#27-quick-start)
+- [28. Deployment](#28-deployment)
+- [29. Relationship with my-chatgpt-skills](#29-relationship-with-my-chatgpt-skills)
+- [30. System Invariants](#30-system-invariants)
+- [31. Current Status](#31-current-status)
+- [32. Roadmap](#32-roadmap)
+- [33. Vision](#33-vision)
+
+---
+
 # 1. What is this?
 
 `my-chatgpt-mcp` 是整个个人 AI Skill 生态中的**持久化基础设施层**。
 
-它最初看起来像一个：
+从最表面的角度看，它做的是：
 
-> “把 Skill 数据可靠同步到 Google Drive 的 MCP。”
+```text
+AI Skill
+    ↓
+submit_event
+    ↓
+Reliable Drive Sync
+    ↓
+Google Drive
+```
 
-但随着系统逐渐发展，它实际上承担了远远更多的职责：
+但这并不足以描述它。
 
-- 多 AI 客户端统一 MCP 接入
-- 单一 `submit_event` 写入边界
-- Schema 1.2 事件协议
-- 全局用户身份系统
+当前系统实际上同时负责：
+
+- ChatGPT Desktop / Work 接入
+- Codex 接入
+- WorkBuddy 接入
+- 本地 stdio MCP
+- 单一 `submit_event` 写入口
+- Schema 1.2 协议
+- 全局用户身份
 - 本地 SQLite Outbox
-- 云端 Cloudflare D1 Outbox
-- 请求级幂等
-- Event-level 幂等
-- QStash 异步调度
-- Worker 重试
-- Lease 防重复执行
-- Cron 故障恢复
-- Google Drive canonical storage
-- Event Store
+- SQLite WAL
+- 本地崩溃恢复
+- 本地自动重试
+- 身份缓存
+- Cloudflare Worker
+- Cloudflare D1 Cloud Outbox
+- Request-level Idempotency
+- Event-level Idempotency
+- Lease
+- QStash
+- QStash Deduplication
+- QStash Signature Verification
+- QStash Failure Callback
+- Cloudflare Cron Reconciliation
+- Google Drive Event Store
 - Profile Snapshot
 - Daily Plan Projection
 - Resume Snapshot
-- Question Bank Projection
-- Interview Session / Review
+- Question Bank Snapshot
+- Interview Session
+- Interview Review
 - Algorithm Learning Profile
-- Legacy 数据迁移
+- Resume Knowledge Profile
 - Readback Verification
+- Legacy Migration
 - Failure Notice
-- `needs_attention` 人工介入状态
+- `needs_attention`
 
-因此它并不是一个单纯的文件同步程序。
+所以它更准确的定位是：
 
-更准确地说：
+> **Event-driven Personal AI State Infrastructure**
 
-> **它是一套面向 AI Skill 的 Event-driven Personal State Infrastructure。**
+也就是：
+
+> 为长期运行的个人 AI Skill 生态提供统一的事件、身份、可靠性和持久化底座。
 
 ---
 
 # 2. Why does this project exist?
 
-如果每一个 Skill 都自己管理长期数据，系统最终很容易变成：
+如果每一个 Skill 都自己处理长期数据，系统很容易变成：
 
 ```text
-Algorithm Skill ─────────────→ Google Drive
-Interview Skill ─────────────→ Google Drive
-Resume Skill ────────────────→ Google Drive
-Photo Skill ─────────────────→ Local Files
-Future Skill A ──────────────→ Database
-Future Skill B ──────────────→ Another API
+Algorithm Skill ───────────→ Google Drive
+Interview Skill ───────────→ Google Drive
+Resume Skill ──────────────→ Google Drive
+Future Skill A ────────────→ Local JSON
+Future Skill B ────────────→ Database
+Future Skill C ────────────→ Another API
 ```
 
-然后每个 Skill 都重新实现：
+然后每一个 Skill 都重新实现：
 
 ```text
 Authentication
 Identity
 Retry
 Idempotency
-Drive API
-Folder Layout
-Data Schema
-Network Recovery
+Google Drive API
+File Naming
+Directory Layout
 Migration
-Conflict Detection
+Conflict Handling
 State Projection
+Recovery
 ```
 
-Skill 越多，重复逻辑越多。
+随着 Skill 数量增加：
 
-更严重的是：
+```text
+1 Skill
+↓
+5 Skills
+↓
+20 Skills
+↓
+100 Skills
+```
 
-> **每个 Skill 会逐渐拥有一套不同的“用户身份”和“数据世界”。**
+整个系统会越来越难维护。
 
-这与长期个人 AI 系统的目标完全相反。
+更大的问题是：
 
-本项目选择建立统一基础设施：
+> 不同 Skill 很容易逐渐形成不同的“用户”。
+
+例如：
+
+```text
+Algorithm User ID = A
+Interview User ID = B
+Resume User ID = C
+```
+
+这与个人 AI 系统的理念完全冲突。
+
+正确结构应该是：
 
 ```mermaid
 flowchart TB
 
-    USER[User]
+    USER["User"]
 
-    subgraph CLIENTS[AI Clients]
-        CHATGPT[ChatGPT Desktop / Work]
-        CODEX[Codex]
-        WORKBUDDY[WorkBuddy]
-        FUTURE[Future AI Clients]
+    subgraph CLIENTS["AI Clients"]
+        CHATGPT["ChatGPT Desktop / Work"]
+        CODEX["Codex"]
+        WORKBUDDY["WorkBuddy"]
+        FUTURE["Future AI Clients"]
     end
 
-    subgraph SKILLS[Skill Layer]
-        ALG[Algorithm Learning]
-        INT[Interview]
-        RES[Resume Knowledge]
-        OTHER[Future Skills]
+    subgraph SKILLS["Skill Layer"]
+        ALG["Algorithm Learning"]
+        INT["Interview"]
+        RES["Resume Knowledge"]
+        OTHER["Future Skills"]
     end
 
-    MCP[Local Reliable Drive Sync MCP<br/>submit_event]
+    MCP["Reliable Drive Sync MCP"]
+    EVENT["submit_event"]
+    STATE["Long-lived Personal State"]
 
-    PIPE[Reliable Persistence Pipeline]
+    USER --> CHATGPT
+    USER --> CODEX
+    USER --> WORKBUDDY
+    USER --> FUTURE
 
-    STATE[(Long-lived Personal State)]
+    CHATGPT --> ALG
+    CHATGPT --> INT
+    CODEX --> ALG
+    CODEX --> RES
+    WORKBUDDY --> OTHER
+    FUTURE --> OTHER
 
-    USER --> CLIENTS
+    ALG --> EVENT
+    INT --> EVENT
+    RES --> EVENT
+    OTHER --> EVENT
 
-    CHATGPT --> SKILLS
-    CODEX --> SKILLS
-    WORKBUDDY --> SKILLS
-    FUTURE --> SKILLS
-
-    ALG --> MCP
-    INT --> MCP
-    RES --> MCP
-    OTHER --> MCP
-
-    MCP --> PIPE
-    PIPE --> STATE
+    EVENT --> MCP
+    MCP --> STATE
 ```
 
-核心思想非常简单：
+核心原则：
 
-> **Skill 描述“发生了什么”。**
+> **Skill 描述发生了什么。**
 
 而不是：
 
-> **Skill 决定“应该修改哪个文件”。**
+> **Skill 决定修改哪个文件。**
 
 ---
 
-# 3. The core contract
+# 3. Core Contract
 
-整个系统围绕一个非常小的 MCP Surface 构建。
+整个项目刻意保持极小的 MCP Surface。
 
-当前 MCP 只暴露：
+目前 Local MCP 只暴露：
 
 ```text
 submit_event
@@ -162,7 +246,7 @@ submit_event
 tools/list
 ```
 
-应该得到：
+应该只看到：
 
 ```json
 [
@@ -170,102 +254,105 @@ tools/list
 ]
 ```
 
-这是一个刻意设计的约束。
-
-系统并不提供：
+系统刻意不提供：
 
 ```text
 write_json
-update_profile
-append_file
-save_snapshot
+save_profile
+update_snapshot
+append_drive_file
 create_folder
-upload_drive
+upload_artifact
 delete_event
-modify_user
 ```
 
-因为一旦这些底层能力直接暴露给 Skill：
+因为如果 Skill 能直接操作存储：
 
 ```text
 Skill
   ↓
-Storage Implementation
+Drive Implementation
 ```
 
-两层就重新耦合了。
+业务和基础设施就重新耦合了。
 
-正确的关系应该是：
+理想结构：
 
 ```text
 Skill
   ↓
 Business Event
   ↓
-Persistence Infrastructure
+submit_event
   ↓
-Storage Implementation
+Reliable Infrastructure
+  ↓
+Persistent State
 ```
 
 ---
 
 # 4. Architecture Overview
 
-这是当前 Reliable Drive Sync 2.0 的完整主链路：
+这是当前系统的总体架构。
 
 ```mermaid
 flowchart TD
 
-    subgraph HOSTS[AI Hosts]
-        A[ChatGPT Desktop / Work]
-        B[Codex]
-        C[WorkBuddy]
+    subgraph HOSTS["AI Hosts"]
+        A["ChatGPT Desktop / Work"]
+        B["Codex"]
+        C["WorkBuddy"]
     end
 
-    subgraph LOCAL[Local Machine]
-        MCP[stdio MCP Server<br/>submit_event]
-        LS[(SQLite Local Outbox)]
-        IC[(Identity Cache)]
+    subgraph LOCAL["Local Machine"]
+        MCP["Local stdio MCP"]
+        TOOL["submit_event"]
+        LS[("SQLite Local Outbox")]
+        IC[("Identity Cache")]
     end
 
-    subgraph CF[Cloudflare]
-        INGRESS[Worker Ingress]
-        D1[(D1 Cloud Outbox)]
-        REC[Reconciler / Cron]
+    subgraph CF["Cloudflare"]
+        INGRESS["Worker Ingress"]
+        D1[("D1 Cloud Outbox")]
+        REC["Cron Reconciler"]
     end
 
-    subgraph BROKER[Async Broker]
-        QS[Upstash QStash]
+    subgraph BROKER["Async Broker"]
+        QS["Upstash QStash"]
     end
 
-    subgraph WORKER[Sync Worker]
-        SYNC[/v1/sync]
-        ROUTER[Schema 1.2 Dispatcher]
-        DOMAIN[Domain Stores]
+    subgraph SYNCWORKER["Sync Worker"]
+        SYNC["POST /v1/sync"]
+        ROUTER["Schema 1.2 Dispatcher"]
+        DOMAIN["Domain Stores"]
     end
 
-    subgraph STORAGE[Persistent State]
-        DRIVE[(Google Drive)]
-        REG[Global User Registry]
-        EVENTS[Event Streams]
-        PROJ[Snapshots / Plans / Projections]
+    subgraph STORAGE["Persistent State"]
+        DRIVE[("Google Drive")]
+        REG["Global User Registry"]
+        EVENTS["Event Streams"]
+        PROJ["Snapshots and Projections"]
+        PLANS["Daily Plans"]
     end
 
     A --> MCP
     B --> MCP
     C --> MCP
 
-    MCP --> LS
-    MCP <--> IC
+    MCP --> TOOL
+    TOOL --> LS
+    TOOL <--> IC
 
-    LS -->|POST /v1/jobs| INGRESS
+    LS -->|"POST /v1/jobs"| INGRESS
     INGRESS --> D1
 
     D1 --> QS
     REC --> D1
     REC --> QS
 
-    QS -->|signed request| SYNC
+    QS -->|"Signed request"| SYNC
+
     SYNC --> ROUTER
     ROUTER --> DOMAIN
 
@@ -274,102 +361,48 @@ flowchart TD
     DRIVE --> REG
     DRIVE --> EVENTS
     DRIVE --> PROJ
+    DRIVE --> PLANS
 ```
 
-可以压缩成：
+压缩后就是：
 
 ```text
-AI Client
-    ↓
+ChatGPT / Codex / WorkBuddy
+        ↓
 Local stdio MCP
-    ↓
+        ↓
+submit_event
+        ↓
 SQLite Local Outbox
-    ↓
+        ↓
 Worker /v1/jobs
-    ↓
+        ↓
 D1 Cloud Outbox
-    ↓
+        ↓
 QStash
-    ↓
+        ↓
 Worker /v1/sync
-    ↓
+        ↓
 Schema 1.2 Dispatcher
-    ↓
+        ↓
 Domain Store
-    ↓
+        ↓
 Google Drive
-    ↓
+        ↓
 Readback Verification
 ```
 
 ---
 
-# 5. Why is the architecture so complicated?
+# 5. Persistence Semantics
 
-因为系统试图解决的并不是：
+Reliable Drive Sync 最重要的一点，是必须区分不同层级的“成功”。
 
-> “网络正常时，把一个 JSON 上传成功。”
-
-真正的问题是：
-
-> **如果任何一个阶段失败，数据还能不能最终到达？**
-
-例如：
-
-```text
-ChatGPT 崩溃
-Codex 被关闭
-电脑断网
-Worker timeout
-Worker 重启
-D1 请求失败
-QStash 发布失败
-QStash 重试耗尽
-Google OAuth 失败
-Drive API 暂时失败
-Profile Projection 失败
-事件已经写入但 Snapshot 没写成功
-相同 requestId 被重复提交
-相同 eventKey 被重复生成
-旧数据和新数据发生冲突
-迁移过程中源数据发生变化
-```
-
-这些失败不能简单变成：
-
-```text
-event lost
-```
-
-因此 Reliable Drive Sync 使用了：
-
-# 双层 Outbox
-
-```mermaid
-flowchart LR
-
-    AI[AI Client]
-
-    LO[(Local SQLite<br/>Outbox)]
-
-    CO[(Cloudflare D1<br/>Cloud Outbox)]
-
-    GS[(Google Drive<br/>Canonical State)]
-
-    AI -->|Durable locally| LO
-    LO -->|Cloud accepted| CO
-    CO -->|Eventually synced| GS
-```
-
-分别解决不同层级的故障。
+整个系统存在三个主要持久化阶段。
 
 ---
 
-# 6. Three persistence stages
-
-整个系统必须严格区分三个状态。
-
-## Stage 1 — Local Durable
+## 5.1 Local Durable
 
 ```text
 SQLite
@@ -378,170 +411,248 @@ SQLite
 D1
 ?
 
-Drive
+Google Drive
 ?
 ```
 
 意味着：
 
-> 事件已经不会因为当前 AI 客户端退出而丢失。
+> 当前事件已经安全保存在本地。
+
+即使：
+
+```text
+ChatGPT closes
+Codex crashes
+WorkBuddy exits
+Network disappears
+```
+
+事件仍然存在。
 
 ---
 
-## Stage 2 — Cloud Accepted
+## 5.2 Cloud Accepted
 
 ```text
 SQLite
-✓ / removed after acknowledgement
+acknowledged
 
 D1
 ✓
 
-Drive
+Google Drive
 pending
 ```
 
 意味着：
 
-> 云端已经可靠接管这个任务。
+> 云端已经正式接管任务。
 
-但绝不意味着：
+这个状态对应：
 
-> Google Drive 已经写入完成。
+```text
+deliveryState = cloud_accepted
+```
+
+但它绝不代表：
+
+```text
+Google Drive saved
+```
 
 ---
 
-## Stage 3 — Synced
+## 5.3 Synced
 
 ```text
 D1 Job
 synced
 
-Drive
+Google Drive
 ✓
 
-Readback
+Readback Verification
 ✓
 ```
 
-只有这个阶段，异步持久化链路才真正结束。
+只有这一步完成之后：
+
+> 异步持久化链路才真正结束。
 
 ---
 
-# 7. Complete Write Sequence
+## 5.4 双层 Outbox
 
-一次普通业务写入实际经历如下过程：
+```mermaid
+flowchart LR
+
+    AI["AI Client"]
+    LOCAL[("Local SQLite Outbox")]
+    CLOUD[("D1 Cloud Outbox")]
+    DRIVE[("Google Drive")]
+
+    AI -->|"Local durability"| LOCAL
+    LOCAL -->|"Cloud acceptance"| CLOUD
+    CLOUD -->|"Eventually persisted"| DRIVE
+```
+
+Local Outbox 解决：
+
+```text
+客户端退出
+电脑断网
+Worker 不可访问
+HTTP timeout
+程序崩溃
+```
+
+Cloud Outbox 解决：
+
+```text
+QStash 发布失败
+QStash 重试
+Drive 暂时不可用
+OAuth 暂时失败
+Projection 暂时失败
+Worker 执行失败
+```
+
+---
+
+# 6. Complete Write Sequence
+
+这是整个仓库最重要的一张图。
 
 ```mermaid
 sequenceDiagram
-
     participant S as Skill
     participant M as Local MCP
     participant L as SQLite Outbox
     participant I as Identity Resolver
-    participant W as Worker /v1/jobs
-    participant D as D1
+    participant W as Worker Jobs API
+    participant D as D1 Cloud Outbox
     participant Q as QStash
-    participant Y as Worker /v1/sync
+    participant Y as Worker Sync API
     participant R as Domain Dispatcher
     participant G as Google Drive
 
     S->>M: submit_event(envelope)
 
-    M->>L: enqueue(requestId, original envelope)
-    L-->>M: durable
+    M->>L: enqueue original request
+    L-->>M: durable locally
 
     M->>I: resolve identity
 
-    alt cached identity
-        I-->>M: userId
+    alt identity cached
+        I-->>M: verified userId
     else cache miss
         I->>W: GET /v1/identity
-        W-->>I: identity / 404
+        alt existing identity
+            W-->>I: 200 identity
+        else unknown identity
+            W-->>I: 404 identity_not_found
+            I-->>M: reserve candidate userId
+        end
     end
 
     M->>L: bind resolved identity
 
     M->>W: POST /v1/jobs
+    W->>D: createOrGet requestId and envelope hash
 
-    W->>D: createOrGet(requestId)
-
-    alt same requestId + same content
-        D-->>W: existing job
+    alt same requestId and same content
+        D-->>W: reuse existing job
+    else same requestId and different content
+        D-->>W: request_id_conflict
+        W-->>M: HTTP 409
     else new request
-        D-->>W: dispatch_pending
+        D-->>W: create dispatch_pending job
     end
 
-    W-->>M: HTTP 202 + jobId
+    W-->>M: HTTP 202 and jobId
 
-    M->>L: acknowledge()
-    L->>L: delete local row
+    M->>L: acknowledge request
+    L->>L: delete acknowledged local row
+
+    W->>D: claim dispatch lease
+    D-->>W: dispatching
 
     W->>Q: publish job
 
-    Q-->>W: messageId
+    alt QStash publish succeeds
+        Q-->>W: messageId
+        W->>D: mark broker_queued
+    else QStash publish fails
+        W->>D: return to dispatch_pending
+    end
 
-    W->>D: broker_queued
+    Q->>Y: signed POST /v1/sync
 
-    Q->>Y: signed /v1/sync
-
+    Y->>Y: verify QStash signature
+    Y->>D: validate job identity
     Y->>D: claim sync lease
+    D-->>Y: syncing
 
-    Y->>R: dispatchSubmitEvent()
+    Y->>R: dispatchSubmitEvent
 
-    R->>G: event / projection writes
-    G-->>R: readback
+    R->>R: validate schema
+    R->>R: bind identity
+    R->>R: route event type
 
-    R-->>Y: status
+    R->>G: write immutable event
+    G-->>R: event readback
+
+    opt domain requires projection
+        R->>G: write projection
+        G-->>R: projection readback
+    end
+
+    R-->>Y: domain result
 
     alt terminal success
-        Y->>D: synced
-    else retryable
-        Y->>D: broker_queued
+        Y->>D: mark synced
+        Y-->>Q: HTTP 204
+    else retryable result
+        Y->>D: release back to broker_queued
         Y-->>Q: HTTP 503
     else permanent protocol failure
-        Y->>D: needs_attention
+        Y->>D: mark needs_attention
+        Y->>D: open failure notice
     end
 ```
 
-这张图基本就是整个项目的核心。
-
 ---
 
-# 8. Local MCP Layer
+# 7. Local MCP
 
-本地入口：
+本地 MCP 位于：
 
 ```text
 tools/reliable-drive-sync-mcp/
 ```
 
-主要组件：
+主要文件：
 
 ```text
 stdio-bridge.mjs
 delivery-service.mjs
 local-outbox.mjs
-start.cmd
 setup-local-clients.ps1
+start.cmd
 ```
 
-职责拆分：
+整体职责：
 
 ```mermaid
 flowchart LR
 
-    CLIENT[AI Client]
-
-    STDIO[stdio-bridge.mjs]
-
-    DELIVERY[DeliveryService]
-
-    SQLITE[(LocalOutbox SQLite)]
-
-    CACHE[(Identity Cache)]
-
-    WORKER[Cloudflare Worker]
+    CLIENT["AI Client"]
+    STDIO["stdio-bridge.mjs"]
+    DELIVERY["DeliveryService"]
+    SQLITE[("SQLite Outbox")]
+    CACHE[("Identity Cache")]
+    WORKER["Cloudflare Worker"]
 
     CLIENT --> STDIO
     STDIO --> DELIVERY
@@ -554,14 +665,41 @@ flowchart LR
 
 ---
 
-# 9. Local Outbox
+## 7.1 stdio-bridge
 
-本地 SQLite Outbox 是第一道可靠性边界。
-
-默认数据库大致位于：
+`stdio-bridge.mjs` 负责：
 
 ```text
-%LOCALAPPDATA%/ReliableDriveSync/outbox.sqlite
+MCP initialize
+MCP ping
+tools/list
+tools/call
+JSON-RPC error handling
+```
+
+MCP Server 信息：
+
+```text
+name = reliable-drive-sync
+version = 2.0.0
+```
+
+协议：
+
+```text
+2024-11-05
+```
+
+---
+
+# 8. Local SQLite Outbox
+
+Local Outbox 是第一道可靠性边界。
+
+默认路径大致为：
+
+```text
+%LOCALAPPDATA%\ReliableDriveSync\outbox.sqlite
 ```
 
 也可以通过：
@@ -574,9 +712,21 @@ RELIABLE_DRIVE_SYNC_OUTBOX_PATH
 
 ---
 
-## Local Outbox states
+## 8.1 WAL
 
-当前本地事件只有三种状态：
+SQLite 启用：
+
+```text
+PRAGMA journal_mode = WAL;
+```
+
+用于提高崩溃恢复和运行稳定性。
+
+---
+
+## 8.2 Local states
+
+Local Outbox 只有三个主要状态：
 
 ```text
 pending
@@ -584,45 +734,50 @@ sending
 blocked
 ```
 
-状态机：
-
 ```mermaid
-stateDiagram-v2
+flowchart LR
 
-    [*] --> pending: enqueue
+    NEW["New Event"]
+    P["pending"]
+    S["sending"]
+    B["blocked"]
+    DONE["Removed from Local Outbox"]
 
-    pending --> sending: delivery attempt
+    NEW -->|"enqueue"| P
 
-    sending --> pending: network / ingress failure
+    P -->|"delivery attempt"| S
 
-    sending --> [*]: HTTP 202 + valid jobId
+    S -->|"transport or ingress failure"| P
 
-    pending --> blocked: permanent identity conflict
+    S -->|"HTTP 202 and valid jobId"| DONE
 
-    sending --> blocked: permanent identity conflict
+    P -->|"permanent identity conflict"| B
+    S -->|"permanent identity conflict"| B
 
-    sending --> pending: process restart recovery
+    S -->|"process restart recovery"| P
 ```
 
-注意：
+---
 
-> `HTTP 202 + jobId` 是删除本地事件的唯一正常成功条件。
+## 8.3 Local success condition
 
-也就是说：
+一个 Local Outbox Event 不能因为：
 
 ```text
-POST request sent
+request sent
 ```
 
-不够。
+就删除。
+
+也不能因为：
 
 ```text
-HTTP 200
+HTTP response received
 ```
 
-也不够。
+就删除。
 
-必须：
+必须满足：
 
 ```text
 HTTP 202
@@ -630,135 +785,102 @@ HTTP 202
 non-empty jobId
 ```
 
-之后 Local Outbox 才认为云端已经正式接管。
-
----
-
-# 10. Crash Recovery
-
-假设程序执行到：
-
-```text
-pending
-↓
-sending
-```
-
 然后：
 
 ```text
-ChatGPT / Codex / WorkBuddy
-突然退出
+acknowledge(requestId, jobId)
 ```
 
-数据库里可能留下：
+才真正删除本地记录。
+
+---
+
+## 8.4 Crash recovery
+
+如果进程崩在：
 
 ```text
 state = sending
 ```
 
-下一次 `LocalOutbox` 初始化时会执行恢复：
+下一次 LocalOutbox 初始化时会执行：
 
 ```text
 sending
-↓
+→
 pending
 ```
-
-因此：
 
 ```mermaid
 flowchart LR
 
-    S[sending]
-
-    CRASH[Process Crash]
-
-    RESTART[Next Startup]
-
-    P[pending]
+    S["sending"]
+    CRASH["Process crash"]
+    START["Next startup"]
+    P["pending"]
 
     S --> CRASH
-    CRASH --> RESTART
-    RESTART --> P
+    CRASH --> START
+    START --> P
 ```
-
-不会因为客户端退出而永久卡在 sending。
 
 ---
 
-# 11. Background Local Retry
+## 8.5 Background retry
 
-stdio MCP 运行期间，会定时执行：
+本地 MCP 运行期间会周期性调用：
 
 ```text
 flushPending()
 ```
 
-当前周期：
+当前周期约：
 
 ```text
 30 seconds
 ```
 
-因此 Local Outbox 不仅依赖下一次 Skill 调用触发重试。
-
-它还有运行时自动 flush。
+因此 pending 事件不会只依赖下一次 Skill 调用。
 
 ---
 
-# 12. Older events are flushed first
+## 8.6 FIFO-oriented delivery
 
-当提交一个新事件时：
-
-```text
-new event
-```
-
-系统并不是只尝试发送当前事件。
-
-它会从 Local Outbox 中读取：
-
-```text
-pending events
-```
-
-按照：
+本地 pending 记录按照：
 
 ```text
 created_at
 request_id
 ```
 
-排序，然后优先 flush 较早事件。
+排序。
 
-默认单轮最多处理：
+每轮默认最多处理：
 
 ```text
-20 events
+20
 ```
 
-于是：
+条。
+
+这意味着旧事件通常会优先于当前事件被 flush。
 
 ```mermaid
 flowchart LR
 
-    E1[Old Event 1]
-    E2[Old Event 2]
-    E3[Current Event]
+    OLD1["Old Event A"]
+    OLD2["Old Event B"]
+    CURRENT["Current Event"]
+    WORKER["Worker"]
 
-    W[Worker]
-
-    E1 --> W
-    E2 --> W
-    E3 --> W
+    OLD1 --> WORKER
+    OLD2 --> WORKER
+    CURRENT --> WORKER
 ```
-
-这对有依赖关系的事件非常重要。
 
 ---
 
-# 13. Local request idempotency
+## 8.7 Local request idempotency
 
 Local Outbox 保存：
 
@@ -768,14 +890,12 @@ input_hash
 envelope_json
 ```
 
-第一次：
+如果：
 
 ```text
 requestId = A
 payload = X
 ```
-
-保存成功。
 
 再次提交：
 
@@ -784,7 +904,7 @@ requestId = A
 payload = X
 ```
 
-允许重试。
+则视为安全重试。
 
 但：
 
@@ -793,173 +913,133 @@ requestId = A
 payload = Y
 ```
 
-会触发：
+会得到：
 
 ```text
 request_id_conflict
 ```
 
-因此 `requestId` 不是普通 UUID。
-
-它是一个：
-
-> **Idempotency Fence**
-
 ---
 
-# 14. Why identity is bound after enqueue
+# 9. Identity System
 
-一个非常重要的细节：
-
-Local Outbox 首先保存的是：
-
-> **调用方原始 Envelope**
-
-然后才进行身份解析。
-
-这样：
-
-```text
-network unavailable
-```
-
-不会阻止：
-
-```text
-local durability
-```
-
-身份解析成功后，系统可以把：
-
-```text
-userId
-username
-```
-
-绑定到用于云端投递的 Envelope。
-
-但最初的 `input_hash` 仍然代表原始调用内容。
-
-因此：
-
-```text
-caller idempotency
-```
-
-与：
-
-```text
-identity enrichment
-```
-
-被分离。
-
----
-
-# 15. Identity Architecture
-
-整个生态只有一个全局身份系统。
+整个 Skill 生态使用统一 Global Identity。
 
 不是：
 
 ```text
-algorithm/user
-interview/user
-resume/user
+Algorithm User
+Interview User
+Resume User
 ```
-
-分别拥有自己的 userId。
 
 而是：
 
 ```text
 Global User
-     │
-     ├── algorithm
-     ├── interview
-     ├── resume-knowledge
-     └── future domains
+    ├── algorithm
+    ├── interview
+    ├── resume-knowledge
+    └── future domains
 ```
 
 ---
 
-# 16. Global identity resolution
+## 9.1 Identity normalization
 
-身份核心输入：
-
-```text
-displayName / username
-```
-
-规范化规则：
+用户名经过：
 
 ```text
-NFKC
+Unicode NFKC
 +
 trim
 ```
 
-例如：
+处理。
 
-```text
-Raw Name
-   ↓
-Unicode NFKC
-   ↓
-Trim whitespace
-   ↓
-Canonical displayName
+```mermaid
+flowchart LR
+
+    RAW["Raw username"]
+    NFKC["NFKC normalization"]
+    TRIM["Trim"]
+    NAME["Canonical displayName"]
+
+    RAW --> NFKC
+    NFKC --> TRIM
+    TRIM --> NAME
 ```
 
-系统不会进行随意的大小写折叠。
+系统不会随意进行大小写折叠。
 
 ---
 
-## Identity flow
+## 9.2 Identity resolution
 
 ```mermaid
 flowchart TD
 
-    NAME[username]
+    NAME["username"]
+    NORMALIZE["NFKC and trim"]
+    CACHE{"Local cache hit?"}
+    LOOKUP["GET /v1/identity"]
+    FOUND{"Identity exists?"}
+    EXISTING["Reuse stable userId"]
+    NEW["Reserve candidate UUID"]
+    BIND["Bind identity to envelope"]
 
-    NORM[NFKC + trim]
+    NAME --> NORMALIZE
+    NORMALIZE --> CACHE
 
-    CACHE{Local identity cache?}
-
-    LOOKUP[GET /v1/identity]
-
-    FOUND{Existing registration?}
-
-    EXISTING[Reuse stable userId]
-
-    NEW[Reserve candidate UUID]
-
-    BIND[Bind identity to envelope]
-
-    NAME --> NORM
-    NORM --> CACHE
-
-    CACHE -->|yes| EXISTING
-    CACHE -->|no| LOOKUP
+    CACHE -->|"Yes"| EXISTING
+    CACHE -->|"No"| LOOKUP
 
     LOOKUP --> FOUND
 
-    FOUND -->|yes| EXISTING
-    FOUND -->|404| NEW
+    FOUND -->|"Yes"| EXISTING
+    FOUND -->|"No, HTTP 404"| NEW
 
     EXISTING --> BIND
     NEW --> BIND
 ```
 
-最终 Worker 仍然会在真正业务执行时验证身份一致性。
+---
+
+## 9.3 Why enqueue happens before identity lookup
+
+系统先执行：
+
+```text
+enqueue original request
+```
+
+再做：
+
+```text
+identity resolution
+```
+
+原因是：
+
+> 身份查询需要网络，而本地持久化不应该依赖网络。
+
+因此：
+
+```text
+Network failure
+```
+
+不会阻止：
+
+```text
+Local durability
+```
 
 ---
 
-# 17. Global Identity Storage
+## 9.4 Global Identity Storage
 
-Google Drive 中存在两份相互验证的身份记录。
-
-## Global registry
+Global Registry：
 
 ```text
 my-chatGPT-skills/
@@ -967,9 +1047,7 @@ my-chatGPT-skills/
     └── registration-<userId>.json
 ```
 
----
-
-## User identity
+User identity：
 
 ```text
 my-chatGPT-skills/
@@ -978,89 +1056,68 @@ my-chatGPT-skills/
         └── identity.json
 ```
 
----
-
-系统验证：
-
-```text
-registration
-      ↕
-identity.json
-```
-
-必须一致。
-
-如果出现：
-
-```text
-same name → multiple userIds
-```
-
-返回：
-
-```text
-user_conflict
-```
-
-如果：
-
-```text
-provided userId
-≠
-registered userId
-```
-
-返回：
-
-```text
-identity_mismatch
-```
+两者必须一致。
 
 ---
 
-# 18. Identity creation
-
-新身份的创建过程不是单文件写入。
+## 9.5 Identity creation
 
 ```mermaid
 sequenceDiagram
-
     participant U as UserStore
     participant D as Google Drive
-    participant R as Global Registry
+    participant R as User Registry
 
-    U->>D: create users/<userId>/identity.json
-    U->>D: read back identity.json
+    U->>D: create identity.json
+    U->>D: read identity.json
 
-    alt readback invalid
+    alt identity readback invalid
         D-->>U: identity_readback_failed
-    else valid
-        U->>R: create registration-<userId>.json
-        U->>R: read back registration
+    else identity valid
+        U->>R: create registration file
+        U->>R: read registration file
 
-        alt invalid registration
+        alt registration invalid
             R-->>U: registration_readback_failed
-        else valid
+        else registration valid
             U-->>U: identity verified
         end
     end
 ```
 
-核心原则：
+---
 
-> **Write is not success until readback succeeds.**
+## 9.6 Identity conflicts
+
+如果同一个 displayName 对应多个 userId：
+
+```text
+user_conflict
+```
+
+如果请求提供的 userId 与 Registry 不一致：
+
+```text
+identity_mismatch
+```
+
+如果 userId 格式非法：
+
+```text
+invalid_user_id
+```
 
 ---
 
-# 19. Event Protocol
+# 10. Event Protocol
 
-当前协议版本：
+当前事件协议：
 
 ```text
 schemaVersion = "1.2"
 ```
 
-Envelope：
+Envelope 示例：
 
 ```json
 {
@@ -1077,7 +1134,7 @@ Envelope：
 }
 ```
 
-允许的顶层字段严格限制为：
+允许顶层字段：
 
 ```text
 schemaVersion
@@ -1090,9 +1147,9 @@ requestId
 
 ---
 
-# 20. Namespaces
+## 10.1 Namespaces
 
-当前允许：
+当前：
 
 ```text
 system
@@ -1103,23 +1160,23 @@ resume-knowledge
 
 ---
 
-# 21. Event Types
+## 10.2 Event Types
 
-## System
+### System
 
 ```text
 system.user-registered
 system.legacy-migration-requested
 ```
 
-## Algorithm
+### Algorithm
 
 ```text
 algorithm.learning.completed
 algorithm.daily-plan-created
 ```
 
-## Interview
+### Interview
 
 ```text
 interview.session.list
@@ -1128,7 +1185,7 @@ interview.session.completed
 interview.review.completed
 ```
 
-## Resume Knowledge
+### Resume Knowledge
 
 ```text
 resume-knowledge.resume-ingested
@@ -1141,11 +1198,9 @@ resume-knowledge.answer-scored
 
 ---
 
-# 22. Read vs Write Events
+## 10.3 Read-only events
 
-不是所有 `submit_event` 都真正进入 Outbox。
-
-当前只读事件：
+以下事件不进入 Outbox：
 
 ```text
 interview.session.list
@@ -1165,27 +1220,19 @@ mode = dry-run
 POST /v1/query
 ```
 
-而不是：
-
-```text
-POST /v1/jobs
-```
-
 ---
 
-## Read flow
+## 10.4 Read sequence
 
 ```mermaid
 sequenceDiagram
-
     participant S as Skill
     participant M as Local MCP
-    participant W as Worker /v1/query
+    participant W as Worker Query API
     participant D as Domain Store
     participant G as Google Drive
 
-    S->>M: submit_event(read-only envelope)
-
+    S->>M: submit_event read-only envelope
     M->>W: POST /v1/query
 
     W->>W: validate schema
@@ -1194,25 +1241,23 @@ sequenceDiagram
     W->>D: execute query
     D->>G: read canonical state
 
-    G-->>D: data
-    D-->>W: result
+    G-->>D: stored data
+    D-->>W: query result
     W-->>M: HTTP 200
     M-->>S: synchronous result
 ```
 
-这类查询不会进入：
-
-```text
-SQLite Outbox
-D1 Outbox
-QStash
-```
-
 ---
 
-# 23. Worker Ingress
+# 11. Worker API
 
-Worker 暴露：
+Cloudflare Worker 不是公开 MCP Server。
+
+它本质上是：
+
+> Authenticated Job / Query / Sync Service
+
+主要接口：
 
 ```text
 GET  /v1/identity
@@ -1222,31 +1267,31 @@ POST /v1/sync
 POST /v1/qstash/failure
 ```
 
-但这些接口职责完全不同。
-
 ---
 
-## `/v1/identity`
+## 11.1 `/v1/identity`
 
-只读身份查找：
+职责：
 
 ```text
 username
 ↓
 global registry
 ↓
-identity
+verified identity
 ```
 
-它不会通过查询接口偷偷创建用户。
+只读。
+
+不会隐式创建用户。
 
 ---
 
-## `/v1/query`
+## 11.2 `/v1/query`
 
-只允许明确白名单内的同步读操作。
+只允许白名单中的 Read-only Operation。
 
-如果尝试通过 `/v1/query` 写入：
+尝试写：
 
 ```text
 write_requires_outbox
@@ -1254,67 +1299,75 @@ write_requires_outbox
 
 ---
 
-## `/v1/jobs`
+## 11.3 `/v1/jobs`
 
-所有正常业务写操作的云端入口。
+所有正常写业务的云端入口。
+
+```text
+Authenticate
+↓
+Parse JSON
+↓
+Validate Schema
+↓
+D1 createOrGet
+↓
+Return HTTP 202
+↓
+Dispatch asynchronously
+```
+
+---
+
+## 11.4 `/v1/sync`
+
+由 QStash 调用。
 
 职责：
 
 ```text
-authenticate
+Verify signature
 ↓
-parse JSON
+Validate message
 ↓
-validate envelope
+Load envelope
 ↓
-D1 createOrGet
+Claim sync lease
 ↓
-HTTP 202
+Dispatch domain event
 ↓
-async dispatch
+Mark success / retry / needs_attention
 ```
 
 ---
 
-# 24. Worker authentication
+## 11.5 `/v1/qstash/failure`
 
-Ingress 使用：
+QStash 重试耗尽后调用。
 
-```text
-Authorization: Bearer <MCP_BEARER_TOKEN>
-```
-
-Worker 对 Bearer Token 进行安全比较。
-
-未配置 Secret：
+职责：
 
 ```text
-503 service_unavailable
-```
-
-缺失 Bearer：
-
-```text
-401 unauthorized
-```
-
-错误 Bearer：
-
-```text
-403 forbidden
+Verify signature
+↓
+Validate callback
+↓
+Mark job needs_attention
+↓
+Open Failure Notice
 ```
 
 ---
 
-# 25. Cloud Outbox
+# 12. D1 Cloud Outbox
 
-D1 表：
+云端表：
 
 ```text
 schema12_jobs
 ```
 
-核心字段：
+关键字段：
 
 ```text
 job_id
@@ -1322,13 +1375,20 @@ request_id
 user_id
 envelope_json
 envelope_hash
+
 state
+
 dispatch_attempts
 sync_attempts
+
 last_error_code
+last_error_message
+
 lease_owner
 lease_until
+
 broker_message_id
+
 created_at
 updated_at
 dispatched_at
@@ -1337,41 +1397,9 @@ completed_at
 
 ---
 
-# 26. Cloud Job State Machine
+## 12.1 Cloud states
 
-这是云端最重要的一张图。
-
-```mermaid
-stateDiagram-v2
-
-    [*] --> dispatch_pending: POST /v1/jobs accepted
-
-    dispatch_pending --> dispatching: claim dispatch lease
-
-    dispatching --> broker_queued: QStash ACK persisted
-
-    dispatching --> dispatch_pending: QStash publish failure
-
-    dispatching --> dispatch_pending: lease expired
-
-    broker_queued --> syncing: QStash invokes /v1/sync
-
-    syncing --> synced: terminal success
-
-    syncing --> broker_queued: retryable result
-
-    syncing --> broker_queued: transient delivery failure
-
-    syncing --> broker_queued: lease expired
-
-    syncing --> needs_attention: permanent protocol error
-
-    broker_queued --> needs_attention: QStash retries exhausted
-
-    synced --> [*]
-```
-
-D1 允许的完整状态：
+合法状态：
 
 ```text
 dispatch_pending
@@ -1384,33 +1412,98 @@ needs_attention
 
 ---
 
-# 27. Why leases exist
+## 12.2 Cloud state machine
 
-假设两个执行器同时尝试：
+```mermaid
+flowchart LR
 
-```text
-dispatch(job)
+    NEW["POST /v1/jobs"]
+    DP["dispatch_pending"]
+    DG["dispatching"]
+    BQ["broker_queued"]
+    SY["syncing"]
+    DONE["synced"]
+    ATT["needs_attention"]
+
+    NEW --> DP
+
+    DP -->|"Claim dispatch lease"| DG
+
+    DG -->|"QStash ACK persisted"| BQ
+    DG -->|"QStash publish failure"| DP
+    DG -->|"Dispatch lease expires"| DP
+
+    BQ -->|"QStash invokes sync"| SY
+
+    SY -->|"Terminal success"| DONE
+    SY -->|"Retryable result"| BQ
+    SY -->|"Transient failure"| BQ
+    SY -->|"Sync lease expires"| BQ
+
+    SY -->|"Permanent protocol error"| ATT
+    BQ -->|"QStash retries exhausted"| ATT
 ```
 
-或者：
+---
+
+## 12.3 Cloud request idempotency
+
+D1 根据：
 
 ```text
-sync(job)
+request_id
++
+envelope_hash
 ```
 
-系统不能允许两个 Worker 同时真正执行。
+判断请求。
 
-因此：
+### Same requestId + same hash
 
 ```text
-claim
+reuse existing job
+```
+
+### Same requestId + different hash
+
+```text
+request_id_conflict
+```
+
+---
+
+# 13. QStash
+
+D1 Job 进入：
+
+```text
+dispatch_pending
+```
+
+之后 Dispatcher 会尝试发布到 QStash。
+
+---
+
+## 13.1 Dispatch lease
+
+发送 QStash 前：
+
+```text
+dispatch_pending
 ↓
+claimForDispatch
+↓
+dispatching
+```
+
+同时设置：
+
+```text
 lease_owner
-↓
 lease_until
 ```
 
-当前 Dispatch 和 Sync Lease 都大约是：
+当前 Lease 大约：
 
 ```text
 5 minutes
@@ -1418,53 +1511,17 @@ lease_until
 
 ---
 
-## Lease model
+## 13.2 QStash publication
 
-```mermaid
-flowchart LR
-
-    JOB[Job]
-
-    CLAIM{Claim succeeded?}
-
-    OWNER[lease_owner = UUID]
-
-    RUN[Execute]
-
-    RELEASE[Release lease]
-
-    OTHER[Other executor does nothing]
-
-    JOB --> CLAIM
-
-    CLAIM -->|yes| OWNER
-    OWNER --> RUN
-    RUN --> RELEASE
-
-    CLAIM -->|no| OTHER
-```
-
----
-
-# 28. QStash Dispatch
-
-当 D1 Job 为：
+发布内容包括：
 
 ```text
-dispatch_pending
+jobId
+requestId
+userId
 ```
 
-Dispatcher 尝试：
-
-```text
-dispatch_pending
-↓
-dispatching
-↓
-QStash publish
-```
-
-QStash 使用：
+并使用：
 
 ```text
 jobId
@@ -1476,19 +1533,17 @@ jobId
 Upstash-Deduplication-Id
 ```
 
-并设置：
+---
 
-```text
-failure callback
-```
+## 13.3 Broker ACK
 
-成功后 QStash 返回：
+QStash 成功后返回：
 
 ```text
 messageId
 ```
 
-只有这个 ACK 被成功写回 D1：
+只有当 messageId 成功持久化到 D1：
 
 ```text
 broker_message_id
@@ -1502,11 +1557,33 @@ broker_queued
 
 ---
 
-# 29. QStash signature verification
+## 13.4 Dispatch flow
 
-`/v1/sync` 不是普通公开 webhook。
+```mermaid
+flowchart TD
 
-Worker 会验证：
+    DP["dispatch_pending"]
+    CLAIM["Claim dispatch lease"]
+    DG["dispatching"]
+    PUBLISH["Publish to QStash"]
+    ACK{"Valid messageId?"}
+    BQ["broker_queued"]
+    RETRY["dispatch_pending"]
+
+    DP --> CLAIM
+    CLAIM --> DG
+    DG --> PUBLISH
+    PUBLISH --> ACK
+
+    ACK -->|"Yes"| BQ
+    ACK -->|"No"| RETRY
+```
+
+---
+
+## 13.5 Signature Verification
+
+`POST /v1/sync` 会验证：
 
 ```text
 Upstash-Signature
@@ -1516,194 +1593,65 @@ Upstash-Signature
 
 ```text
 HS256
-issuer = Upstash
-subject = target URL
+issuer
+subject
 expiration
 not-before
-body SHA-256
+body hash
 current signing key
 next signing key
 ```
 
-因此：
-
-```text
-random external request
-```
-
-无法正常伪造同步任务。
-
 ---
 
-# 30. QStash Sync Flow
+## 13.6 Sync flow
 
 ```mermaid
 flowchart TD
 
-    Q[QStash Request]
+    REQUEST["QStash sync request"]
+    SIG{"Signature valid?"}
+    MSG{"Message valid?"}
+    JOB{"Job identity matches?"}
+    CLAIM{"Sync lease acquired?"}
+    DISPATCH["dispatchSubmitEvent"]
+    RESULT{"Domain result"}
+    DONE["synced"]
+    RETRY["broker_queued and HTTP 503"]
+    ATT["needs_attention"]
+    STOP["Non-retryable response"]
 
-    SIG{Signature valid?}
+    REQUEST --> SIG
 
-    MSG{Message valid?}
+    SIG -->|"No"| STOP
+    SIG -->|"Yes"| MSG
 
-    ENV{Job / requestId / userId match?}
+    MSG -->|"No"| STOP
+    MSG -->|"Yes"| JOB
 
-    CLAIM{Sync lease acquired?}
+    JOB -->|"No"| STOP
+    JOB -->|"Yes"| CLAIM
 
-    DISPATCH[dispatchSubmitEvent]
-
-    RESULT{Result}
-
-    SYNCED[synced]
-
-    RETRY[broker_queued<br/>HTTP 503]
-
-    ATT[needs_attention]
-
-    NON[Non-retryable]
-
-    Q --> SIG
-
-    SIG -->|no| NON
-    SIG -->|yes| MSG
-
-    MSG -->|no| NON
-    MSG -->|yes| ENV
-
-    ENV -->|no| NON
-    ENV -->|yes| CLAIM
-
-    CLAIM -->|yes| DISPATCH
+    CLAIM -->|"Yes"| DISPATCH
+    CLAIM -->|"No"| RETRY
 
     DISPATCH --> RESULT
 
-    RESULT -->|ok| SYNCED
-    RESULT -->|already_scored_today| SYNCED
-
-    RESULT -->|retryable status| RETRY
-
-    RESULT -->|ProtocolError| ATT
+    RESULT -->|"ok"| DONE
+    RESULT -->|"already_scored_today"| DONE
+    RESULT -->|"retryable"| RETRY
+    RESULT -->|"permanent protocol error"| ATT
 ```
 
 ---
 
-# 31. Terminal statuses
-
-目前 Sync Worker 明确把：
-
-```text
-ok
-already_scored_today
-```
-
-视为最终成功。
-
----
-
-# 32. Retryable situations
-
-以下类型的结果不会被当成整个任务完成：
-
-```text
-profile_cache_pending
-resume_required
-delivery failure
-dependency not ready
-projection incomplete
-```
-
-它们最终会让 QStash / Worker 再尝试执行。
-
----
-
-# 33. `needs_attention`
-
-某些错误并不是重试可以解决。
-
-例如：
-
-```text
-invalid protocol
-identity conflict
-persistent semantic conflict
-QStash retries exhausted
-```
-
-Job 会进入：
-
-```text
-needs_attention
-```
-
-同时 D1 中会创建：
-
-```text
-schema12_failure_notices
-```
-
-Failure Notice 包含：
-
-```text
-notice_id
-user_id
-category
-message
-status
-opened_at
-acknowledged_at
-updated_at
-```
-
-同一个：
-
-```text
-user + category
-```
-
-只允许一个未解决的 open notice。
-
----
-
-# 34. Failure callback
-
-如果 QStash 自己已经把所有重试机会耗尽：
-
-```mermaid
-flowchart LR
-
-    QS[QStash Retry Exhausted]
-
-    CB[/v1/qstash/failure]
-
-    VERIFY[Verify Signature]
-
-    D1[(D1)]
-
-    NOTICE[Failure Notice]
-
-    QS --> CB
-    CB --> VERIFY
-
-    VERIFY --> D1
-    D1 -->|job| D1
-
-    D1 -->|state| ATT[needs_attention]
-    ATT --> NOTICE
-```
-
-错误码：
-
-```text
-qstash_delivery_exhausted
-```
-
----
-
-# 35. Reconciler
+# 14. Reconciler and Recovery
 
 QStash 不是唯一恢复机制。
 
-Worker 还配置了 Cron：
+Cloudflare Worker 还配置了 Cron。
+
+当前：
 
 ```text
 */5 * * * *
@@ -1711,82 +1659,76 @@ Worker 还配置了 Cron：
 0 */6 * * *
 ```
 
-当前三个 Cron 最终都会执行相同的核心 reconciliation：
-
-```text
-requeue expired leases
-+
-dispatch pending jobs
-```
+当前这些 Cron 最终都执行核心 Reconciler。
 
 ---
 
-## Reconciliation flow
+## 14.1 Reconciler responsibilities
+
+```text
+Requeue expired leases
++
+Find dispatch_pending jobs
++
+Dispatch jobs again
+```
 
 ```mermaid
 flowchart TD
 
-    CRON[Cloudflare Cron]
-
-    REQUEUE[Requeue expired leases]
-
-    FIND[Find dispatch_pending jobs]
-
-    DISPATCH[Dispatch to QStash]
+    CRON["Cloudflare Cron"]
+    REQUEUE["Requeue expired leases"]
+    FIND["Find dispatch_pending jobs"]
+    SEND["Dispatch to QStash"]
 
     CRON --> REQUEUE
     REQUEUE --> FIND
-    FIND --> DISPATCH
+    FIND --> SEND
 ```
 
-因此即使：
+---
+
+## 14.2 Why Reconciler matters
+
+假设：
 
 ```text
 POST /v1/jobs
 ```
 
-成功写入 D1 后：
+已经成功写入 D1。
+
+但是：
 
 ```text
-context.waitUntil(dispatch)
+context.waitUntil dispatcher
 ```
 
-没有顺利完成，
+随后因为 Worker 生命周期或网络问题没有成功发送 QStash。
 
-任务也不会永久遗失。
-
-后续 Cron 可以重新发现：
+Job 仍然是：
 
 ```text
 dispatch_pending
 ```
 
-并再次发送。
+之后 Cron 会再次发现它。
 
 ---
 
-# 36. Reliability Layers
-
-整个系统实际上有多层恢复机制：
+## 14.3 Reliability layers
 
 ```mermaid
 flowchart TB
 
-    L1[Layer 1<br/>Local SQLite durability]
-
-    L2[Layer 2<br/>Local periodic flush]
-
-    L3[Layer 3<br/>D1 Cloud Outbox]
-
-    L4[Layer 4<br/>QStash retry]
-
-    L5[Layer 5<br/>Lease recovery]
-
-    L6[Layer 6<br/>Cron reconciliation]
-
-    L7[Layer 7<br/>Drive readback verification]
-
-    L8[Layer 8<br/>Failure Notice / needs_attention]
+    L1["Layer 1 - Local SQLite durability"]
+    L2["Layer 2 - Local periodic retry"]
+    L3["Layer 3 - D1 Cloud Outbox"]
+    L4["Layer 4 - QStash retry"]
+    L5["Layer 5 - Dispatch and Sync leases"]
+    L6["Layer 6 - Cron reconciliation"]
+    L7["Layer 7 - Drive readback verification"]
+    L8["Layer 8 - needs_attention and Failure Notice"]
 
     L1 --> L2
     L2 --> L3
@@ -1797,83 +1739,72 @@ flowchart TB
     L7 --> L8
 ```
 
-这也是 Reliable Drive Sync 真正的核心价值。
-
 ---
 
-# 37. Business Dispatcher
+# 15. Domain Dispatcher
 
-Cloud Outbox 只是负责“可靠送达”。
-
-真正执行业务语义的是：
+真正处理业务事件的是：
 
 ```text
-dispatchSubmitEvent()
+dispatchSubmitEvent
 ```
 
-它会：
+核心流程：
 
 ```text
-inspect envelope
+Inspect envelope
 ↓
-bind identity
+Bind identity
 ↓
-validate domain event
+Validate event
 ↓
-select event handler
+Route by eventType
 ↓
-call domain store
+Call Domain Store
 ```
 
 ---
 
-## Dispatcher architecture
+## 15.1 Router
 
 ```mermaid
 flowchart TD
 
-    E[Schema 1.2 Envelope]
+    EVENT["Schema 1.2 Envelope"]
+    VALIDATE["Protocol Validation"]
+    IDENTITY["Identity Binding"]
+    ROUTER{"eventType"}
 
-    VALIDATE[Protocol Validation]
+    SYSTEM["System Handler"]
+    ALG["Algorithm Store"]
+    INTERVIEW["Interview Store"]
+    RESUME["Resume Knowledge Store"]
+    MIGRATION["Migration Store"]
 
-    ID[Identity Binding]
+    DRIVE[("Google Drive")]
 
-    ROUTER{eventType}
+    EVENT --> VALIDATE
+    VALIDATE --> IDENTITY
+    IDENTITY --> ROUTER
 
-    SYS[System Handler]
+    ROUTER -->|"system"| SYSTEM
+    ROUTER -->|"algorithm"| ALG
+    ROUTER -->|"interview"| INTERVIEW
+    ROUTER -->|"resume-knowledge"| RESUME
+    ROUTER -->|"legacy migration"| MIGRATION
 
-    ALG[Algorithm Store]
-
-    INT[Interview Store]
-
-    RES[Resume Knowledge Store]
-
-    MIG[Migration Store]
-
-    DRIVE[(Google Drive)]
-
-    E --> VALIDATE
-    VALIDATE --> ID
-    ID --> ROUTER
-
-    ROUTER --> SYS
-    ROUTER --> ALG
-    ROUTER --> INT
-    ROUTER --> RES
-    ROUTER --> MIG
-
-    SYS --> DRIVE
+    SYSTEM --> DRIVE
     ALG --> DRIVE
-    INT --> DRIVE
-    RES --> DRIVE
-    MIG --> DRIVE
+    INTERVIEW --> DRIVE
+    RESUME --> DRIVE
+    MIGRATION --> DRIVE
 ```
 
 ---
 
-# 38. Read-only identity rule
+## 15.2 Read-only identity rule
 
-有一组事件非常特殊：
+这些事件：
 
 ```text
 system.legacy-migration-requested
@@ -1881,40 +1812,34 @@ interview.session.list
 interview.session.load
 ```
 
-这些操作不会：
+不会自动创建 Identity。
 
-> 因为一次读取而偷偷创建用户。
-
-也就是说：
+对于 Read-only Operation：
 
 ```text
-read
-≠
-side-effectful registration
-```
-
-对于这些事件：
-
-```text
-existing identity
+existing user
 → verify
 
-unknown identity
+unknown user
 → error
 ```
 
+避免：
+
+> 因为一次读取操作产生隐式写副作用。
+
 ---
 
-# 39. Canonical Storage Layout
+# 16. Canonical Google Drive Layout
 
-所有正常新数据都位于：
+Canonical Root：
 
 ```text
 DriveRoot/
 └── my-chatGPT-skills/
 ```
 
-完整结构：
+完整布局：
 
 ```text
 DriveRoot/
@@ -1972,11 +1897,11 @@ DriveRoot/
 
 ---
 
-# 40. Storage paths are allow-listed
+## 16.1 Path allow-list
 
-Domain Store 不能任意构造 Google Drive 路径。
+业务代码不能随便写任意路径。
 
-Storage Layout 只允许预定义 Domain：
+允许 Domain：
 
 ```text
 algorithm
@@ -1984,9 +1909,7 @@ interview
 resume-knowledge
 ```
 
-以及每个 Domain 的合法路径。
-
-例如 Algorithm：
+例如 Algorithm 只允许：
 
 ```text
 events
@@ -1994,215 +1917,102 @@ profile/snapshots
 plans/daily
 ```
 
-尝试：
+---
+
+## 16.2 Traversal protection
+
+非法：
 
 ```text
+.
 ..
-../
+/
 \
-arbitrary/folder
+../x
+x/y/z
 ```
 
-会被拒绝。
+不会被接受。
 
-因此业务代码没有一个“任意 Drive path writer”。
+因此：
+
+> Domain Store 不是通用 Drive File Writer。
 
 ---
 
-# 41. Event Store
+# 17. Event Store
 
-三个主要 Domain 都共享 Event Store 模型。
+三个主要 Domain 都建立在统一 Event Store 上。
 
-Event 是系统中的：
+Event 是：
 
-> **Immutable Fact**
+> **Immutable Business Fact**
 
-典型流程：
+---
+
+## 17.1 Event persistence
 
 ```mermaid
 flowchart TD
 
-    E[Domain Event]
-
-    VERIFY[Verify Identity]
-
-    HASH[Canonical SHA-256]
-
-    CHECK{eventKey exists?}
-
-    SAME{Same contentHash?}
-
-    REUSE[Reuse existing event]
-
-    CONFLICT[event_key_conflict]
-
-    CREATE[Create event-eventId.json]
-
-    READBACK[Readback Verification]
-
-    DONE[Durable Event]
+    E["Domain Event"]
+    VERIFY["Verify identity"]
+    HASH["Calculate canonical SHA-256"]
+    EXISTS{"eventKey exists?"}
+    SAME{"Same content hash?"}
+    REUSE["Reuse existing event"]
+    CONFLICT["event_key_conflict"]
+    CREATE["Create event file"]
+    READ["Readback verification"]
+    DONE["Durable Event"]
 
     E --> VERIFY
     VERIFY --> HASH
-    HASH --> CHECK
+    HASH --> EXISTS
 
-    CHECK -->|yes| SAME
-    SAME -->|yes| REUSE
-    SAME -->|no| CONFLICT
+    EXISTS -->|"Yes"| SAME
+    EXISTS -->|"No"| CREATE
 
-    CHECK -->|no| CREATE
-    CREATE --> READBACK
-    READBACK --> DONE
+    SAME -->|"Yes"| REUSE
+    SAME -->|"No"| CONFLICT
+
+    CREATE --> READ
+    READ --> DONE
 ```
 
 ---
 
-# 42. Two idempotency layers
-
-系统实际上有两个不同级别的幂等机制。
-
-## Transport idempotency
+## 17.2 Event filename
 
 ```text
-requestId
-```
-
-用于：
-
-```text
-Local Outbox
-D1 Job
-```
-
-防止：
-
-```text
-network retry
-duplicate MCP call
+event-<eventId>.json
 ```
 
 ---
 
-## Business idempotency
+## 17.3 Event validation
+
+一个 Event 文件必须满足：
 
 ```text
-eventKey
+schemaVersion == 1.2
+eventId valid
+eventKey valid
+eventType valid
+userId matches
+username matches
+filename matches eventId
+parent folder correct
+contentHash valid
 ```
 
-用于：
-
-```text
-Domain Event Store
-```
-
-防止业务上重复产生同一事件。
+否则不会被当作可信 Event。
 
 ---
 
-因此：
+# 18. Algorithm Domain
 
-```text
-requestId
-≠
-eventKey
-```
-
-两者解决的问题完全不同。
-
----
-
-# 43. Event content hash
-
-事件保存前计算：
-
-```text
-SHA-256
-```
-
-Hash 基于 canonical JSON。
-
-计算时：
-
-```text
-contentHash
-```
-
-字段自身被排除。
-
-最终事件中保存：
-
-```text
-contentHash
-```
-
-读取时再次计算并验证。
-
-因此一个 Event 文件必须同时满足：
-
-```text
-correct filename
-correct parent
-correct eventId
-correct userId
-correct username
-correct schemaVersion
-correct contentHash
-```
-
-才被视为有效事件。
-
----
-
-# 44. Event + Projection architecture
-
-系统并不是只保存“当前状态”。
-
-更接近：
-
-```text
-Events
-+
-Derived Projections
-```
-
-结构：
-
-```mermaid
-flowchart LR
-
-    EVENT[Immutable Event Stream]
-
-    REDUCER[Reducer / Rebuild Logic]
-
-    PROFILE[Profile Snapshot]
-
-    PLAN[Daily Plan]
-
-    BANK[Question Bank]
-
-    RESUME[Resume Snapshot]
-
-    EVENT --> REDUCER
-
-    REDUCER --> PROFILE
-    REDUCER --> PLAN
-    REDUCER --> BANK
-    REDUCER --> RESUME
-```
-
-这意味着：
-
-> Projection 可以失败。
-
-但已经可靠写入的 Event 仍然可以保留。
-
-之后可以从 Event Stream 重新构建 Projection。
-
----
-
-# 45. Algorithm Domain
-
-Algorithm Domain 当前处理：
+当前：
 
 ```text
 algorithm.learning.completed
@@ -2211,41 +2021,35 @@ algorithm.daily-plan-created
 
 ---
 
-## Learning flow
+## 18.1 Learning Event
+
+流程：
 
 ```mermaid
 flowchart TD
 
-    LEARN[algorithm.learning.completed]
-
-    EVENT[Append immutable event]
-
-    ALL[Load verified algorithm events]
-
-    REDUCE[rebuildAlgorithmProfile]
-
-    SNAP[Create profile snapshot]
-
-    READ[Readback verify]
-
-    OK[status = ok]
-
-    CACHE[status = profile_cache_pending]
+    LEARN["algorithm.learning.completed"]
+    EVENT["Append immutable event"]
+    LOAD["Load all verified events"]
+    REDUCE["Rebuild Algorithm Profile"]
+    SNAPSHOT["Create profile snapshot"]
+    VERIFY["Readback verify"]
+    OK["status = ok"]
+    CACHE["status = profile_cache_pending"]
 
     LEARN --> EVENT
+    EVENT --> LOAD
+    LOAD --> REDUCE
+    REDUCE --> SNAPSHOT
+    SNAPSHOT --> VERIFY
 
-    EVENT --> ALL
-    ALL --> REDUCE
-    REDUCE --> SNAP
-
-    SNAP --> READ
-    READ -->|success| OK
-
-    SNAP -->|failure| CACHE
-    READ -->|failure| CACHE
+    VERIFY -->|"Success"| OK
+    VERIFY -->|"Failure"| CACHE
 ```
 
-非常重要：
+---
+
+## 18.2 Partial success
 
 如果：
 
@@ -2257,37 +2061,31 @@ profile snapshot
 ✗
 ```
 
-系统不会说整个业务数据都不存在。
-
-而是返回：
+返回：
 
 ```text
 profile_cache_pending
 ```
 
-意味着：
+这意味着：
 
-> 事实已经存在，但派生缓存需要重新构建。
+> Event 已经成为事实。
+
+但：
+
+> Profile Projection 需要重新构建。
 
 ---
 
-# 46. Algorithm Daily Plan
+## 18.3 Daily Plan
 
-Daily Plan 使用：
-
-```text
-localDate
-+
-planId
-```
-
-形成文件：
+文件：
 
 ```text
 daily-plan-<localDate>-<planId>.json
 ```
 
-如果已经存在：
+如果完全相同的 Plan 已存在：
 
 ```text
 reuse
@@ -2295,15 +2093,11 @@ reuse
 
 而不是覆盖。
 
-因此 Daily Plan 更接近：
-
-> Immutable projection.
-
 ---
 
-# 47. Interview Domain
+# 19. Interview Domain
 
-Interview Domain 分成：
+当前主要能力：
 
 ```text
 Session
@@ -2311,14 +2105,14 @@ Review
 Profile
 ```
 
-主要事件：
+事件：
 
 ```text
 interview.session.completed
 interview.review.completed
 ```
 
-读取：
+查询：
 
 ```text
 interview.session.list
@@ -2327,81 +2121,62 @@ interview.session.load
 
 ---
 
-# 48. Interview workflow
+## 19.1 Interview workflow
 
 ```mermaid
 flowchart TD
 
-    SESSION[Interview Session]
+    SESSION["Interview Session"]
+    SEVENT["interview.session.completed"]
+    STORE1["Persist Session Event"]
+    WAIT["review_pending"]
+    REVIEW["Review"]
+    REVENT["interview.review.completed"]
+    SOURCE{"Source session exists?"}
+    STORE2["Persist Review Event"]
+    PROFILE["Rebuild Interview Profile"]
+    SNAPSHOT["Create Profile Snapshot"]
+    OK["status = ok"]
+    CACHE["profile_cache_pending"]
+    ERROR["source_session_not_found"]
 
-    SE[interview.session.completed]
-
-    STORE1[Event Store]
-
-    WAIT[review_pending]
-
-    REVIEW[Review Process]
-
-    RE[interview.review.completed]
-
-    SOURCE{Source session exists?}
-
-    STORE2[Append Review Event]
-
-    PROFILE[Rebuild Interview Profile]
-
-    SNAP[Profile Snapshot]
-
-    DONE[status = ok]
-
-    CACHE[profile_cache_pending]
-
-    SESSION --> SE
-    SE --> STORE1
+    SESSION --> SEVENT
+    SEVENT --> STORE1
     STORE1 --> WAIT
 
     WAIT --> REVIEW
-    REVIEW --> RE
+    REVIEW --> REVENT
+    REVENT --> SOURCE
 
-    RE --> SOURCE
-
-    SOURCE -->|yes| STORE2
-    SOURCE -->|no| ERR[source_session_not_found]
+    SOURCE -->|"Yes"| STORE2
+    SOURCE -->|"No"| ERROR
 
     STORE2 --> PROFILE
-    PROFILE --> SNAP
+    PROFILE --> SNAPSHOT
 
-    SNAP -->|success| DONE
-    SNAP -->|failure| CACHE
+    SNAPSHOT -->|"Success"| OK
+    SNAPSHOT -->|"Failure"| CACHE
 ```
 
 ---
 
-# 49. Interview Review dependency
+## 19.2 Review dependency
 
-Review 不能凭空存在。
-
-它必须引用：
+Review 必须引用：
 
 ```text
 sourceSessionEventId
 ```
 
-系统会验证：
+系统验证：
 
 ```text
-review.sessionId
-=
-source session.sessionId
+Source Session exists
+Source Session belongs to same user
+sessionId matches
 ```
 
-以及：
-
-```text
-source event belongs to same identity
-```
-
-如果源 Session 不存在：
+否则：
 
 ```text
 source_session_not_found
@@ -2409,153 +2184,106 @@ source_session_not_found
 
 ---
 
-# 50. Interview Review Version
+## 19.3 Review Version
 
-Review 使用：
-
-```text
-reviewVersion
-```
-
-并要求 `eventKey` 的版本信息与：
+Review 具有：
 
 ```text
 reviewVersion
 ```
 
-一致。
-
-这样可以支持：
+并要求：
 
 ```text
-v1
-v2
-v3
-...
+eventKey version
 ```
 
-形式的 Review 演进，而不是直接覆盖历史结果。
+与：
+
+```text
+reviewVersion
+```
+
+匹配。
+
+因此支持：
+
+```text
+Review v1
+Review v2
+Review v3
+```
+
+而不需要覆盖历史 Review。
 
 ---
 
-# 51. Interview Profile Projection
-
-Review Event 写入成功后：
+## 19.4 Profile
 
 ```text
-all interview events
+Interview Events
 ↓
-rebuildInterviewProfile()
+rebuildInterviewProfile
 ↓
-profile snapshot
+Profile Snapshot
 ```
 
-如果：
+同样：
 
 ```text
-Review Event
-✓
+Event
+=
+source of truth
 
 Profile Snapshot
-✗
+=
+derived state
 ```
-
-返回：
-
-```text
-profile_cache_pending
-```
-
-因此：
-
-> Event 是事实。
-
-> Profile 是可重建状态。
 
 ---
 
-# 52. Interview local artifacts
+# 20. Resume Knowledge Domain
 
-Interview 业务可能在本地生成：
+当前最复杂的业务 Domain。
 
-```text
-session JSON
-report JSON
-report DOCX
-```
-
-例如：
-
-```text
-outputs/interview/<userId>/
-```
-
-但云端事件管道只上传：
-
-> **结构化 JSON Event**
-
-不会把：
-
-```text
-Markdown transcript
-Base64 document
-DOCX report
-```
-
-塞入事件同步链路。
-
----
-
-# 53. Resume Knowledge Domain
-
-这是当前业务最复杂的 Domain。
-
-它包含：
+它包括：
 
 ```text
 Resume
 Claims
 Question Bank
 Daily Plan
-Answer Score
+Answer Scoring
 Knowledge Profile
 ```
 
-完整业务关系：
+---
+
+## 20.1 Overall workflow
 
 ```mermaid
 flowchart TD
 
-    RESUME[Resume]
-
-    INGEST[resume.ingested]
-
-    RS[Resume Snapshot]
-
-    CLAIMS[Claims]
-
-    DECIDE[Confirm / Reject]
-
-    QB[Question Bank]
-
-    PLAN[Daily Plan]
-
-    QUESTION[Question]
-
-    ANSWER[Answer]
-
-    SCORE[answer.scored]
-
-    PROFILE[Knowledge Profile Snapshot]
+    RESUME["Resume"]
+    INGEST["resume-knowledge.resume-ingested"]
+    SNAP["Resume Snapshot"]
+    CLAIMS["Claims"]
+    DECISION["Confirm or Reject Claims"]
+    BANK["Question Bank"]
+    PLAN["Daily Plan"]
+    QUESTION["Question"]
+    ANSWER["Answer"]
+    SCORE["resume-knowledge.answer-scored"]
+    PROFILE["Knowledge Profile"]
 
     RESUME --> INGEST
-    INGEST --> RS
+    INGEST --> SNAP
     INGEST --> CLAIMS
 
-    CLAIMS --> DECIDE
-    DECIDE --> QB
+    CLAIMS --> DECISION
+    DECISION --> BANK
 
-    QB --> PLAN
+    BANK --> PLAN
     PLAN --> QUESTION
 
     QUESTION --> ANSWER
@@ -2566,7 +2294,7 @@ flowchart TD
 
 ---
 
-# 54. Resume ingestion
+## 20.2 Resume ingestion
 
 事件：
 
@@ -2574,23 +2302,23 @@ flowchart TD
 resume-knowledge.resume-ingested
 ```
 
-会先保存 Event。
+会持久化 Event。
 
-然后创建：
+随后生成：
 
 ```text
-resume-<version>-<fingerprint>.json
+resume-<resumeVersion>-<fingerprint>.json
 ```
 
-但是：
-
-> **原始简历文件不会直接被持久化到这个 Projection。**
-
-保存的是结构化信息：
+其中保存：
 
 ```text
+schemaVersion
+userId
+username
 resumeVersion
 fingerprint
+activatedAt
 claims
 claimRelations
 techTags
@@ -2599,15 +2327,23 @@ sourceEventId
 sourceEventKey
 ```
 
-因此该 Domain 存储的是：
+---
 
-> Resume Knowledge Representation
+## 20.3 Original resume policy
 
-而不是简单的文件备份。
+该 Projection 不直接保存原始 Resume 文件。
+
+核心目标是存储：
+
+> 结构化 Resume Knowledge
+
+而不是：
+
+> 把 PDF / DOCX 当作 Blob 上传。
 
 ---
 
-# 55. Claim decisions
+## 20.4 Claim decisions
 
 事件：
 
@@ -2616,27 +2352,21 @@ resume-knowledge.claim-confirmed
 resume-knowledge.claim-rejected
 ```
 
-只记录：
+只记录 Decision。
 
-> Claim Decision
-
-它们不会回头修改：
+它们不会：
 
 ```text
-Resume Snapshot
+rewrite resume snapshot
+overwrite previous question bank
+delete old state
 ```
 
-也不会覆盖：
-
-```text
-Question Bank
-```
-
-未来状态通过 Event Replay 推导。
+未来状态通过 Events 推导。
 
 ---
 
-# 56. Question Bank
+## 20.5 Question Bank
 
 事件：
 
@@ -2644,7 +2374,7 @@ Question Bank
 resume-knowledge.question-bank-created
 ```
 
-形成：
+生成：
 
 ```text
 question-bank-<resumeVersion>-<eventId>.json
@@ -2656,73 +2386,51 @@ question-bank-<resumeVersion>-<eventId>.json
 create new snapshot
 ```
 
-旧版本：
-
-```text
-preserved
-```
-
-不会就地覆盖。
+而不是修改旧文件。
 
 ---
 
-# 57. Daily Plan dependency
+## 20.6 Daily Plan dependency
 
-Resume Daily Plan 依赖：
+Daily Plan 依赖最新 Question Bank。
 
-```text
-latest Question Bank
+```mermaid
+flowchart LR
+
+    RESUME["Resume"]
+    BANK["Question Bank"]
+    PLAN["Daily Plan"]
+
+    RESUME --> BANK
+    BANK --> PLAN
 ```
 
-如果不存在：
+如果 Question Bank 不存在：
 
 ```text
 status = resume_required
 reason = question_bank_missing
 ```
 
-因此业务依赖关系明确存在：
+---
 
-```mermaid
-flowchart LR
+## 20.7 Immutable Daily Plan
 
-    RESUME[Resume]
+对于已经存在的：
 
-    BANK[Question Bank]
-
-    PLAN[Daily Plan]
-
-    RESUME --> BANK
-    BANK --> PLAN
+```text
+daily-plan-<localDate>-<planId>.json
 ```
+
+再次请求当天计划时，可以直接复用已存在内容。
+
+不会因为模型再次生成而随意改变当天状态。
 
 ---
 
-# 58. Immutable daily plan
+## 20.8 Answer scoring
 
-同一天已经生成计划：
-
-```text
-daily-plan-2026-09-03-xxx.json
-```
-
-再次请求：
-
-```text
-same localDate
-```
-
-系统直接返回已经存在的 Plan。
-
-不会因为模型重新生成一次而改变当天计划。
-
----
-
-# 59. Answer scoring rule
-
-这是 Resume Knowledge 中一个非常特殊的业务约束。
-
-对于：
+一个非常关键的规则：
 
 ```text
 userId
@@ -2736,189 +2444,193 @@ questionKey
 
 ---
 
-## Scoring flow
+## 20.9 Scoring flow
 
 ```mermaid
 flowchart TD
 
-    SCORE[resume-knowledge.answer-scored]
-
-    BANK{Question Bank exists?}
-
-    EVENTS[Load verified score events]
-
-    REPLAY{Same eventKey replay?}
-
-    TODAY{Already scored today?}
-
-    APPEND[Append score event]
-
-    PROFILE[Rebuild knowledge profile]
-
-    SNAP[Create profile snapshot]
-
-    OK[status = ok]
-
-    DUP[status = already_scored_today]
-
-    REQ[status = resume_required]
+    SCORE["resume-knowledge.answer-scored"]
+    BANK{"Question Bank exists?"}
+    EVENTS["Load verified score events"]
+    REPLAY{"Same eventKey replay?"}
+    TODAY{"Already scored today?"}
+    APPEND["Append score event"]
+    PROFILE["Rebuild knowledge profile"]
+    SNAPSHOT["Create profile snapshot"]
+    OK["status = ok"]
+    DUP["already_scored_today"]
+    REQUIRED["resume_required"]
+    CACHE["profile_cache_pending"]
 
     SCORE --> BANK
 
-    BANK -->|no| REQ
-    BANK -->|yes| EVENTS
+    BANK -->|"No"| REQUIRED
+    BANK -->|"Yes"| EVENTS
 
     EVENTS --> REPLAY
 
-    REPLAY -->|yes| APPEND
-    REPLAY -->|no| TODAY
+    REPLAY -->|"Yes"| APPEND
+    REPLAY -->|"No"| TODAY
 
-    TODAY -->|yes| DUP
-    TODAY -->|no| APPEND
+    TODAY -->|"Yes"| DUP
+    TODAY -->|"No"| APPEND
 
     APPEND --> PROFILE
-    PROFILE --> SNAP
+    PROFILE --> SNAPSHOT
 
-    SNAP -->|success| OK
-    SNAP -->|failure| CACHE[profile_cache_pending]
+    SNAPSHOT -->|"Success"| OK
+    SNAPSHOT -->|"Failure"| CACHE
 ```
 
 ---
 
-# 60. Why replay is special
+## 20.10 Replay exception
 
 假设：
 
 ```text
-score event
+Score Event
+✓
+
+Profile Snapshot
+✗
 ```
 
-已经成功写入。
-
-但：
+之后 Worker 用同一个：
 
 ```text
-profile snapshot
+eventKey
 ```
 
-失败。
+重试。
 
-异步 Worker 重试同一个 Event 时：
+这次重试应该被识别为：
 
-```text
-same eventKey
-```
-
-它必须被视为：
-
-> Projection Retry
+> Projection repair
 
 而不是：
 
-> 今天第二次答题。
+> 第二次答题。
 
-否则就会出现：
+否则会出现：
 
 ```text
-event successful
+Event succeeded
 ↓
-snapshot failed
+Projection failed
 ↓
-retry
+Retry
 ↓
 already_scored_today
 ↓
-snapshot永远无法修复
+Profile can never be repaired
 ```
 
-因此系统专门区分：
+因此系统显式区分：
 
 ```text
 same event replay
 ```
 
-与：
+和：
 
 ```text
-new second scoring attempt
+new second attempt
 ```
 
 ---
 
-# 61. Resume profile rebuilding
+# 21. Projection Model
 
-成功评分后：
+系统不是简单地保存“当前 JSON”。
+
+其核心结构是：
 
 ```text
-all verified events
+Immutable Events
 +
-latest question bank
-↓
-rebuildResumeKnowledgeProfile()
-↓
-profile snapshot
+Derived Projections
 ```
 
-Profile 仍然遵循：
+```mermaid
+flowchart LR
 
-```text
-Events = source facts
-Snapshot = derived state
+    EVENTS["Immutable Event Stream"]
+    REDUCER["Reducer or Rebuild Logic"]
+    PROFILE["Profile Snapshot"]
+    PLAN["Daily Plan"]
+    BANK["Question Bank"]
+    RESUME["Resume Snapshot"]
+
+    EVENTS --> REDUCER
+
+    REDUCER --> PROFILE
+    REDUCER --> PLAN
+    REDUCER --> BANK
+    REDUCER --> RESUME
 ```
 
 ---
 
-# 62. Projection write discipline
+## 21.1 Event is source of truth
 
-Resume Knowledge 中大多数 Projection 都使用同一种模式：
+Event 一旦成功持久化：
+
+```text
+Event = durable fact
+```
+
+Projection 失败：
+
+```text
+Projection = rebuildable
+```
+
+---
+
+## 21.2 Projection materialization
+
+典型 Projection 写入：
 
 ```mermaid
 flowchart TD
 
-    P[Projection Value]
+    VALUE["Projection value"]
+    PATH["Resolve canonical path"]
+    EXISTS{"Same filename exists?"}
+    READ["Read existing file"]
+    SAME{"Same content?"}
+    REUSE["Reuse existing projection"]
+    CONFLICT["projection_conflict"]
+    CREATE["Create projection"]
+    VERIFY["Readback verify"]
+    DONE["Projection durable"]
 
-    PATH[Resolve canonical folder]
-
-    EXISTS{Same filename exists?}
-
-    READ[Read existing]
-
-    SAME{Same content?}
-
-    REUSE[Reuse]
-
-    CONFLICT[projection_conflict]
-
-    CREATE[Create JSON]
-
-    VERIFY[Readback verify]
-
-    DONE[Projection durable]
-
-    P --> PATH
+    VALUE --> PATH
     PATH --> EXISTS
 
-    EXISTS -->|yes| READ
+    EXISTS -->|"Yes"| READ
+    EXISTS -->|"No"| CREATE
+
     READ --> SAME
 
-    SAME -->|yes| REUSE
-    SAME -->|no| CONFLICT
+    SAME -->|"Yes"| REUSE
+    SAME -->|"No"| CONFLICT
 
-    EXISTS -->|no| CREATE
     CREATE --> VERIFY
     VERIFY --> DONE
 ```
 
-因此系统不会：
+同一个 Projection Key 不允许：
 
 ```text
-same key
+same filename
 +
 different content
 → overwrite
 ```
 
-而是：
+而会：
 
 ```text
 projection_conflict
@@ -2926,112 +2638,97 @@ projection_conflict
 
 ---
 
-# 63. Readback Verification
+# 22. Readback Verification
 
-这是整个项目另一个非常重要的设计原则。
+系统整体遵循：
 
-系统不会认为：
+> **Persist, then prove persistence.**
 
-```text
-Drive create API returned success
-```
-
-就代表真正完成。
-
-典型写入：
+典型流程：
 
 ```text
-create
+Create
 ↓
-read
+Read
 ↓
-verify
+Verify
 ↓
-success
+Success
 ```
 
-验证内容可能包括：
+---
+
+## 22.1 Verification targets
+
+可能验证：
 
 ```text
 file id
 filename
 parent folder
-JSON content
-content hash
-identity
-schema version
+JSON body
+schemaVersion
+eventId
+eventKey
+userId
+username
+contentHash
 ```
 
 ---
 
-# 64. Why readback matters
+## 22.2 Why?
 
 因为：
 
 ```text
-API accepted
+API returned success
 ```
 
 与：
 
 ```text
-canonical persistent state exists exactly as expected
+Canonical persistent state exists exactly as expected
 ```
 
-并不是完全相同的语义。
-
-因此项目整体遵循：
-
-> **Persist, then prove persistence.**
+不是完全相同的概念。
 
 ---
 
-# 65. Legacy compatibility
+# 23. Legacy Migration
 
-历史上系统曾存在：
+系统历史上存在过：
 
 ```text
-pre-normalization namespace roots
+pre-normalization roots
 ```
 
-现在统一到：
+后来统一到了：
 
 ```text
 DriveRoot/my-chatGPT-skills/
 ```
 
-但是：
-
-> 系统不会自动破坏、移动或删除旧数据。
-
-Canonical Event Store 在某些情况下还可以读取 Legacy 数据：
-
-```text
-canonical events folder exists
-→ canonical wins
-
-canonical folder absent
-→ legacy fallback
-```
+旧数据不会被自动删除或移动。
 
 ---
 
-# 66. Legacy Migration
+## 23.1 Migration event
 
-迁移入口：
+唯一迁移入口：
 
 ```text
 system.legacy-migration-requested
 ```
 
-只支持历史 Domain：
+当前 Legacy Domain：
 
 ```text
 algorithm
 interview
 ```
 
-迁移范围目前限定到：
+主要迁移：
 
 ```text
 events
@@ -3040,71 +2737,55 @@ profile/snapshots
 
 ---
 
-# 67. Migration is deliberately two-phase
-
-完整迁移：
+## 23.2 Two-phase migration
 
 ```mermaid
 flowchart TD
 
-    START[Migration Request]
-
-    DRY[dry-run]
-
-    SCAN[Scan Legacy]
-
-    HASH[Hash Sources]
-
-    TARGET[Compare Canonical Targets]
-
-    PLAN[Build Migration Plan]
-
-    APPROVE[Human / Caller Approval]
-
-    EXEC[execute]
-
-    RESCAN[Re-scan Sources]
-
-    VERIFY{Plan Hash unchanged?}
-
-    CONFLICT{Any conflict?}
-
-    PREFLIGHT[Preflight all copy targets]
-
-    COPY[Copy missing objects]
-
-    READBACK[Readback + hash verify]
-
-    RECEIPT[Migration Receipt]
+    START["Migration Request"]
+    DRY["dry-run"]
+    SCAN["Scan Legacy Data"]
+    HASH["Hash Sources"]
+    COMPARE["Compare Canonical Targets"]
+    PLAN["Build Plan"]
+    APPROVE["Approve planHash"]
+    EXEC["execute"]
+    RESCAN["Re-scan"]
+    SAME{"planHash unchanged?"}
+    CONFLICT{"Any conflict?"}
+    PREFLIGHT["Preflight all sources and targets"]
+    COPY["Copy missing objects"]
+    VERIFY["Readback and hash verification"]
+    RECEIPT["Write Migration Receipt"]
+    STALE["migration_plan_stale"]
+    STOP["migration_conflict"]
 
     START --> DRY
     DRY --> SCAN
     SCAN --> HASH
-    HASH --> TARGET
-    TARGET --> PLAN
+    HASH --> COMPARE
+    COMPARE --> PLAN
 
     PLAN --> APPROVE
     APPROVE --> EXEC
 
     EXEC --> RESCAN
-    RESCAN --> VERIFY
+    RESCAN --> SAME
 
-    VERIFY -->|no| STALE[migration_plan_stale]
-    VERIFY -->|yes| CONFLICT
+    SAME -->|"No"| STALE
+    SAME -->|"Yes"| CONFLICT
 
-    CONFLICT -->|yes| STOP[migration_conflict]
-    CONFLICT -->|no| PREFLIGHT
+    CONFLICT -->|"Yes"| STOP
+    CONFLICT -->|"No"| PREFLIGHT
 
     PREFLIGHT --> COPY
-    COPY --> READBACK
-    READBACK --> RECEIPT
+    COPY --> VERIFY
+    VERIFY --> RECEIPT
 ```
 
 ---
 
-# 68. Dry Run
-
-Dry Run：
+## 23.3 Dry Run
 
 ```text
 mode = dry-run
@@ -3119,19 +2800,13 @@ compare
 plan
 ```
 
-绝不写数据。
+不写数据。
 
-输出每个对象的：
+---
 
-```text
-source
-target
-contentHash
-action
-reason
-```
+## 23.4 Actions
 
-Action：
+每个对象被分类：
 
 ```text
 copy
@@ -3139,114 +2814,94 @@ skip
 conflict
 ```
 
----
-
-# 69. Approved Plan Hash
-
-Dry Run 生成：
+### Missing target
 
 ```text
-planHash
-migrationId
+copy
 ```
 
-Execute 必须提供：
-
-```text
-migrationId
-approvedPlanHash
-```
-
-执行时重新扫描。
-
-如果：
-
-```text
-currentPlanHash
-≠
-approvedPlanHash
-```
-
-返回：
-
-```text
-migration_plan_stale
-```
-
-这意味着：
-
-> 用户批准的是一个确定的数据集合，而不是“随便迁移当前有什么”。
-
----
-
-# 70. Migration conflict policy
-
-目标已经存在时：
-
-### Same content
+### Existing same content
 
 ```text
 skip
 ```
 
-### Different content
+### Existing different content
 
 ```text
 conflict
 ```
 
-绝不会：
+---
+
+## 23.5 Plan Hash
+
+Dry Run 生成：
 
 ```text
-overwrite
+migrationId
+planHash
+```
+
+Execute 必须提交：
+
+```text
+migrationId
+approvedPlanHash
+```
+
+如果重新扫描后：
+
+```text
+currentPlanHash
+!=
+approvedPlanHash
+```
+
+则：
+
+```text
+migration_plan_stale
 ```
 
 ---
 
-# 71. Migration preflight
+## 23.6 Preflight before writing
 
-Execute 在真正复制第一个文件之前会：
-
-1. 再次读取所有待复制 Source；
-2. 再次校验 Source Hash；
-3. 检查所有 Target；
-4. 确认没有并发 Target 变化。
-
-然后才真正开始写。
-
-目的是避免：
+Execute 在复制任何文件之前会：
 
 ```text
-copy file 1
-copy file 2
-发现 file 3 冲突
+re-read all sources
+verify source hashes
+verify all targets
+ensure no target appeared concurrently
 ```
 
-导致部分迁移。
+避免部分迁移。
 
 ---
 
-# 72. Legacy source is permanently read-only
+## 23.7 Legacy is read-only
 
-迁移系统对 Legacy 数据遵守：
+Legacy Source：
 
 ```text
 READ
 ✓
 
-CREATE canonical copy
+COPY TO CANONICAL
 ✓
 
-UPDATE source
+UPDATE
 ✗
 
-MOVE source
+MOVE
 ✗
 
-DELETE source
+DELETE
 ✗
 
-OVERWRITE source
+OVERWRITE
 ✗
 ```
 
@@ -3256,9 +2911,9 @@ OVERWRITE source
 
 ---
 
-# 73. Migration Receipt
+## 23.8 Migration Receipt
 
-成功迁移后：
+成功后：
 
 ```text
 users/<userId>/
@@ -3279,44 +2934,37 @@ contentHash
 action
 ```
 
-因此迁移是可审计的。
-
 ---
 
-# 74. Complete Failure Model
+# 24. Failure Model
 
-| Failure | Local Event | Cloud Job | Result |
+## 24.1 End-to-end failure table
+
+| Failure | Local State | Cloud State | Recovery |
 |---|---|---|---|
-| Client crashes before submit | not created | none | caller responsibility |
-| Client crashes after SQLite enqueue | durable | none | retry later |
-| Identity lookup network failure | durable | none/pending | retry |
-| Worker unavailable | durable | none | retry |
-| `/v1/jobs` non-202 | durable | none | retry |
-| D1 accepted | local row removed | durable | cloud owns delivery |
-| QStash publish failure | removed locally | `dispatch_pending` | Cron retry |
-| Dispatcher lease expires | removed locally | requeued | retry |
-| QStash delivery fails transiently | removed locally | `broker_queued` | QStash retry |
-| Sync lease expires | removed locally | requeued | retry |
-| Drive transient failure | removed locally | retryable | retry |
-| Event durable, profile fails | removed locally | retryable | rebuild projection |
-| Protocol conflict | removed locally | `needs_attention` | operator action |
-| QStash retries exhausted | removed locally | `needs_attention` | failure notice |
-| Duplicate requestId / same payload | safe reuse | safe reuse | idempotent |
-| Duplicate requestId / different payload | conflict | conflict | rejected |
-| Duplicate eventKey / same event | reuse | existing event | idempotent |
-| Duplicate eventKey / different event | conflict | protocol/business failure | rejected |
+| Client crashes after enqueue | durable | none | Local retry |
+| Identity lookup fails | pending | none | Local retry |
+| Worker unavailable | pending | none | Local retry |
+| `/v1/jobs` timeout | pending | unknown | Safe retry by requestId |
+| D1 accepted | local acknowledged | durable | Cloud owns task |
+| QStash publish fails | local removed | dispatch_pending | Cron retry |
+| Dispatch lease expires | local removed | dispatch_pending | Reconciler |
+| QStash transient failure | local removed | broker_queued | QStash retry |
+| Sync lease expires | local removed | broker_queued | Reconciler |
+| Drive transient failure | local removed | retryable | QStash retry |
+| Event succeeds, Projection fails | local removed | retryable | Projection rebuild |
+| Permanent protocol failure | local removed | needs_attention | Operator |
+| QStash retries exhausted | local removed | needs_attention | Failure Notice |
+| Same requestId and same content | safe reuse | safe reuse | Idempotent |
+| Same requestId and different content | conflict | conflict | Reject |
+| Same eventKey and same event | reuse | existing event | Idempotent |
+| Same eventKey and different event | conflict | failure | Reject |
 
 ---
 
-# 75. Receipt semantics
+## 24.2 `cloud_accepted`
 
-Local MCP 返回的最重要状态有两个。
-
----
-
-## `cloud_accepted`
-
-示例：
+Example:
 
 ```json
 {
@@ -3334,29 +2982,21 @@ Local MCP 返回的最重要状态有两个。
 准确含义：
 
 ```text
-Local SQLite
+Local durability
 ✓
 
-Cloud D1
+D1 Cloud Outbox
 ✓
 
 Google Drive
 pending
 ```
 
-Skill 可以说：
-
-> Cloud Outbox 已接收。
-
-不能说：
-
-> Google Drive 已保存。
-
 ---
 
-# 76. `pending`
+## 24.3 `pending`
 
-示例：
+Example：
 
 ```json
 {
@@ -3371,85 +3011,141 @@ Skill 可以说：
 }
 ```
 
-准确含义：
+含义：
 
 ```text
 Local SQLite
 ✓
 
-Cloud
-unknown / pending
+Cloud acceptance
+not confirmed
 
 Drive
 pending
 ```
 
-可以安全关闭客户端。
-
-事件仍然留在本地等待重试。
-
 ---
 
-# 77. Security Boundaries
+## 24.4 `needs_attention`
 
-系统目前刻意：
-
-> **不提供公开远程 MCP Server。**
-
-不存在：
+D1 最终无法自动恢复时：
 
 ```text
-/mcp/<token>
-public MCP endpoint
-Secure MCP Tunnel
-public capability URL
+state = needs_attention
 ```
 
-AI Host 连接：
+同时可能创建：
 
 ```text
-local stdio MCP
+schema12_failure_notices
 ```
 
-Local MCP 再访问：
+Failure Notice：
 
 ```text
-authenticated Worker HTTP API
+notice_id
+user_id
+category
+message
+status
+opened_at
+acknowledged_at
+updated_at
 ```
 
 ---
 
-## Trust boundaries
+## 24.5 Failure callback flow
 
 ```mermaid
 flowchart LR
 
-    AI[AI Client]
+    QS["QStash retries exhausted"]
+    CALLBACK["POST /v1/qstash/failure"]
+    VERIFY["Verify QStash signature"]
+    D1[("D1")]
+    ATT["needs_attention"]
+    NOTICE["Failure Notice"]
 
-    LOCAL[Local stdio MCP]
-
-    WORKER[Worker Ingress]
-
-    Q[QStash]
-
-    SYNC[Sync Endpoint]
-
-    DRIVE[Google Drive]
-
-    AI -->|stdio| LOCAL
-
-    LOCAL -->|Bearer Token| WORKER
-
-    WORKER -->|QStash Token| Q
-
-    Q -->|Signed JWT-like signature| SYNC
-
-    SYNC -->|OAuth / Service Account| DRIVE
+    QS --> CALLBACK
+    CALLBACK --> VERIFY
+    VERIFY --> D1
+    D1 --> ATT
+    ATT --> NOTICE
 ```
 
 ---
 
-# 78. Secrets
+# 25. Security Boundaries
+
+系统目前刻意不提供：
+
+```text
+Public MCP endpoint
+/mcp/<token>
+Secure MCP Tunnel
+Public capability URL
+```
+
+Local Client 使用：
+
+```text
+stdio MCP
+```
+
+Worker 使用：
+
+```text
+authenticated HTTP
+```
+
+---
+
+## 25.1 Trust boundaries
+
+```mermaid
+flowchart LR
+
+    AI["AI Client"]
+    LOCAL["Local stdio MCP"]
+    WORKER["Worker Ingress"]
+    QSTASH["QStash"]
+    SYNC["Worker Sync API"]
+    DRIVE["Google Drive"]
+
+    AI -->|"stdio"| LOCAL
+    LOCAL -->|"Bearer Token"| WORKER
+    WORKER -->|"QStash Token"| QSTASH
+    QSTASH -->|"Signed request"| SYNC
+    SYNC -->|"Google OAuth or Service Account"| DRIVE
+```
+
+---
+
+## 25.2 Worker authentication
+
+Ingress 使用：
+
+```text
+Authorization: Bearer <MCP_BEARER_TOKEN>
+```
+
+状态：
+
+```text
+Token secret missing
+→ 503 service_unavailable
+
+Authorization missing
+→ 401 unauthorized
+
+Wrong token
+→ 403 forbidden
+```
+
+---
+
+## 25.3 Secrets
 
 以下内容不能提交 Git：
 
@@ -3471,7 +3167,7 @@ GOOGLE_SERVICE_ACCOUNT_JSON
 
 ---
 
-# 79. Repository Structure
+# 26. Repository Structure
 
 ```text
 my-chatgpt-mcp/
@@ -3499,22 +3195,17 @@ my-chatgpt-mcp/
 │       │   ├── qstash.js
 │       │   ├── sync.js
 │       │   ├── reconciler.js
-│       │   │
 │       │   ├── submit-event.js
 │       │   ├── storage-layout.js
 │       │   ├── google-drive.js
 │       │   ├── user-store.js
 │       │   ├── event-store.js
-│       │   │
 │       │   ├── algorithm-store.js
 │       │   ├── algorithm-profile-model.js
-│       │   │
 │       │   ├── interview-store.js
 │       │   ├── profile-model.js
-│       │   │
 │       │   ├── resume-knowledge-store.js
 │       │   ├── resume-knowledge-model.js
-│       │   │
 │       │   ├── migration-store.js
 │       │   └── legacy-reader.js
 │       │
@@ -3541,33 +3232,33 @@ my-chatgpt-mcp/
 
 ---
 
-# 80. Responsibility Map
+## 26.1 Responsibility Map
 
-| Component | Responsibility |
+| File / Component | Responsibility |
 |---|---|
 | `stdio-bridge.mjs` | MCP JSON-RPC entry |
-| `delivery-service.mjs` | identity + local/cloud delivery orchestration |
-| `local-outbox.mjs` | SQLite durability |
-| `ingress.js` | Worker HTTP ingress/auth |
+| `delivery-service.mjs` | Local delivery orchestration |
+| `local-outbox.mjs` | SQLite durability and identity cache |
+| `ingress.js` | Worker ingress and authentication |
 | `protocol.js` | Schema 1.2 validation |
 | `job-repository.js` | D1 Cloud Outbox |
-| `dispatcher.js` | D1 → QStash dispatch |
-| `qstash.js` | broker publisher |
-| `sync.js` | QStash delivery execution |
-| `reconciler.js` | cron recovery |
-| `submit-event.js` | domain router |
-| `user-store.js` | global identity |
-| `event-store.js` | immutable event persistence |
-| `storage-layout.js` | canonical path policy |
-| `algorithm-store.js` | algorithm domain |
-| `interview-store.js` | interview domain |
-| `resume-knowledge-store.js` | resume knowledge domain |
-| `migration-store.js` | legacy migration |
+| `dispatcher.js` | D1 to QStash dispatch |
+| `qstash.js` | QStash publisher |
+| `sync.js` | QStash sync and failure callback |
+| `reconciler.js` | Cron recovery |
+| `submit-event.js` | Domain routing |
+| `user-store.js` | Global identity |
+| `event-store.js` | Immutable event persistence |
+| `storage-layout.js` | Canonical path policy |
 | `google-drive.js` | Drive persistence adapter |
+| `algorithm-store.js` | Algorithm domain |
+| `interview-store.js` | Interview domain |
+| `resume-knowledge-store.js` | Resume Knowledge domain |
+| `migration-store.js` | Safe Legacy Migration |
 
 ---
 
-# 81. Quick Start
+# 27. Quick Start
 
 ## Requirements
 
@@ -3593,7 +3284,7 @@ cd my-chatgpt-mcp
 
 ---
 
-# 82. Run Tests
+## Tests
 
 完整测试：
 
@@ -3615,7 +3306,9 @@ npm run test:bridge
 
 ---
 
-# 83. Deploy Worker
+# 28. Deployment
+
+## 28.1 Deploy Worker
 
 ```bash
 cd services/reliable-drive-sync-worker
@@ -3641,9 +3334,9 @@ npm run deploy:worker
 
 ---
 
-# 84. Configure Worker Secrets
+## 28.2 Worker Secrets
 
-推荐 Google OAuth：
+Google OAuth：
 
 ```bash
 wrangler secret put MCP_BEARER_TOKEN
@@ -3659,19 +3352,15 @@ wrangler secret put GOOGLE_OAUTH_CLIENT_SECRET
 wrangler secret put GOOGLE_OAUTH_REFRESH_TOKEN
 ```
 
-也支持：
+Service Account：
 
 ```bash
 wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON
 ```
 
-Service Account 更适合 Shared Drive 等场景。
-
-对于普通 My Drive，OAuth 通常更加合适。
-
 ---
 
-# 85. Configure Local Clients
+## 28.3 Local Client Setup
 
 Windows PowerShell：
 
@@ -3681,20 +3370,21 @@ $env:RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET = '<Worker MCP_BEARER_TOKEN>'
 .\tools\reliable-drive-sync-mcp\setup-local-clients.ps1
 ```
 
-Local Bridge 使用：
+主要环境变量：
 
 ```text
 RELIABLE_DRIVE_SYNC_INGRESS_URL
 RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET
+
 RELIABLE_DRIVE_SYNC_NODE_PATH
 RELIABLE_DRIVE_SYNC_OUTBOX_PATH
 ```
 
-其中后两个可选。
+后两个可选。
 
 ---
 
-# 86. Client Topology
+## 28.4 Supported Clients
 
 当前主要支持：
 
@@ -3705,23 +3395,23 @@ Codex IDE integration
 WorkBuddy
 ```
 
-它们最终共享同一套：
+多个 Client 最终共享：
 
 ```text
 start.cmd
 ↓
 stdio-bridge.mjs
 ↓
-Local SQLite Outbox
+SQLite Outbox
+↓
+Cloud Worker
 ```
-
-因此多个 AI Client 使用的是同一种持久化协议。
 
 ---
 
-# 87. Relationship with `my-chatgpt-skills`
+# 29. Relationship with my-chatgpt-skills
 
-Skill 生态：
+Skill 仓库：
 
 ```text
 gitgotcha/my-chatgpt-skills
@@ -3733,18 +3423,13 @@ Persistence Infrastructure：
 gitgotcha/my-chatgpt-mcp
 ```
 
-两者关系：
-
 ```mermaid
 flowchart TD
 
-    SKILLS[my-chatgpt-skills]
-
-    CONTRACT[Schema 1.2 Event Contract]
-
-    MCP[my-chatgpt-mcp]
-
-    STATE[(Persistent Personal State)]
+    SKILLS["my-chatgpt-skills"]
+    CONTRACT["Schema 1.2 Event Contract"]
+    MCP["my-chatgpt-mcp"]
+    STATE["Persistent Personal State"]
 
     SKILLS --> CONTRACT
     CONTRACT --> MCP
@@ -3753,44 +3438,42 @@ flowchart TD
 
 ---
 
-# 88. Separation of Responsibilities
-
-## Skills own
+## 29.1 Skills own
 
 ```text
-Business Logic
+Business logic
 Prompting
 Reasoning
-User Interaction
-Event Construction
-Domain Semantics
+User interaction
+Event construction
+Domain semantics
 ```
 
-## MCP Infrastructure owns
+---
+
+## 29.2 MCP infrastructure owns
 
 ```text
 Identity
-Schema Validation
+Schema validation
 Durability
 Retry
 Idempotency
 Queueing
-Cloud Delivery
-Storage Layout
-Readback Verification
-Migration Safety
+Cloud delivery
+Storage layout
+Readback verification
+Migration safety
 ```
-
-这个边界非常重要。
 
 ---
 
-# 89. What a Skill should know
+## 29.3 What Skill should know
 
-理想情况下，Skill 只需要知道：
+Skill 理想情况下只应该知道：
 
 ```text
-What event happened?
+What happened?
 ```
 
 例如：
@@ -3799,109 +3482,108 @@ What event happened?
 algorithm.learning.completed
 ```
 
-而不需要知道：
+而不应该知道：
 
 ```text
 Google Drive Folder ID
-OAuth Access Token
 D1 table name
-QStash endpoint
-SQLite file path
-snapshot filename
-retry interval
-lease duration
+QStash URL
+OAuth token
+SQLite location
+Snapshot naming rule
+Lease duration
+Cron interval
 ```
 
 ---
 
-# 90. What a Skill must never assume
+# 30. System Invariants
 
-收到：
-
-```text
-cloud_accepted
-```
-
-时不能说：
-
-```text
-Google Drive saved successfully.
-```
-
-正确表达：
-
-```text
-The event has been accepted by the durable cloud queue
-and will be persisted asynchronously.
-```
+整个系统最重要的不变量：
 
 ---
 
-# 91. System Invariants
-
-整个架构最重要的不变量：
-
-### Persistence
+## 30.1 Persistence
 
 ```text
 No network call before local durability.
 ```
 
-### Cloud acknowledgement
+---
+
+## 30.2 Local acknowledgement
 
 ```text
-No local deletion before HTTP 202 + jobId.
+No local deletion before HTTP 202 and jobId.
 ```
 
-### Identity
+---
+
+## 30.3 Identity
 
 ```text
 One canonical global user identity.
 ```
 
-### Transport idempotency
+---
+
+## 30.4 Request idempotency
 
 ```text
-requestId identifies one immutable request.
+requestId identifies one immutable transport request.
 ```
 
-### Event idempotency
+---
+
+## 30.5 Event idempotency
 
 ```text
 eventKey identifies one immutable business event.
 ```
 
-### History
+---
+
+## 30.6 Event history
 
 ```text
 Events are append-oriented.
 ```
 
-### Projection
+---
+
+## 30.7 Projection
 
 ```text
 Derived state may be rebuilt from events.
 ```
 
-### Storage
+---
+
+## 30.8 Conflict handling
+
+```text
+Conflict is safer than silent overwrite.
+```
+
+---
+
+## 30.9 Storage
 
 ```text
 Only canonical allow-listed paths are writable.
 ```
 
-### Migration
+---
+
+## 30.10 Migration
 
 ```text
 Legacy data is read-only.
 ```
 
-### Conflict handling
+---
 
-```text
-Conflict > overwrite.
-```
-
-### Verification
+## 30.11 Verification
 
 ```text
 Write success requires readback evidence.
@@ -3909,9 +3591,135 @@ Write success requires readback evidence.
 
 ---
 
-# 92. What this architecture is really building
+# 31. Current Status
 
-表面上：
+当前：
+
+```text
+Reliable Drive Sync
+Version 2.0.0
+```
+
+Event Protocol：
+
+```text
+Schema 1.2
+```
+
+MCP Tool：
+
+```text
+submit_event
+```
+
+Domains：
+
+```text
+algorithm
+interview
+resume-knowledge
+```
+
+Local durability：
+
+```text
+SQLite
+```
+
+Cloud durability：
+
+```text
+Cloudflare D1
+```
+
+Broker：
+
+```text
+Upstash QStash
+```
+
+Canonical State：
+
+```text
+Google Drive
+```
+
+---
+
+## 31.1 Implemented
+
+- [x] Local stdio MCP
+- [x] Single `submit_event`
+- [x] Schema 1.2
+- [x] SQLite Local Outbox
+- [x] SQLite WAL
+- [x] Crash recovery
+- [x] Local periodic retry
+- [x] Identity cache
+- [x] Global user registry
+- [x] Global canonical userId
+- [x] Cloudflare Worker
+- [x] Bearer authentication
+- [x] D1 Cloud Outbox
+- [x] Request idempotency
+- [x] Dispatch leases
+- [x] Sync leases
+- [x] QStash
+- [x] QStash deduplication
+- [x] QStash signature verification
+- [x] QStash failure callback
+- [x] Cron reconciliation
+- [x] Failure notices
+- [x] `needs_attention`
+- [x] Google Drive persistence
+- [x] Canonical storage layout
+- [x] Path allow-list
+- [x] Event content hashing
+- [x] Event-level idempotency
+- [x] Readback verification
+- [x] Algorithm Domain
+- [x] Interview Domain
+- [x] Resume Knowledge Domain
+- [x] Profile Snapshots
+- [x] Daily Plans
+- [x] Resume Snapshots
+- [x] Question Bank Snapshots
+- [x] Read-only Query path
+- [x] Legacy Migration
+- [x] Migration Plan Hash
+- [x] Migration Receipts
+
+---
+
+# 32. Roadmap
+
+未来方向：
+
+- [ ] Operator Dashboard
+- [ ] Job Inspector
+- [ ] Failure Notice Management
+- [ ] Explicit Dead Letter Workflow
+- [ ] Projection Rebuild Commands
+- [ ] Event Replay Tooling
+- [ ] Schema Evolution Framework
+- [ ] Additional Domains
+- [ ] Cross-domain Projection
+- [ ] Backup and Restore
+- [ ] Personal State Export
+- [ ] Multi-device Reconciliation
+- [ ] Integrity Audit
+- [ ] Persistent Health Checks
+- [ ] Storage Backend Abstraction
+- [ ] Better Observability
+- [ ] Metrics and Tracing
+
+这些属于长期方向，不代表当前版本已经实现。
+
+---
+
+# 33. Vision
+
+表面上，这个系统做的是：
 
 ```text
 Skill
@@ -3919,29 +3727,31 @@ Skill
 Google Drive
 ```
 
-实际上：
+但真正的数据流是：
 
 ```text
 AI
-→
-Event
-→
-Durable Queue
-→
-Identity
-→
+↓
+Business Event
+↓
+Local Durable Queue
+↓
+Cloud Durable Queue
+↓
+Global Identity
+↓
 Event Store
-→
-Projection
-→
+↓
+Derived Projection
+↓
 Long-term Personal State
 ```
 
 ---
 
-# 93. From stateless AI to long-lived AI
+## 33.1 From stateless AI to long-lived AI
 
-传统 AI Workflow：
+传统 AI：
 
 ```text
 Prompt
@@ -3950,7 +3760,7 @@ Reason
 ↓
 Answer
 ↓
-Conversation ends
+End
 ```
 
 长期个人 AI：
@@ -3958,19 +3768,13 @@ Conversation ends
 ```mermaid
 flowchart LR
 
-    OBSERVE[Observe]
-
-    REASON[Reason]
-
-    ACT[Act]
-
-    EVENT[Record Event]
-
-    STATE[Persist State]
-
-    LEARN[Update Profile]
-
-    FUTURE[Future Interaction]
+    OBSERVE["Observe"]
+    REASON["Reason"]
+    ACT["Act"]
+    EVENT["Record Event"]
+    STATE["Persist State"]
+    LEARN["Update Derived State"]
+    FUTURE["Future Interaction"]
 
     OBSERVE --> REASON
     REASON --> ACT
@@ -3983,7 +3787,156 @@ flowchart LR
 
 ---
 
-# 94. Why persistence matters
+## 33.2 Mental Model
+
+如果只记住一张图，请记住这张：
+
+```mermaid
+flowchart TB
+
+    USER["User"]
+
+    AI["ChatGPT / Codex / WorkBuddy"]
+
+    SKILL["Skill"]
+
+    EVENT["Business Event"]
+
+    LOCAL[("SQLite Local Outbox")]
+
+    CLOUD[("D1 Cloud Outbox")]
+
+    BROKER["QStash"]
+
+    WORKER["Schema 1.2 Worker"]
+
+    IDENTITY["Global Identity"]
+
+    STORE["Domain Event Store"]
+
+    PROJECTION["Derived Projections"]
+
+    DRIVE[("Google Drive")]
+
+    FUTURE["Future AI Interaction"]
+
+    USER --> AI
+    AI --> SKILL
+    SKILL --> EVENT
+    EVENT --> LOCAL
+    LOCAL --> CLOUD
+    CLOUD --> BROKER
+    BROKER --> WORKER
+    WORKER --> IDENTITY
+    IDENTITY --> STORE
+    STORE --> DRIVE
+    STORE --> PROJECTION
+    PROJECTION --> DRIVE
+    DRIVE --> FUTURE
+    FUTURE --> AI
+```
+
+---
+
+## 33.3 One Event, End to End
+
+一次正常业务事件真实经历：
+
+```text
+01. User interacts with an AI client
+
+02. Skill constructs a business event
+
+03. Skill calls submit_event
+
+04. Original request is written to SQLite
+
+05. Request becomes locally durable
+
+06. Identity cache is checked
+
+07. Worker identity lookup is performed when necessary
+
+08. Identity is bound to the queued envelope
+
+09. Older pending Local Outbox events are flushed first
+
+10. Event is submitted to POST /v1/jobs
+
+11. Worker authenticates the request
+
+12. Schema 1.2 Envelope is validated
+
+13. D1 checks requestId idempotency
+
+14. New job becomes dispatch_pending
+
+15. Worker returns HTTP 202 and jobId
+
+16. Local SQLite row is acknowledged and removed
+
+17. Cloud now owns delivery
+
+18. Dispatcher acquires a dispatch lease
+
+19. Job becomes dispatching
+
+20. Dispatcher publishes the job to QStash
+
+21. QStash returns messageId
+
+22. messageId is persisted
+
+23. Job becomes broker_queued
+
+24. QStash invokes POST /v1/sync
+
+25. Worker verifies the QStash signature
+
+26. Worker validates jobId, requestId and userId
+
+27. Worker acquires the Sync Lease
+
+28. Job becomes syncing
+
+29. dispatchSubmitEvent validates the Envelope
+
+30. Global Identity is verified
+
+31. Domain Event Schema is validated
+
+32. eventType selects a Domain Store
+
+33. Immutable Event is persisted
+
+34. Event is read back
+
+35. Event integrity is verified
+
+36. Domain Projection is calculated when required
+
+37. Projection is persisted
+
+38. Projection is read back
+
+39. Projection integrity is verified
+
+40. Domain returns a terminal or retryable result
+
+41. Terminal success marks D1 Job synced
+
+42. Retryable status returns the Job to broker_queued
+
+43. Permanent semantic failures become needs_attention
+
+44. QStash exhaustion creates a Failure Notice
+
+45. Future AI interactions can consume accumulated long-term state
+```
+
+---
+
+## 33.4 The Bigger Idea
 
 如果 AI 没有可靠长期状态：
 
@@ -3993,12 +3946,14 @@ Agent
 Disposable Process
 ```
 
-拥有：
+如果拥有：
 
 ```text
-Identity
+Stable Identity
 +
-Events
+Immutable Events
++
+Reliable Queues
 +
 Profiles
 +
@@ -4006,379 +3961,66 @@ Plans
 +
 History
 +
-Reliable Persistence
+Readback Verification
 ```
 
-之后：
+那么：
 
 ```text
 Agent
 →
-Long-lived Personal System
+Long-lived Personal AI System
 ```
 
 ---
 
-# 95. Current Status
+`my-chatgpt-mcp` 最终想构建的并不是：
 
-当前架构：
+> 一个 Google Drive 上传脚本。
 
-```text
-Reliable Drive Sync 2.0.0
-```
+也不是：
 
-事件协议：
+> 一个普通 MCP Server。
 
-```text
-Schema 1.2
-```
+它真正希望成为：
 
-唯一 MCP Tool：
+> **个人 AI Skill 生态的持久化主干。**
+
+今天接入的是：
 
 ```text
-submit_event
+Algorithm
+Interview
+Resume Knowledge
 ```
 
-当前 Domain：
-
-```text
-algorithm
-interview
-resume-knowledge
-```
-
-本地可靠层：
-
-```text
-SQLite
-```
-
-云端可靠层：
-
-```text
-Cloudflare D1
-```
-
-异步 Broker：
-
-```text
-Upstash QStash
-```
-
-Canonical Persistent Store：
-
-```text
-Google Drive
-```
-
----
-
-# 96. Implemented
-
-- [x] Local stdio MCP
-- [x] Single `submit_event`
-- [x] Schema 1.2
-- [x] Local SQLite Outbox
-- [x] WAL mode
-- [x] Crash recovery
-- [x] Periodic local retry
-- [x] Local identity cache
-- [x] Global identity registry
-- [x] Cloudflare Worker ingress
-- [x] Bearer authentication
-- [x] D1 Cloud Outbox
-- [x] Request idempotency
-- [x] Dispatch leases
-- [x] Sync leases
-- [x] QStash
-- [x] QStash signature verification
-- [x] QStash deduplication
-- [x] Failure callback
-- [x] Cron reconciliation
-- [x] `needs_attention`
-- [x] Failure notices
-- [x] Google Drive persistence
-- [x] Canonical storage layout
-- [x] Storage path allowlist
-- [x] Event content hashing
-- [x] Event-level idempotency
-- [x] Readback verification
-- [x] Algorithm Domain
-- [x] Interview Domain
-- [x] Resume Knowledge Domain
-- [x] Profile snapshots
-- [x] Daily plans
-- [x] Question-bank snapshots
-- [x] Resume snapshots
-- [x] Read-only query path
-- [x] Safe legacy migration
-- [x] Migration receipts
-
----
-
-# 97. Long-Term Direction
-
-未来可以继续探索：
-
-- [ ] Better observability
-- [ ] Operator dashboard
-- [ ] Failure Notice management
-- [ ] Job inspection tooling
-- [ ] Projection rebuild commands
-- [ ] Dead-letter workflows
-- [ ] Schema evolution framework
-- [ ] Additional Skill domains
-- [ ] Cross-domain derived state
-- [ ] Event replay tooling
-- [ ] Storage backend abstraction
-- [ ] Backup / restore
-- [ ] Personal state export
-- [ ] Multi-device reconciliation
-- [ ] More explicit user identity lifecycle
-- [ ] Automated integrity audits
-- [ ] Persistent infrastructure health checks
-
-这些属于未来方向，不代表当前已经实现。
-
----
-
-# 98. Non-Goals
-
-本项目目前不是：
-
-```text
-General-purpose database
-Google Drive file manager
-Public remote MCP gateway
-Arbitrary file uploader
-Generic cloud SDK
-Distributed filesystem
-General event streaming platform
-```
-
-它首先服务于：
-
-> **AI Skill → Long-term Personal State**
-
-这个明确场景。
-
----
-
-# 99. Engineering Philosophy
-
-```text
-Reliability > Convenience
-
-Explicit State > Ambiguous Success
-
-Events > Direct Mutation
-
-Idempotency > Blind Retry
-
-Durability > Network Optimism
-
-Readback > Assumption
-
-Conflict > Silent Overwrite
-
-Append History > Destructive Update
-
-Safe Migration > Automatic Cleanup
-
-One Stable Contract > Many Storage Tools
-
-Infrastructure Complexity Must Stay Below the Skill Layer
-```
-
----
-
-# 100. Mental Model
-
-如果只记住整个项目的一张图，请记住这张：
-
-```mermaid
-flowchart TB
-
-    USER[User]
-
-    AI[ChatGPT / Codex / WorkBuddy]
-
-    SKILL[Skill]
-
-    EVENT[Business Event]
-
-    LOCAL[(Local SQLite Outbox)]
-
-    CLOUD[(D1 Cloud Outbox)]
-
-    BROKER[QStash]
-
-    WORKER[Schema 1.2 Worker]
-
-    ID[Global Identity]
-
-    STORE[Domain Event Store]
-
-    PROFILE[Derived Projections]
-
-    DRIVE[(Google Drive)]
-
-    FUTURE[Future AI Interaction]
-
-    USER --> AI
-    AI --> SKILL
-
-    SKILL --> EVENT
-
-    EVENT --> LOCAL
-
-    LOCAL --> CLOUD
-
-    CLOUD --> BROKER
-
-    BROKER --> WORKER
-
-    WORKER --> ID
-
-    ID --> STORE
-
-    STORE --> DRIVE
-
-    STORE --> PROFILE
-
-    PROFILE --> DRIVE
-
-    DRIVE --> FUTURE
-
-    FUTURE --> AI
-```
-
----
-
-# 101. One Event, End to End
-
-最终，一次 Skill 操作真正发生的是：
-
-```text
-01. User interacts with AI
-
-02. Skill produces a business event
-
-03. submit_event receives the envelope
-
-04. Original request is durably written to SQLite
-
-05. Identity is resolved / verified
-
-06. Bound envelope is prepared
-
-07. Older pending events are flushed first
-
-08. Event is POSTed to /v1/jobs
-
-09. Worker validates Schema 1.2
-
-10. D1 checks requestId idempotency
-
-11. Cloud job becomes dispatch_pending
-
-12. Worker returns HTTP 202 + jobId
-
-13. Local SQLite row is acknowledged and removed
-
-14. Dispatcher acquires a lease
-
-15. Job is published to QStash
-
-16. QStash messageId is persisted
-
-17. Job becomes broker_queued
-
-18. QStash invokes /v1/sync
-
-19. Worker verifies QStash signature
-
-20. Worker validates jobId/requestId/userId
-
-21. Sync lease is acquired
-
-22. Envelope enters dispatchSubmitEvent
-
-23. Identity is verified again
-
-24. Domain event schema is validated
-
-25. EventType selects the Domain Store
-
-26. Immutable event is written
-
-27. Event is read back and verified
-
-28. Derived projections are rebuilt if required
-
-29. Projection is written
-
-30. Projection is read back and verified
-
-31. Domain returns terminal or retryable status
-
-32. Terminal success marks D1 job synced
-
-33. Retryable status returns the job to retry flow
-
-34. Permanent conflicts become needs_attention
-
-35. Future AI interactions can consume the accumulated state
-```
-
----
-
-# 102. Vision
-
-`my-chatgpt-mcp` 最终想解决的并不是：
-
-> 如何把一个 JSON 文件同步到 Google Drive。
-
-而是：
-
-> **当几十个甚至上百个 AI Skills 长期服务于同一个人时，如何让它们共享同一套可靠、可验证、可恢复、可演进的个人状态基础设施。**
-
-今天：
-
-```text
-Algorithm Skill
-Interview Skill
-Resume Skill
-```
-
-未来可能变成：
+未来可能接入：
 
 ```text
 Learning
 Research
 Coding
+Projects
 Health
 Career
 Knowledge
 Planning
-Photography
-Finance
-Projects
 Personal Agents
 ...
 ```
 
-但它们不应该各自重新发明：
+无论 Skill 数量增长到多少，它们都不应该各自重新发明：
 
 ```text
 Identity
 Persistence
 Retry
 History
-Storage
+Migration
+Reliability
 ```
 
-它们应该建立在一个共同基础之上。
+这些能力应该属于统一基础设施。
 
 ---
 
@@ -4390,41 +4032,7 @@ Storage
 
 ---
 
-Direct Drive writes and the removed artifact/candidate tools are intentionally
-unsupported.
-
-## Generic profile capability
-
-The single `submit_event` tool also serves an opt-in generic user-profile
-protocol. Five logical events share the existing tool:
-
-- `system.capabilities.read` — discover whether the deployed runtime supports
-  the generic profile protocol. Read-only via `/v1/query`.
-- `system.user.resolve` — resolve a normalized display name to a stable
-  `userId` without registering. Read-only via `/v1/query`.
-- `system.user-registered` — explicit registration (unchanged behavior).
-- `profile.snapshot.read` — read the rebuilt profile for a verified user and
-  domain. Read-only via `/v1/query`.
-- `profile.evidence.recorded` — append immutable profile evidence. Write via
-  `/v1/jobs`; only this event is durable.
-
-The protocol is gated by the Worker variable `GENERIC_PROFILE_ENABLED`. Only
-the exact string `"true"` enables it; unset, empty, `"false"` and any other
-value keep it off, and the three generic read/write events return
-`unsupported_capability` while all existing events behave exactly as before.
-
-Generic profile domains are kebab-case, length 2–64, matching
-`^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$`, and reject the reserved names
-`algorithm`, `interview`, `resume-knowledge`, `system` and `profile`. The
-generic store writes only under `users/<userId>/<domain>/{events,profile/snapshots}`;
-it never reuses the specialized domain folders.
-
-A successful write acknowledgement reports only `deliveryState: "pending"`
-(local SQLite durable) or `"cloud_accepted"` (D1 accepted). It never promises a
-Drive `fileId`; Drive delivery is asynchronous. `profile_cache_pending` is a
-Worker-internal projection state returned when the durable event was accepted
-but the snapshot could not yet be cached; it is not an MCP acknowledgement.
-
-Existing `algorithm`, `interview` and `resume-knowledge` domains remain
-specialized and unchanged; their protocols, stores and reducers are not
-migrated.
+<p align="center">
+  <b>my-chatgpt-mcp</b><br>
+  Reliable persistence infrastructure for a long-lived personal AI ecosystem.
+</p>
