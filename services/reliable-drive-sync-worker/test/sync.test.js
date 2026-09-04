@@ -115,6 +115,31 @@ test("profile_cache_pending releases the lease for QStash retry", async () => {
   assert.equal((await repository.getJob("job-1")).lastErrorCode, "profile_cache_pending");
 });
 
+test("a Google Drive HTTP failure records a sanitized diagnostic code", async () => {
+  const repository = await readyRepository();
+  const handler = createSyncHandler(environment(), repository, async () => {
+    throw new Error("Google Drive write failed (403): sensitive provider detail");
+  });
+
+  const response = await handler(await signedRequest(message()));
+
+  assert.equal(response.status, 503);
+  assert.equal((await repository.getJob("job-1")).state, "broker_queued");
+  assert.equal((await repository.getJob("job-1")).lastErrorCode, "drive_write_http_403");
+});
+
+test("a Google Drive read failure records a sanitized diagnostic code", async () => {
+  const repository = await readyRepository();
+  const handler = createSyncHandler(environment(), repository, async () => {
+    throw new Error("Google Drive read failed");
+  });
+
+  const response = await handler(await signedRequest(message()));
+
+  assert.equal(response.status, 503);
+  assert.equal((await repository.getJob("job-1")).lastErrorCode, "drive_read_failed");
+});
+
 test("a permanent protocol conflict is sealed as needs_attention", async () => {
   const repository = await readyRepository();
   const handler = createSyncHandler(environment(), repository, async () => {

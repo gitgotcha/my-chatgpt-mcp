@@ -28,6 +28,8 @@ export function createEventStore({ domain = "interview", userStore, layout, driv
   if (!layout?.ensureDomainPath || !layout?.findDomainPath) throw new Error("invalid_event_store");
   if (!drive?.rootFolderId) throw new Error("invalid_event_store");
   if (!DOMAINS.has(domain)) throw new Error("invalid_domain");
+  const verifiedRecordsCache = new Map();
+  const cacheKeyFor = (identity) => `${identity.userId}\u0000${identity.username}`;
 
   async function verify(identity) {
     if (!identity?.userId || typeof identity.username !== "string" || !identity.username) {
@@ -46,7 +48,10 @@ export function createEventStore({ domain = "interview", userStore, layout, driv
 
   async function validEvent(file, parentId, identity) {
     if (!file || !hasOnlyParent(file, parentId) || !/^event-[0-9a-f-]+\.json$/i.test(file.name)) return null;
-    const read = await drive.readJson(file.id);
+    const value = typeof drive.readJsonValue === "function"
+      ? await drive.readJsonValue(file.id)
+      : (await drive.readJson(file.id)).value;
+    const read = { ...file, value };
     const event = read?.value;
     if (!hasOnlyParent(read, parentId) || read.name !== file.name || !event || event.schemaVersion !== "1.2"
       || !validId(event.eventId) || read.name !== `event-${event.eventId}.json` || typeof event.eventKey !== "string" || !event.eventKey
@@ -65,19 +70,33 @@ export function createEventStore({ domain = "interview", userStore, layout, driv
   // when the canonical events folder does not exist yet.
   async function verifiedEventRecords(identity) {
     const verifiedIdentity = await verify(identity);
+    const cacheKey = cacheKeyFor(verifiedIdentity);
+    if (verifiedRecordsCache.has(cacheKey)) return verifiedRecordsCache.get(cacheKey).records;
     const folder = await findEventsFolder(verifiedIdentity.userId);
-    if (folder) return recordsIn(verifiedIdentity, folder.id);
-    if (!legacyReader) return [];
+    if (folder) {
+      const records = await recordsIn(verifiedIdentity, folder.id);
+      verifiedRecordsCache.set(cacheKey, { records, canonical: true });
+      return records;
+    }
+    if (!legacyReader) {
+      verifiedRecordsCache.set(cacheKey, { records: [], canonical: false });
+      return [];
+    }
     // Only the pre-normalization namespaces have a legacy directory to fall
     // back to. A domain added after the migration has no history to read, so
     // asking the legacy adapter about it would only raise a false conflict.
-    if (Array.isArray(legacyReader.domains) && !legacyReader.domains.includes(domain)) return [];
+    if (Array.isArray(legacyReader.domains) && !legacyReader.domains.includes(domain)) {
+      verifiedRecordsCache.set(cacheKey, { records: [], canonical: false });
+      return [];
+    }
     const legacyFolder = await legacyReader.path({ domain, userId: verifiedIdentity.userId, segments: ["events"] });
-    return legacyFolder ? recordsIn(verifiedIdentity, legacyFolder.id) : [];
+    const records = legacyFolder ? await recordsIn(verifiedIdentity, legacyFolder.id) : [];
+    verifiedRecordsCache.set(cacheKey, { records, canonical: false });
+    return records;
   }
 
   async function listVerifiedEvents(identity) {
-    return (await verifiedEventRecords(identity)).map(({ event }) => event);
+    return (await verifiedEventRecords(identity)).map(({ event }) => structuredClone(event));
   }
 
   function validateInput(identity, event) {
@@ -101,6 +120,10 @@ export function createEventStore({ domain = "interview", userStore, layout, driv
     const created = await drive.createJson(folder.id, `event-${event.eventId}.json`, event);
     const checked = await validEvent(created, folder.id, verifiedIdentity);
     if (!checked || checked.event.eventId !== event.eventId || checked.event.eventKey !== event.eventKey || checked.event.contentHash !== event.contentHash) throw new Error("event_readback_failed");
+    const cacheKey = cacheKeyFor(verifiedIdentity);
+    const cached = verifiedRecordsCache.get(cacheKey);
+    const records = cached?.canonical ? [...existing, checked] : [checked];
+    verifiedRecordsCache.set(cacheKey, { records, canonical: true });
     return { event: checked.event, receipt: { fileId: checked.file.id, eventId: event.eventId, eventKey: event.eventKey } };
   }
 

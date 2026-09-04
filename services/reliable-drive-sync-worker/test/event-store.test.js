@@ -191,6 +191,51 @@ test("listVerifiedEvents falls back to the legacy namespace events folder", asyn
   assert.equal(events[0].eventId, legacy.eventId);
 });
 
+test("verified event scans use the lightweight content reader when available", async () => {
+  const { drive, store } = setup();
+  const folder = await drive.ensureFolder("root", "my-chatGPT-skills");
+  const users = await drive.ensureFolder(folder.id, "users");
+  const user = await drive.ensureFolder(users.id, identity.userId);
+  const algorithm = await drive.ensureFolder(user.id, "interview");
+  const eventsFolder = await drive.ensureFolder(algorithm.id, "events");
+  const record = { ...event, contentHash: await canonicalHash(event) };
+  await drive.createJson(eventsFolder.id, `event-${event.eventId}.json`, record);
+  let fullReads = 0;
+  let valueReads = 0;
+  const fullRead = drive.readJson.bind(drive);
+  drive.readJson = async (...args) => {
+    fullReads += 1;
+    return fullRead(...args);
+  };
+  drive.readJsonValue = async (id) => {
+    valueReads += 1;
+    return structuredClone(drive.files.get(id).value);
+  };
+
+  const events = await store.listVerifiedEvents(identity);
+
+  assert.equal(events.length, 1);
+  assert.equal(fullReads, 0);
+  assert.equal(valueReads, 1);
+});
+
+test("appending then listing verified events reuses the in-memory scan", async () => {
+  const { drive, store } = setup();
+  let listings = 0;
+  const listJson = drive.listJson.bind(drive);
+  drive.listJson = async (...args) => {
+    listings += 1;
+    return listJson(...args);
+  };
+
+  await store.appendEvent(identity, event);
+  const afterAppend = listings;
+  const events = await store.listVerifiedEvents(identity);
+
+  assert.equal(events.length, 1);
+  assert.equal(listings, afterAppend);
+});
+
 test("canonical events take precedence over the legacy folder", async () => {
   const { drive, store } = setup();
   const legacy = structuredClone(event);

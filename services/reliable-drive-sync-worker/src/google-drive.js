@@ -108,6 +108,9 @@ const requiredParentId = (parentId) => {
 export function createDriveRepository(env, deps = {}) {
   const fetchImpl = deps.fetch ?? fetch;
   let tokenPromise;
+  const folderCache = new Map();
+  const jsonListCache = new Map();
+  const jsonValueCache = new Map();
   const tokenProvider = () => tokenPromise ??= accessToken(env, fetchImpl);
   const createFolderImpl = deps.createFolder ?? ((parentId, name) =>
     googleUpload(env, parentId, name, "", "application/vnd.google-apps.folder", fetchImpl, tokenProvider));
@@ -138,6 +141,11 @@ export function createDriveRepository(env, deps = {}) {
     const contentResponse = await googleGet(env, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?alt=media`, fetchImpl, {}, tokenProvider);
     return { ...metadata, value: JSON.parse(await contentResponse.text()) };
   });
+  const readJsonValueImpl = deps.readJsonValue ?? (async (fileId) => {
+    const id = requiredParentId(fileId);
+    const response = await googleGet(env, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?alt=media`, fetchImpl, {}, tokenProvider);
+    return JSON.parse(await response.text());
+  });
 
   return {
     rootFolderId: env.GOOGLE_DRIVE_FOLDER_ID,
@@ -147,20 +155,28 @@ export function createDriveRepository(env, deps = {}) {
     },
     async findFolder(parentId, name) {
       if (!name) throw new Error("folder name is required");
+      const key = `${parentId}\u0000${name}`;
+      if (folderCache.has(key)) return folderCache.get(key);
       const matches = await this.listChildren(parentId, { name, foldersOnly: true });
-      return matches[0] ?? null;
+      const folder = matches[0] ?? null;
+      folderCache.set(key, folder);
+      return folder;
     },
     async ensureFolder(parentId, name) {
       if (!parentId || !name || name.includes("/") || name.includes("\\")) throw new Error("invalid folder input");
+      const key = `${parentId}\u0000${name}`;
       const existing = await this.findFolder(parentId, name);
       if (existing) return existing;
       const created = await createFolderImpl(parentId, name);
       if (!created?.id) throw new Error("Google Drive write failed: missing folder id");
-      return { ...created, name, parents: [parentId] };
+      const folder = { ...created, name, parents: [parentId] };
+      folderCache.set(key, folder);
+      return folder;
     },
     async createJson(parentId, name, value) {
       if (!parentId) throw new Error("parentId is required");
       if (!validJsonTarget(name)) throw new Error("invalid JSON target");
+      jsonListCache.delete(parentId);
       const file = await uploadFileImpl(parentId, name, JSON.stringify(value), "application/json");
       if (!file?.id) throw new Error("Google Drive write failed: missing file id");
       return this.readJson(file.id);
@@ -168,9 +184,25 @@ export function createDriveRepository(env, deps = {}) {
     async readJson(fileId) {
       return readJsonFileImpl(fileId);
     },
+    async readJsonValue(fileId) {
+      if (jsonValueCache.has(fileId)) return jsonValueCache.get(fileId);
+      const pending = readJsonValueImpl(fileId).catch((cause) => {
+        jsonValueCache.delete(fileId);
+        throw cause;
+      });
+      jsonValueCache.set(fileId, pending);
+      return pending;
+    },
     async listJson(parentId) {
-      const children = await this.listChildren(parentId, { jsonOnly: true });
-      return children.filter((file) => file.mimeType === "application/json");
+      if (jsonListCache.has(parentId)) return jsonListCache.get(parentId);
+      const pending = this.listChildren(parentId, { jsonOnly: true })
+        .then((children) => children.filter((file) => file.mimeType === "application/json"))
+        .catch((cause) => {
+          jsonListCache.delete(parentId);
+          throw cause;
+        });
+      jsonListCache.set(parentId, pending);
+      return pending;
     }
   };
 }

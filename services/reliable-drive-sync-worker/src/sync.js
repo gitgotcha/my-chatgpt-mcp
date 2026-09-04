@@ -69,6 +69,17 @@ function terminalStatus(status) {
   return status === "ok" || status === "already_scored_today";
 }
 
+function deliveryErrorCode(cause) {
+  const message = cause instanceof Error ? cause.message : "";
+  const driveHttp = /^Google Drive (read|write) failed \(([0-9]{3})\)/.exec(message);
+  if (driveHttp) return `drive_${driveHttp[1]}_http_${driveHttp[2]}`;
+  if (/^Google Drive read failed(?:$|:)/.test(message)) return "drive_read_failed";
+  if (/^Google Drive write failed(?:$|:)/.test(message)) return "drive_write_failed";
+  if (message === "Google OAuth refresh token request failed") return "drive_oauth_refresh_failed";
+  if (message === "Google OAuth token request failed") return "drive_oauth_token_failed";
+  return "delivery_failed";
+}
+
 export function createSyncHandler(
   env,
   repository,
@@ -118,6 +129,11 @@ export function createSyncHandler(
         return await repository.markSynced(message.jobId, owner, clock()) ? response(204) : response(503);
       }
       const code = typeof result?.status === "string" ? result.status : "unknown_delivery_status";
+      console.error("sync_delivery_nonterminal", JSON.stringify({
+        jobId: message.jobId,
+        requestId: message.requestId,
+        status: code
+      }));
       await repository.releaseSync(message.jobId, owner, code, clock());
       return response(503);
     } catch (cause) {
@@ -126,7 +142,15 @@ export function createSyncHandler(
         await repository.openFailureNotice(message.userId, `protocol:${cause.message}`, "Google Drive synchronization needs attention.", clock());
         return nonRetryable();
       }
-      await repository.releaseSync(message.jobId, owner, "delivery_failed", clock());
+      const code = deliveryErrorCode(cause);
+      console.error("sync_delivery_exception", JSON.stringify({
+        jobId: message.jobId,
+        requestId: message.requestId,
+        code,
+        errorType: cause?.constructor?.name ?? typeof cause,
+        messagePrefix: typeof cause?.message === "string" ? cause.message.slice(0, 160) : ""
+      }));
+      await repository.releaseSync(message.jobId, owner, code, clock());
       return response(503);
     }
   };

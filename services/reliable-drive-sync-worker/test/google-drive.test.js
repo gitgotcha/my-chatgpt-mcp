@@ -61,6 +61,51 @@ test("a repository reuses one OAuth access token across Drive calls", async () =
   assert.equal(tokenRequests, 1);
 });
 
+test("readJsonValue reads only the Drive file content", async () => {
+  const requests = [];
+  const fetch = async (url, init = {}) => {
+    requests.push({ url, init });
+    if (url === "https://oauth2.googleapis.com/token") {
+      return new Response(JSON.stringify({ access_token: "user-access-token" }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ schemaVersion: "1.2" }), { status: 200 });
+  };
+  const repository = createDriveRepository({
+    ...env,
+    GOOGLE_OAUTH_CLIENT_ID: "client-id",
+    GOOGLE_OAUTH_CLIENT_SECRET: "client-secret",
+    GOOGLE_OAUTH_REFRESH_TOKEN: "refresh-token"
+  }, { fetch });
+
+  const value = await repository.readJsonValue("event-file-1");
+
+  assert.deepEqual(value, { schemaVersion: "1.2" });
+  assert.equal(requests.length, 2);
+  assert.match(requests[1].url, /alt=media/);
+});
+
+test("a repository caches repeated folder and JSON listings", async () => {
+  let folderListings = 0;
+  let jsonListings = 0;
+  const repository = createDriveRepository(env, {
+    listChildren: async (_parentId, options = {}) => {
+      if (options.foldersOnly) folderListings += 1;
+      else jsonListings += 1;
+      return options.foldersOnly
+        ? [{ id: "events-folder", name: "events", mimeType: "application/vnd.google-apps.folder", parents: ["root"] }]
+        : [{ id: "event-file", name: "event-a.json", mimeType: "application/json", parents: ["events-folder"] }];
+    }
+  });
+
+  await repository.findFolder("root", "events");
+  await repository.findFolder("root", "events");
+  await repository.listJson("events-folder");
+  await repository.listJson("events-folder");
+
+  assert.equal(folderListings, 1);
+  assert.equal(jsonListings, 1);
+});
+
 test("formatGoogleDriveWriteError preserves Drive status and message", () => {
   assert.equal(
     formatGoogleDriveWriteError(403, { error: { message: "The caller does not have permission" } }),
