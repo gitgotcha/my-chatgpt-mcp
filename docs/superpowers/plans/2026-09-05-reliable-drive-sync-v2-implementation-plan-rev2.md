@@ -93,7 +93,7 @@ T0.1–T0.5 已执行并记录 SHA。Phase 1 进入条件 = 本节 + Codex 对�
 - 提交：`feat(v2): durable receipt builder`。回滚：revert。
 
 ### T1.5 打包门（Phase 1 退出条件）
-- 动作：`npx wrangler deploy --dry-run --outdir "$TMP/rds2-dryrun-p1"`。
+- 动作：`npx --yes wrangler deploy --config services/reliable-drive-sync-worker/wrangler.toml --dry-run --outdir "$TEMP/rds2-dryrun-p1"`（必须从仓库根指定 `--config`；实测基线 167.86 KiB / gzip 33.35 KiB，退出码 0）。
 - 预期：退出码 0，bundle 包含 shared 模块内容（如尚未被引用则仅验证基线打包仍通过）。
 - 提交：无（验证性任务）。失败则 halt-and-report。
 
