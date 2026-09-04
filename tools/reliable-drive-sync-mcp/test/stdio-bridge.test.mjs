@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -321,14 +322,37 @@ test("concurrent submit_event calls in the real bridge share one durable Outbox"
     responses.slice(1).map((response) => response.result.structuredContent.requestId).sort(),
     ["req-a", "req-b"]
   );
-  // The Outbox is loaded lazily, so the experimental SQLite warning may only
-  // appear once a submit_event call actually needs durable storage.
-  assert.equal((stderr.match(/SQLite is an experimental feature/g) ?? []).length, 1);
+  // The Outbox storage is version-independent behavior: created lazily by the
+  // first submit_event call, never tied to a Node-specific stderr warning.
+  // (stderr content itself varies by Node version and is asserted nowhere here.)
 
   const { DatabaseSync } = await import("node:sqlite");
   const check = new DatabaseSync(outboxPath);
   handles.push(check);
   assert.equal(check.prepare("SELECT COUNT(*) AS total FROM local_outbox_events").get().total, 2);
+});
+
+test("the real bridge does not create the Outbox file before the first submit_event", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "reliable-drive-sync-bridge-lazy-"));
+  t.after(async () => {
+    await rm(directory, CLEANUP);
+  });
+  const outboxPath = join(directory, "outbox.sqlite");
+
+  // Initialize and tool discovery never need durable storage, so no SQLite
+  // file may appear. This is the version-independent form of the former
+  // `node:sqlite` ExperimentalWarning assertion.
+  const { stderr } = await runBridge([
+    initializeRequest(99),
+    { jsonrpc: "2.0", id: 1, method: "tools/list" }
+  ], {
+    RELIABLE_DRIVE_SYNC_WORKER_URL: "https://127.0.0.1:1/v1/jobs",
+    RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET: "secret",
+    RELIABLE_DRIVE_SYNC_OUTBOX_PATH: outboxPath
+  });
+
+  assert.equal(stderr, "");
+  assert.equal(existsSync(outboxPath), false);
 });
 
 test("the submit_event tool description advertises generic profile capability and read/write operations", async () => {
