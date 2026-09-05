@@ -300,3 +300,60 @@ test("a valid commit guard passes and its projection revision is enforced", asyn
     ]), undefined, `${binding}: a projection guard without expected_revision must be rejected`);
   });
 });
+
+// ---------------------------------------------------------------------------
+// R4 regression: an explicit userIdOverride is a binding constraint, never a
+// preference. An existing name paired with a different explicit id must
+// conflict in both the pre-check path and the post-UNIQUE winner path, with
+// zero credential writes.
+// ---------------------------------------------------------------------------
+
+test("R4 an existing name combined with an unused explicit id conflicts", async () => {
+  await withD1(async (binding, db) => {
+    await applySchema(db, MIGRATION_SQL);
+    await seedUser(db, { userId: USER_A, name: NAME, hash: await hashText("a-user-credential") });
+    await assert.rejects(async () => initializeUser({
+      db, adminCredential: "admin-secret", expectedAdminHash: ADMIN_HASH,
+      displayName: NAME, userIdOverride: USER_B,
+      credentialHash: credentialHash("b-cred-fresh"), now: NOW
+    }), (error) => {
+      assert.equal(error.code, "identity_conflict", `(${binding}) explicit id vs existing name must conflict`);
+      return true;
+    }, `(${binding}) the existing user must not be silently returned`);
+    const users = await db.prepare("SELECT COUNT(*) AS n FROM rds2_users").first("n");
+    const creds = await db.prepare("SELECT COUNT(*) AS n FROM rds2_credentials").first("n");
+    assert.equal(users, 1, `(${binding}) zero user writes`);
+    assert.equal(creds, 1, `(${binding}) zero credential writes`);
+  });
+});
+
+test("R4 a race winner bound to a different explicit id conflicts with zero credential writes", async () => {
+  await withD1(async (binding, db) => {
+    await applySchema(db, MIGRATION_SQL);
+    // Simulate the concurrent winner: between our pre-check and our INSERT,
+    // another administrator registers the same name under USER_A.
+    const racingDb = {
+      prepare: (sql) => db.prepare(sql),
+      batch: async (records) => {
+        if (records.length === 2) {
+          await db.prepare(
+            "INSERT INTO rds2_users (user_id, name_key, display_name, status, created_at) VALUES (?, ?, ?, 'active', ?)"
+          ).bind(USER_A, NAME, NAME, NOW).run();
+        }
+        return db.batch(records);
+      }
+    };
+    await assert.rejects(async () => initializeUser({
+      db: racingDb, adminCredential: "admin-secret", expectedAdminHash: ADMIN_HASH,
+      displayName: NAME, userIdOverride: USER_B,
+      credentialHash: credentialHash("b-cred-fresh"), now: NOW
+    }), (error) => {
+      assert.equal(error.code, "identity_conflict", `(${binding}) the race winner's id must be checked against the override`);
+      return true;
+    }, `(${binding}) a winner with a different id must not be adopted`);
+    const users = await db.prepare("SELECT COUNT(*) AS n FROM rds2_users").first("n");
+    const creds = await db.prepare("SELECT COUNT(*) AS n FROM rds2_credentials").first("n");
+    assert.equal(users, 1, `(${binding}) only the winner's user row exists`);
+    assert.equal(creds, 0, `(${binding}) no credential may be issued after an identity conflict`);
+  });
+});

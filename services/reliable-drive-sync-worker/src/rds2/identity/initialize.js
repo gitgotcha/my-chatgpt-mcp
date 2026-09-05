@@ -64,11 +64,15 @@ export async function initializeUser({
   const timestamp = now ?? new Date().toISOString();
 
   // Bidirectional consistency check before any write: the explicit id must
-  // not collide with another user's name and vice versa.
+  // not collide with another user's name and vice versa. An explicit
+  // userIdOverride is a binding constraint, never an ignored preference.
   const byId = userIdOverride !== undefined ? await userById(db, userIdOverride) : null;
   const byName = await userByNameKey(db, nameKey);
   if (byId && byName && byId.user_id !== byName.user_id) throw initError("identity_conflict");
   if (byId && byId.name_key !== nameKey) throw initError("identity_conflict");
+  if (byName && userIdOverride !== undefined && byName.user_id !== userIdOverride) {
+    throw initError("identity_conflict");
+  }
 
   const userId = byId?.user_id ?? byName?.user_id ?? userIdOverride ?? crypto.randomUUID();
   const displayNameStored = byId?.display_name ?? byName?.display_name ?? String(displayName).trim();
@@ -89,9 +93,13 @@ export async function initializeUser({
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
       // A concurrent initialization of the same name won the race: the batch
-      // rolled back, so re-resolve and continue on the existing identity.
+      // rolled back, so re-resolve and continue on the existing identity —
+      // after the same bidirectional consistency judgement.
       const winner = await userByNameKey(db, nameKey);
       if (!winner) throw initError("identity_conflict");
+      if (userIdOverride !== undefined && winner.user_id !== userIdOverride) {
+        throw initError("identity_conflict");
+      }
       return bindCredential(db, winner, credentialHash, timestamp);
     }
   }
