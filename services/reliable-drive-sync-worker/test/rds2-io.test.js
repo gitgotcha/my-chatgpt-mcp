@@ -43,6 +43,18 @@ test("budget limit can be set below the product hard cap", () => {
   assert.throws(() => budget.consume("queue"), (error) => error.code === "budget_exhausted");
 });
 
+test("R5 the business subrequest cap of 40 cannot be configured away", () => {
+  assert.throws(() => createBudget(41), (error) => {
+    assert.equal(error.message, "invalid_budget_limit");
+    return true;
+  });
+  assert.throws(() => createBudget(50), (error) => error.message === "invalid_budget_limit");
+  const budget = createBudget(40);
+  assert.equal(budget.snapshot().limit, 40);
+  for (let index = 0; index < 40; index += 1) budget.consume("d1");
+  assert.throws(() => budget.consume("http"), (error) => error.code === "budget_exhausted");
+});
+
 test("failed outbound calls still consume budget", async () => {
   const budget = createBudget(5);
   const statement = {

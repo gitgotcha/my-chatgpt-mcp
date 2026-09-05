@@ -15,7 +15,11 @@ export const BUSINESS_SUBREQUEST_CAP = 40;
 export const PRODUCT_HARD_CAP = 50;
 
 export function createBudget(limit) {
-  if (!Number.isInteger(limit) || limit < 1 || limit > PRODUCT_HARD_CAP) {
+  // The business cap of 40 is a fixed design boundary of this version: no
+  // entry point may configure a budget beyond it, whatever the platform
+  // allows. The product hard boundary of 50 stays as the absolute ceiling
+  // that entry quotas (all <= 40) and traces are additionally checked against.
+  if (!Number.isInteger(limit) || limit < 1 || limit > BUSINESS_SUBREQUEST_CAP) {
     throw new Error("invalid_budget_limit");
   }
   let used = 0;
