@@ -133,15 +133,17 @@ test("business key uniqueness is per user and partial", async () => {
 test("oversized JSON units are rejected by CHECK constraints", async () => {
   await withD1(async (binding, db) => {
     await applySchema(db, MIGRATION_SQL);
-    const big = "x".repeat(256 * 1024 + 1);
+    // Valid JSON documents whose UTF-8 byte size exceeds the limit by one.
+    const bigEnvelope = JSON.stringify("x".repeat(256 * 1024 - 2 + 1));
     await assert.rejects(async () => db.prepare(
       `INSERT INTO rds2_events (user_id, namespace, projection_name, event_id, event_key, event_type, created_by_request, envelope_json, content_hash, created_at)
        VALUES ('u', 'algorithm', 'learning', 'e-big', 'k-big', 'algorithm.learning.completed', 'seed-req', ?, 'c', ?)`
-    ).bind(big, NOW).run(), undefined, `${binding}: envelope over 256KiB must be rejected`);
+    ).bind(bigEnvelope, NOW).run(), undefined, `${binding}: envelope over 256KiB must be rejected`);
+    const bigRow = JSON.stringify("x".repeat(64 * 1024 - 2 + 1));
     await assert.rejects(async () => db.prepare(
       `INSERT INTO rds2_projection_rows (user_id, namespace, projection_name, generation, row_kind, row_key, value_json, updated_at)
        VALUES ('u', 'algorithm', 'learning', 0, 'topic', 't1', ?, ?)`
-    ).bind("x".repeat(64 * 1024 + 1), NOW).run(), undefined, `${binding}: row JSON over 64KiB must be rejected`);
+    ).bind(bigRow, NOW).run(), undefined, `${binding}: row JSON over 64KiB must be rejected`);
   });
 });
 
@@ -355,5 +357,73 @@ test("R4 a race winner bound to a different explicit id conflicts with zero cred
     const creds = await db.prepare("SELECT COUNT(*) AS n FROM rds2_credentials").first("n");
     assert.equal(users, 1, `(${binding}) only the winner's user row exists`);
     assert.equal(creds, 0, `(${binding}) no credential may be issued after an identity conflict`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R7 regression: the KiB limits in CHECK constraints count UTF-8 bytes, not
+// characters, and JSON columns must hold valid JSON.
+// ---------------------------------------------------------------------------
+
+function jsonDocOfByteLength(totalBytes, unit) {
+  // A JSON document (a quoted string) whose UTF-8 byte length is exactly
+  // totalBytes: body of unit characters plus an ASCII remainder, +2 quotes.
+  const bytesPerUnit = { ascii: 1, cjk: 3, emoji: 4 }[unit];
+  const unitChar = { ascii: "a", cjk: "乔", emoji: "😀" }[unit];
+  const bodyBytes = totalBytes - 2;
+  if (bodyBytes < 0) throw new Error("fixture too small");
+  const body = unitChar.repeat(Math.floor(bodyBytes / bytesPerUnit))
+    + "a".repeat(bodyBytes % bytesPerUnit);
+  return JSON.stringify(body);
+}
+
+test("R7 JSON limits are byte-based for ASCII, CJK and emoji at the 64 KiB boundary", async () => {
+  await withD1(async (binding, db) => {
+    await applySchema(db, MIGRATION_SQL);
+    const insertRow = (doc) => db.prepare(
+      `INSERT INTO rds2_projection_rows (user_id, namespace, projection_name, generation, row_kind, row_key, value_json, updated_at)
+       VALUES ('u', 'algorithm', 'learning', 0, 'topic', ?, ?, ?)`
+    ).bind(`row-${Math.random().toString(36).slice(2)}`, doc, NOW);
+    for (const unit of ["ascii", "cjk", "emoji"]) {
+      const atLimit = jsonDocOfByteLength(64 * 1024, unit);
+      const overLimit = jsonDocOfByteLength(64 * 1024 + 1, unit);
+      await insertRow(atLimit).run();
+      await assert.rejects(async () => insertRow(overLimit).run(),
+        undefined, `(${binding}) ${unit} JSON over 64 KiB by UTF-8 bytes must be rejected`);
+    }
+    const count = await db.prepare("SELECT COUNT(*) AS n FROM rds2_projection_rows").first("n");
+    assert.equal(count, 3, `(${binding}) exactly the three boundary-fit rows persist`);
+  });
+});
+
+test("R7 an oversized JSON write inside a batch rolls the whole batch back", async () => {
+  await withD1(async (binding, db) => {
+    await applySchema(db, MIGRATION_SQL);
+    const good = db.prepare(
+      `INSERT INTO rds2_projection_rows (user_id, namespace, projection_name, generation, row_kind, row_key, value_json, updated_at)
+       VALUES ('u', 'algorithm', 'learning', 0, 'topic', 'ok-row', '{}', ?)`
+    ).bind(NOW);
+    const bad = db.prepare(
+      `INSERT INTO rds2_projection_rows (user_id, namespace, projection_name, generation, row_kind, row_key, value_json, updated_at)
+       VALUES ('u', 'algorithm', 'learning', 0, 'topic', 'bad-row', ?, ?)`
+    ).bind(JSON.stringify("乔".repeat(22000)), NOW);
+    await assert.rejects(async () => db.batch([good, bad]),
+      undefined, `(${binding}) the oversized unit must abort the batch`);
+    const count = await db.prepare("SELECT COUNT(*) AS n FROM rds2_projection_rows").first("n");
+    assert.equal(count, 0, `(${binding}) the whole batch must roll back`);
+  });
+});
+
+test("R7 JSON columns reject non-JSON text", async () => {
+  await withD1(async (binding, db) => {
+    await applySchema(db, MIGRATION_SQL);
+    await assert.rejects(async () => db.prepare(
+      `INSERT INTO rds2_projection_rows (user_id, namespace, projection_name, generation, row_kind, row_key, value_json, updated_at)
+       VALUES ('u', 'algorithm', 'learning', 0, 'topic', 't1', 'not json', ?)`
+    ).bind(NOW).run(), undefined, `(${binding}) value_json must be valid JSON`);
+    await assert.rejects(async () => db.prepare(
+      `INSERT INTO rds2_requests (user_id, request_id, envelope_hash, canonical_event_id, receipt_json, created_at)
+       VALUES ('u', 'r1', 'h', 'e', 'also not json', ?)`
+    ).bind(NOW).run(), undefined, `(${binding}) receipt_json must be valid JSON`);
   });
 });

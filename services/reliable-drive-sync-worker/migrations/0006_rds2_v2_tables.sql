@@ -4,8 +4,10 @@
 -- deleted by this migration.
 -- Scope is always expanded to (user_id, namespace, projection_name) columns;
 -- string-concatenated scope keys are forbidden.
--- Timestamps are UTC ISO-8601 strings. JSON units are bounded: envelopes and
--- frozen artifacts <= 256 KiB, row/summary/build/receipt units <= 64 KiB.
+-- Timestamps are UTC ISO-8601 strings. JSON units are bounded in UTF-8 BYTES
+-- (length of the cast blob, not the character count): envelopes and frozen
+-- artifacts <= 256 KiB, row/summary/build/receipt units <= 64 KiB. Every JSON
+-- column must also hold valid JSON.
 
 CREATE TABLE rds2_users (
   user_id TEXT PRIMARY KEY,
@@ -28,7 +30,7 @@ CREATE TABLE rds2_requests (
   request_id TEXT NOT NULL,
   envelope_hash TEXT NOT NULL,
   canonical_event_id TEXT NOT NULL,
-  receipt_json TEXT NOT NULL CHECK (length(receipt_json) <= 65536),
+  receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json) AND length(CAST(receipt_json AS BLOB)) <= 65536),
   created_at TEXT NOT NULL,
   PRIMARY KEY (user_id, request_id)
 );
@@ -43,7 +45,7 @@ CREATE TABLE rds2_events (
   business_key TEXT,
   event_type TEXT NOT NULL,
   created_by_request TEXT NOT NULL,
-  envelope_json TEXT NOT NULL CHECK (length(envelope_json) <= 262144),
+  envelope_json TEXT NOT NULL CHECK (json_valid(envelope_json) AND length(CAST(envelope_json AS BLOB)) <= 262144),
   content_hash TEXT NOT NULL,
   created_at TEXT NOT NULL,
   UNIQUE (user_id, event_id),
@@ -70,7 +72,7 @@ CREATE TABLE rds2_tasks (
   lease_owner TEXT,
   lease_until TEXT,
   lease_epoch INTEGER NOT NULL DEFAULT 0,
-  payload_json TEXT NOT NULL DEFAULT '{}' CHECK (length(payload_json) <= 65536),
+  payload_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json) AND length(CAST(payload_json AS BLOB)) <= 65536),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   CHECK (type <> 'projection' OR (event_seq IS NOT NULL AND artifact_id IS NULL)),
@@ -89,7 +91,7 @@ CREATE TABLE rds2_projections (
   last_event_seq INTEGER NOT NULL DEFAULT 0,
   active_generation INTEGER NOT NULL DEFAULT 0,
   building INTEGER NOT NULL DEFAULT 0 CHECK (building IN (0, 1)),
-  summary_json TEXT CHECK (summary_json IS NULL OR length(summary_json) <= 65536),
+  summary_json TEXT CHECK (summary_json IS NULL OR (json_valid(summary_json) AND length(CAST(summary_json AS BLOB)) <= 65536)),
   updated_at TEXT NOT NULL,
   PRIMARY KEY (user_id, namespace, projection_name)
 );
@@ -103,7 +105,7 @@ CREATE TABLE rds2_projection_rows (
   row_key TEXT NOT NULL,
   member_key TEXT,
   sort_key TEXT,
-  value_json TEXT NOT NULL CHECK (length(value_json) <= 65536),
+  value_json TEXT NOT NULL CHECK (json_valid(value_json) AND length(CAST(value_json AS BLOB)) <= 65536),
   updated_at TEXT NOT NULL,
   PRIMARY KEY (user_id, namespace, projection_name, generation, row_kind, row_key)
 );
@@ -121,7 +123,7 @@ CREATE TABLE rds2_projection_builds (
   target_event_seq INTEGER NOT NULL,
   stage TEXT NOT NULL CHECK (stage IN ('scanning', 'activating', 'completed', 'aborted')),
   staging_generation INTEGER NOT NULL,
-  continuation_json TEXT CHECK (continuation_json IS NULL OR length(continuation_json) <= 65536),
+  continuation_json TEXT CHECK (continuation_json IS NULL OR (json_valid(continuation_json) AND length(CAST(continuation_json AS BLOB)) <= 65536)),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -138,7 +140,7 @@ CREATE TABLE rds2_archive_deliveries (
   projection_name TEXT NOT NULL,
   object_type TEXT NOT NULL CHECK (object_type IN ('event', 'projection_delta', 'build_package')),
   object_name TEXT NOT NULL,
-  frozen_json TEXT NOT NULL CHECK (length(frozen_json) <= 262144),
+  frozen_json TEXT NOT NULL CHECK (json_valid(frozen_json) AND length(CAST(frozen_json AS BLOB)) <= 262144),
   -- Hash of the exact frozen_json UTF-8 bytes (artifact integrity). The
   -- business content hash (requestId excluded) lives on rds2_events.
   artifact_hash TEXT NOT NULL,
