@@ -805,3 +805,67 @@ test("R2 artifact hash survives replay and key reordering with one delivery per 
     assert.ok(delivery.frozen_json.includes("乔炳源"), `(${binding}) the frozen bytes keep the original content`);
   });
 });
+
+// ---------------------------------------------------------------------------
+// R3 regression: every identity carrier (envelope identity, top-level payload
+// identity fields, business event identity fields) must agree with the
+// credential-bound principal before anything is stored.
+// ---------------------------------------------------------------------------
+
+test("R3 each conflicting identity carrier is rejected with zero writes", async () => {
+  await runAcceptTest(async ({ binding, rawDb, principal }) => {
+    const OTHER = "22222222-2222-4222-8222-222222222222";
+    const OTHER_NAME = "其他用户";
+    const cases = [
+      ["identity.userId", (e) => { e.identity.userId = OTHER; }],
+      ["identity.username", (e) => { e.identity.username = OTHER_NAME; }],
+      ["payload.userId", (e) => { e.payload.userId = OTHER; }],
+      ["payload.username", (e) => { e.payload.username = OTHER_NAME; }],
+      ["event.userId", (e) => { e.payload.event.userId = OTHER; }],
+      ["event.username", (e) => { e.payload.event.username = OTHER_NAME; }]
+    ];
+    for (const [label, mutate] of cases) {
+      const io = createInvocationIo({ db: rawDb, queues: {}, fetchImpl: async () => new Response("{}", { status: 200 }), limit: WRITE_LIMIT });
+      const envelope = algorithmEnvelope();
+      mutate(envelope);
+      await assert.rejects(
+        () => acceptEvent({ io, principal, envelope, now: NOW }),
+        (error) => {
+          assert.equal(error.code, "identity_mismatch", `(${binding}) ${label} mismatch code`);
+          assert.equal(error.status, 403, `(${binding}) ${label} mismatch status`);
+          return true;
+        },
+        `(${binding}) conflicting ${label} must be rejected`
+      );
+      assert.deepEqual(await counts(rawDb), {
+        events: 0, requests: 0, projections: 0, tasks: 0, deliveries: 0, rows: 0, guards: 0
+      }, `(${binding}) conflicting ${label} must leave zero writes`);
+    }
+  });
+});
+
+test("R3 normalized-equivalent names and absent optional identity fields are accepted", async () => {
+  await runAcceptTest(async ({ binding, rawDb, principal }) => {
+    const io = createInvocationIo({ db: rawDb, queues: {}, fetchImpl: async () => new Response("{}", { status: 200 }), limit: WRITE_LIMIT });
+    // NFKC/whitespace-equivalent spellings of the bound name must pass.
+    const padded = algorithmEnvelope();
+    padded.identity.username = ` ${NAME}\u3000`;
+    padded.payload.event.username = ` ${NAME} `;
+    const receipt = await acceptEvent({ io, principal, envelope: padded, now: NOW });
+    assert.equal(receipt.disposition, "accepted");
+    // A submission without the optional identity block is still valid when the
+    // event's own identity agrees with the principal.
+    const withoutIdentity = algorithmEnvelope({
+      envelope: { requestId: "req-r3-no-identity" },
+      event: {
+        eventId: "66666666-0000-4000-8000-00000000000d",
+        eventKey: "r3-no-identity-key"
+      }
+    });
+    delete withoutIdentity.identity;
+    const second = await acceptEvent({ io, principal, envelope: withoutIdentity, now: NOW });
+    assert.equal(second.disposition, "accepted");
+    const state = await counts(rawDb);
+    assert.equal(state.events, 2, `(${binding}) both positive samples are stored`);
+  });
+});

@@ -17,6 +17,7 @@ import {
 } from "../../../../../shared/rds2-protocol.mjs";
 import { lookupIntent, deriveTaskId, eventIdentifiers } from "./repository.js";
 import { hashText } from "../identity/hashing.js";
+import { normalizeNameKey } from "../identity/initialize.js";
 
 export { lookupIntent, deriveTaskId } from "./repository.js";
 
@@ -60,15 +61,29 @@ function isUniqueViolation(error) {
   return /UNIQUE constraint failed/i.test(String(error?.message ?? ""));
 }
 
+// Every identity carrier in the envelope must agree with the credential-bound
+// principal before anything is stored: the optional identity block, the
+// optional top-level payload identity fields, and the business event's own
+// identity fields. Names are compared with the frozen NFKC normalization rule;
+// conflicting input is rejected, never rewritten.
 function crossCheckIdentity(principal, envelope) {
-  const identityUserId = envelope.identity?.userId;
-  if (identityUserId !== undefined && identityUserId !== principal.userId) {
-    throw acceptError("identity_mismatch", 403);
-  }
-  const eventUserId = envelope.payload?.event?.userId;
-  if (eventUserId !== undefined && eventUserId !== principal.userId) {
-    throw acceptError("identity_mismatch", 403);
-  }
+  const principalName = normalizeNameKey(principal.username);
+  const checkUser = (value, label) => {
+    if (value !== undefined && value !== principal.userId) {
+      throw acceptError("identity_mismatch", 403);
+    }
+  };
+  const checkName = (value, label) => {
+    if (value !== undefined && normalizeNameKey(value) !== principalName) {
+      throw acceptError("identity_mismatch", 403);
+    }
+  };
+  checkUser(envelope.identity?.userId);
+  checkName(envelope.identity?.username);
+  checkUser(envelope.payload?.userId);
+  checkName(envelope.payload?.username);
+  checkUser(envelope.payload?.event?.userId);
+  checkName(envelope.payload?.event?.username);
 }
 
 export async function acceptEvent({ io, principal, envelope, now }) {
