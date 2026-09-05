@@ -179,13 +179,18 @@ test("one legal write atomically records event, request, projection seed and bot
     ).first();
     assert.equal(archiveTask.type, "archive_event");
     const delivery = await rawDb.prepare(
-      "SELECT artifact_id, object_type, content_hash, drive_file_id, delivered_at FROM rds2_archive_deliveries"
+      "SELECT artifact_id, object_type, artifact_hash, frozen_json, drive_file_id, delivered_at FROM rds2_archive_deliveries"
     ).first();
     assert.equal(archiveTask.artifact_id, delivery.artifact_id);
     assert.equal(delivery.object_type, "event");
     assert.equal(delivery.drive_file_id, null);
     assert.equal(delivery.delivered_at, null);
-    assert.equal(delivery.content_hash.length, 64);
+
+    // R2: the stored artifact hash must equal the SHA-256 of the exact frozen
+    // bytes so readback verification can never fail on a correct upload.
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(delivery.frozen_json));
+    const frozenHex = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    assert.equal(delivery.artifact_hash, frozenHex, `(${binding}) artifact hash must equal the frozen bytes`);
 
     const head = await rawDb.prepare(
       "SELECT revision, last_event_seq, building, summary_json FROM rds2_projections"
@@ -761,5 +766,42 @@ test("R1 firstResult race with different content under the same requestId confli
       (error) => error.code === "request_id_conflict" && error.status === 409,
       `(${binding}) a same-event different-envelope row must conflict on the firstResult path too`
     );
+  });
+});
+
+test("R2 artifact hash survives replay and key reordering with one delivery per event", async () => {
+  await runAcceptTest(async ({ binding, rawDb, io, principal }) => {
+    const envelope = algorithmEnvelope();
+    await acceptEvent({ io, principal, envelope, now: NOW });
+    const delivery = await rawDb.prepare(
+      "SELECT artifact_hash, frozen_json FROM rds2_archive_deliveries"
+    ).first();
+
+    // Replay of the identical request (response lost) adds no artifact.
+    await acceptEvent({ io, principal, envelope, now: NOW });
+    // A reordered-key envelope with the same requestId is the same request.
+    const reordered = algorithmEnvelope();
+    const event = reordered.payload.event;
+    reordered.payload.event = {
+      confidence: event.confidence, tags: event.tags, evidence: event.evidence,
+      outcome: event.outcome, problem: { url: event.problem.url, source: event.problem.source, title: event.problem.title },
+      topic: event.topic, source: event.source, observedAt: event.observedAt,
+      username: event.username, userId: event.userId, eventKey: event.eventKey,
+      eventType: event.eventType, eventId: event.eventId, schemaVersion: event.schemaVersion
+    };
+    await acceptEvent({ io, principal, envelope: reordered, now: NOW });
+    // An alias (same content, different requestId) must not create artifacts.
+    await acceptEvent({
+      io, principal, now: NOW,
+      envelope: algorithmEnvelope({ envelope: { requestId: "req-alias-r2" } })
+    });
+    const deliveries = await rawDb.prepare(
+      "SELECT COUNT(*) AS n FROM rds2_archive_deliveries"
+    ).first("n");
+    assert.equal(deliveries, 1, `(${binding}) exactly one frozen artifact per accepted event`);
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(delivery.frozen_json));
+    const frozenHex = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    assert.equal(delivery.artifact_hash, frozenHex);
+    assert.ok(delivery.frozen_json.includes("乔炳源"), `(${binding}) the frozen bytes keep the original content`);
   });
 });

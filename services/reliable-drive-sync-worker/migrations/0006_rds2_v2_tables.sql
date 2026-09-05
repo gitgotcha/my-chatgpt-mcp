@@ -139,7 +139,9 @@ CREATE TABLE rds2_archive_deliveries (
   object_type TEXT NOT NULL CHECK (object_type IN ('event', 'projection_delta', 'build_package')),
   object_name TEXT NOT NULL,
   frozen_json TEXT NOT NULL CHECK (length(frozen_json) <= 262144),
-  content_hash TEXT NOT NULL,
+  -- Hash of the exact frozen_json UTF-8 bytes (artifact integrity). The
+  -- business content hash (requestId excluded) lives on rds2_events.
+  artifact_hash TEXT NOT NULL,
   drive_file_id TEXT,
   delivered_at TEXT,
   created_at TEXT NOT NULL

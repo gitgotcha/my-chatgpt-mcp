@@ -16,6 +16,7 @@ import {
   decideIntent
 } from "../../../../../shared/rds2-protocol.mjs";
 import { lookupIntent, deriveTaskId, eventIdentifiers } from "./repository.js";
+import { hashText } from "../identity/hashing.js";
 
 export { lookupIntent, deriveTaskId } from "./repository.js";
 
@@ -116,7 +117,7 @@ export async function acceptEvent({ io, principal, envelope, now }) {
   let acceptedReceipt = null;
   if (decision.outcome === "new") {
     try {
-      acceptedReceipt = await commitNewEvent({ io, principal, envelope, now, businessKey });
+      acceptedReceipt = await commitNewEvent({ io, principal, envelope, now, businessKey, envelopeHash });
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
       // Unique-constraint race: re-query and re-decide with the SAME pure
@@ -194,7 +195,7 @@ async function recordRequestRow({ io, principal, envelopeHash, receipt, now }) {
   ]);
 }
 
-async function commitNewEvent({ io, principal, envelope, now, businessKey }) {
+async function commitNewEvent({ io, principal, envelope, now, businessKey, envelopeHash }) {
   const timestamp = now ?? new Date().toISOString();
   const { eventId, eventKey } = eventIdentifiers(envelope);
   const scope = {
@@ -217,6 +218,13 @@ async function commitNewEvent({ io, principal, envelope, now, businessKey }) {
     cloudPersistence: "d1_committed"
   };
 
+  // Freeze the canonical bytes exactly once: the event ledger keeps the
+  // business content hash (requestId excluded) while the archive delivery
+  // records the hash of these very bytes so upload and readback compare
+  // against the same definition (R2).
+  const frozenJson = canonicalJson(envelope);
+  const artifactHash = await hashText(frozenJson);
+
   await io.db.batch([
     io.db.prepare(
       `INSERT INTO rds2_events
@@ -226,12 +234,12 @@ async function commitNewEvent({ io, principal, envelope, now, businessKey }) {
     ).bind(
       scope.userId, scope.namespace, scope.projectionName, eventId, eventKey,
       businessKey, envelope.eventType, envelope.requestId,
-      canonicalJson(envelope), await contentHashOf(envelope), timestamp
+      frozenJson, await contentHashOf(envelope), timestamp
     ),
     io.db.prepare(
       `INSERT INTO rds2_requests (user_id, request_id, envelope_hash, canonical_event_id, receipt_json, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`
-    ).bind(scope.userId, envelope.requestId, await hashJson(envelope), eventId, canonicalJson(receipt), timestamp),
+    ).bind(scope.userId, envelope.requestId, envelopeHash, eventId, canonicalJson(receipt), timestamp),
     io.db.prepare(
       `INSERT INTO rds2_projections (user_id, namespace, projection_name, revision, last_event_seq,
          active_generation, building, summary_json, updated_at)
@@ -247,10 +255,10 @@ async function commitNewEvent({ io, principal, envelope, now, businessKey }) {
       scope.userId, eventId),
     io.db.prepare(
       `INSERT INTO rds2_archive_deliveries (artifact_id, user_id, namespace, projection_name, object_type,
-         object_name, frozen_json, content_hash, created_at)
+         object_name, frozen_json, artifact_hash, created_at)
        VALUES (?, ?, ?, ?, 'event', ?, ?, ?, ?)`
     ).bind(artifactId, scope.userId, scope.namespace, scope.projectionName,
-      `${artifactId}.json`, canonicalJson(envelope), await contentHashOf(envelope), timestamp),
+      `${artifactId}.json`, frozenJson, artifactHash, timestamp),
     io.db.prepare(
       `INSERT INTO rds2_tasks (task_id, type, user_id, namespace, projection_name, event_seq, artifact_id,
          state, available_at, lease_epoch, created_at, updated_at)
