@@ -635,3 +635,38 @@ test("businessKey derivation binds server userId, event type, questionKey and lo
   assert.notEqual(key, otherDay);
   assert.equal(await businessKeyFor(submissionFor("algorithm.learning.completed"), USER), null);
 });
+
+// ---------------------------------------------------------------------------
+// R8 regression: canonical JSON must reject sparse and self-referential
+// arrays with controlled errors, and validateQuery must receive a real
+// params object instead of patching null into {}.
+// ---------------------------------------------------------------------------
+
+test("R8 canonicalJson rejects sparse arrays with a controlled error", () => {
+  assert.throws(() => canonicalJson(new Array(2)), (error) => error.message === "sparse_array");
+  assert.throws(() => canonicalJson({ list: [1, , 3] }), (error) => error.message === "sparse_array");
+});
+
+test("R8 canonicalJson rejects self-referential and mixed cycles in arrays", () => {
+  const selfLoop = [];
+  selfLoop.push(selfLoop);
+  assert.throws(() => canonicalJson(selfLoop), (error) => error.message === "circular_reference");
+  const mixed = { items: [] };
+  mixed.items.push(mixed);
+  assert.throws(() => canonicalJson(mixed), (error) => error.message === "circular_reference");
+  // A deeply nested but acyclic array stays representable.
+  assert.equal(canonicalJson({ a: [[1, [2]], [{ b: 3 }]] }), canonicalJson({ a: [[1, [2]], [{ b: 3 }]] }));
+});
+
+test("R8 validateQuery rejects null, array and missing params objects", () => {
+  assert.throws(() => validateQuery({ storageVersion: 2, operation: "capabilities", params: null }),
+    (error) => error.code === "invalid_query_params");
+  assert.throws(() => validateQuery({ storageVersion: 2, operation: "interview.session.list", params: null }),
+    (error) => error.code === "invalid_query_params");
+  assert.throws(() => validateQuery({ storageVersion: 2, operation: "capabilities", params: [1, 2] }),
+    (error) => error.code === "invalid_query_params");
+  assert.throws(() => validateQuery({ storageVersion: 2, operation: "capabilities", params: "nope" }),
+    (error) => error.code === "invalid_query_params");
+  // A present, empty params object remains the only accepted shape.
+  assert.deepEqual(validateQuery({ storageVersion: 2, operation: "capabilities", params: {} }).params, {});
+});

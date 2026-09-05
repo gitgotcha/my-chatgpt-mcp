@@ -66,7 +66,18 @@ export function canonicalJson(value) {
     if (type === "bigint" || type === "function" || type === "symbol" || type === "undefined") {
       throw new CanonicalJsonError(`unrepresentable_${type}`);
     }
-    if (Array.isArray(node)) return `[${node.map(serialize).join(",")}]`;
+    if (Array.isArray(node)) {
+      if (seen.has(node)) throw new CanonicalJsonError("circular_reference");
+      // Sparse arrays would serialize to illegal JSON ("[,]"): they are
+      // rejected outright instead of being silently normalized.
+      for (let index = 0; index < node.length; index += 1) {
+        if (!Object.hasOwn(node, index)) throw new CanonicalJsonError("sparse_array");
+      }
+      seen.add(node);
+      const items = node.map(serialize);
+      seen.delete(node);
+      return `[${items.join(",")}]`;
+    }
     if (seen.has(node)) throw new CanonicalJsonError("circular_reference");
     seen.add(node);
     const entries = Object.keys(node).sort()
@@ -238,7 +249,11 @@ export function validateQuery(dto) {
   }
   if (dto.storageVersion !== 2) throw new QueryError("invalid_query_storage_version");
   if (!QUERY_OPERATIONS.has(dto.operation)) throw new QueryError("invalid_query_operation");
-  const params = dto.params ?? {};
+  // params must arrive as a real object; null is never patched into {}.
+  const params = dto.params;
+  if (params === null || typeof params !== "object" || Array.isArray(params)) {
+    throw new QueryError("invalid_query_params");
+  }
   switch (dto.operation) {
     case "capabilities":
       exactParams(params, []);
