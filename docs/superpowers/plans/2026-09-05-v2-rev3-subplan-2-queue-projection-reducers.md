@@ -14,7 +14,7 @@
 
 - 前置门 G0 与提交规范同主索引；受保护路径同子计划 1。
 - 禁止断言或实现“同一 taskId 不重复发布”；禁止在业务路径读取 `queue_message_id`。
-- 本子计划不触碰 `src/index.js` 的 `fetch` 路由与 V1 `scheduled()` 逻辑本身（`scheduled()` 按 Task 2.5 的明确 diff 追加 V2 分支，V1 表达式逐字节保留）。
+- 本子计划不触碰 `src/index.js` 的 `fetch` 路由与 V1 `scheduled()` 逻辑本身（`scheduled()` 按 Task 2.3 的明确 diff 追加 V2 分支，V1 表达式逐字节保留）。
 - 每 Task 回滚：`git revert <本任务SHA>`。
 
 ## Interfaces
@@ -27,7 +27,7 @@
 ### Task 2.1 Queue 消息契约与预算化发送封装
 
 **Files:** Create `services/reliable-drive-sync-worker/src/rds2/queue-io.js`；Test `services/reliable-drive-sync-worker/test/rds2-queue-io.test.js`
-**Interfaces:** Produces `createQueueIo` | Consumes SubrequestBudget 接口（`consume(category, count)`，本 Task 用内联假预算器，公共预算器在子计划 3 Task 3.3 定稿前以同签名本地桩满足）
+**Interfaces:** Produces `createQueueIo` | Consumes SubrequestBudget 接口（`consume(category, count)`，本 Task 用内联假预算器，公共预算器在子计划 3 Task 3.2 定稿前以同签名本地桩满足）
 
 - [ ] 1. 失败测试：
   ```js
@@ -166,7 +166,7 @@
     })());
   }
   ```
-  `buildOutbox/buildDispatcher/buildRecoveryBudget` 为本 Task 新增的 env 装配函数（同文件底部，`createWorker` 内私有），`createRecoveryBudget()` 返回上限 15 的预算器（构造逻辑在子计划 3 Task 3.3 定稿前以内联对象桩实现：`{consume(){}, snapshot: () => ({limit:15})}` 并注明来源）。
+  `buildOutbox/buildDispatcher/buildRecoveryBudget` 为本 Task 新增的 env 装配函数（同文件底部，`createWorker` 内私有），`createRecoveryBudget()` 返回上限 15 的预算器（构造逻辑在子计划 3 Task 3.2 定稿前以内联对象桩实现：`{consume(){}, snapshot: () => ({limit:15})}` 并注明来源）。
 - [ ] 6. `npm run test:worker` 预期 `# fail 0`；`npm run test:bridge` 预期 `# fail 0`（index.js 改动不影响 bridge）。
 - [ ] 7. 提交：`git add services/reliable-drive-sync-worker/src/rds2/recovery.js services/reliable-drive-sync-worker/src/index.js services/reliable-drive-sync-worker/test/rds2-recovery.test.js services/reliable-drive-sync-worker/test/rds2-cron-coexistence.test.js && git commit -m "feat(v2): bounded recovery coexisting with v1 cron"`。
 
@@ -250,7 +250,7 @@
     queue(batch, env, context) { return createWorker(env).queue(batch, env, context); }
   };
   ```
-  `createWorker` 返回对象追加 `queue: createQueueProcessor(env, buildProcessors(env))`，`buildProcessors` 本 Task 先注册空处理器映射（`{"rds2-project": async () => {}, "rds2-archive": async () => {}, "rds2-project-dlq": ..., "rds2-archive-dlq": ...}`），Task 2.6/2.7/2.9 替换为真实现。
+  `createWorker` 返回对象追加 `queue: createQueueProcessor(env, buildProcessors(env))`，`buildProcessors` 本 Task 先注册空处理器映射（`{"rds2-project": async () => {}, "rds2-archive": async () => {}, "rds2-project-dlq": ..., "rds2-archive-dlq": ...}`），Task 2.5/2.7 替换为真实现。
 - [ ] 6. 验证：`npm run test:worker` 预期 `# fail 0`；`npx --yes wrangler deploy --config services/reliable-drive-sync-worker/wrangler.toml --dry-run --outdir "$PWD/services/reliable-drive-sync-worker/tmp-dryrun-t24"` 退出码 0（TOML 语法门），随后删除该目录。
 - [ ] 7. 提交：`git add services/reliable-drive-sync-worker/src/index.js services/reliable-drive-sync-worker/src/rds2/queue-consumer.js services/reliable-drive-sync-worker/wrangler.toml services/reliable-drive-sync-worker/test/rds2-queue-consumer.test.js && git commit -m "feat(v2): queue handler in default export with four consumer config"`。
 
@@ -281,6 +281,7 @@
 
 **Files:** Create `services/reliable-drive-sync-worker/src/rds2/projection-engine.js`；Test `services/reliable-drive-sync-worker/test/rds2-projection-engine.test.js`
 **Interfaces:** Produces `createProjectionEngine(db, deps)` → `processTask(taskId)` | Consumes 子计划 1 全部仓库、`shared/rds2-protocol.mjs`
+**排序说明：** 本 Task 位于 Task 2.8（reducer registry）之前，`deps.reducer` 由测试文件内联桩 Reducer（最小 `{applyEvent, publicView, emptyState}` 对象）提供以驱动引擎测试；Task 2.8 交付 `createReducerRegistry()` 后，Task 2.7 的处理器接线改用真实 registry，本 Task 代码零改动（`deps` 注入即契约）。
 
 - [ ] 1. 失败测试（核心六条）：
   ```js
@@ -553,7 +554,7 @@
 
 ## 覆盖与自检（子计划 2 完成门）
 
-- [ ] 规格映射：§13 全条（2.1–2.5）、§16 表（2.6/2.7/2.13）、§12 非单调状态（2.10–2.12）、§15.2 投影/恢复/DLQ 行（2.3/2.7 的预算断言在子计划 3 Task 3.7 汇总复验）。
+- [ ] 规格映射：§13 全条（2.1–2.5）、§16 表（2.6/2.7/2.13）、§12 非单调状态（2.10–2.12）、§15.2 投影/恢复/DLQ 行（2.3/2.7 的预算断言在子计划 3 Task 3.6 汇总复验）。
 - [ ] `grep -rn "queue_message_id" src/rds2/` 仅命中列定义与建表 SQL，无业务读写。
 - [ ] `grep -rn "Promise.all" src/rds2/recovery.js` 零命中。
 - [ ] 四队列消费者齐备（Task 2.4 测试锁定）。
