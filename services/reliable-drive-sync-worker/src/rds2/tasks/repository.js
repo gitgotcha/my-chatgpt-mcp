@@ -171,6 +171,20 @@ export async function findStaleTaskIds({ db, now, limit }) {
   return result.results.map((row) => row.task_id);
 }
 
+// An integrity failure (hash mismatch, ambiguous object) parks the task for
+// a human immediately instead of burning through the backoff schedule.
+export async function parkNeedsAttention({ db, lease, now, code }) {
+  const result = await db.prepare(
+    `UPDATE rds2_tasks
+     SET state = 'needs_attention', lease_owner = NULL, lease_until = NULL,
+         payload_json = json_set(payload_json, '$.lastParkReason', json(?)),
+         updated_at = ?
+     WHERE task_id = ? AND state = 'processing'
+       AND lease_owner = ? AND lease_epoch = ? AND lease_until > ?`
+  ).bind(JSON.stringify({ code, at: now }), now, lease.taskId, lease.owner, lease.epoch, now).run();
+  return { rowsWritten: Number(result.meta?.changes ?? 0) };
+}
+
 // Admin replay of a needs_attention task: same task id, audited reason,
 // bumped epoch, back to pending. Never called automatically.
 export async function requeueNeedsAttention({ db, taskId, reason, now }) {

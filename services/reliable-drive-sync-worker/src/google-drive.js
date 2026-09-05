@@ -68,7 +68,7 @@ async function accessToken(env, fetchImpl = fetch) {
   return payload.access_token;
 }
 
-async function googleUpload(env, parentId, name, content, mimeType, fetchImpl = fetch, tokenProvider = () => accessToken(env, fetchImpl)) {
+export async function googleUpload(env, parentId, name, content, mimeType, fetchImpl = fetch, tokenProvider = () => accessToken(env, fetchImpl)) {
   const token = await tokenProvider();
   const boundary = "drive-mcp-boundary";
   const metadata = JSON.stringify({ name, parents: [parentId], mimeType });
