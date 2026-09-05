@@ -153,19 +153,24 @@ export function decideIntent(rows, incoming) {
   }
   const distinctEvents = new Set(referenced.map((entry) => entry.eventId));
   if (distinctEvents.size > 1) {
-    return { outcome: "conflict", code: "identity_of_intent_conflict", eventId: null, createdByRequest: null };
+    return {
+      outcome: "conflict", code: "identity_of_intent_conflict",
+      eventId: null, ignoredDuplicate: false, createdByRequest: null
+    };
   }
   if (rows.request) {
     if (rows.request.envelopeHash === incoming.envelopeHash) {
       return {
         outcome: "replay", code: "already_recorded",
         eventId: rows.request.canonicalEventId, ignoredDuplicate: false,
-        createdByRequest: rows.request.canonicalEventId
+        // The frozen receipt already carries the canonical request id; the
+        // decision itself must not smuggle an eventId into this field.
+        createdByRequest: null
       };
     }
     return {
       outcome: "conflict", code: "request_id_conflict",
-      eventId: rows.request.canonicalEventId, createdByRequest: null
+      eventId: rows.request.canonicalEventId, ignoredDuplicate: false, createdByRequest: null
     };
   }
   if (rows.eventById) {
@@ -175,7 +180,10 @@ export function decideIntent(rows, incoming) {
         ignoredDuplicate: false, createdByRequest: rows.eventById.createdByRequest ?? null
       };
     }
-    return { outcome: "conflict", code: "event_id_conflict", eventId: rows.eventById.eventId, createdByRequest: null };
+    return {
+      outcome: "conflict", code: "event_id_conflict",
+      eventId: rows.eventById.eventId, ignoredDuplicate: false, createdByRequest: null
+    };
   }
   if (rows.eventByKey) {
     if (rows.eventByKey.contentHash === incoming.contentHash) {
@@ -184,7 +192,10 @@ export function decideIntent(rows, incoming) {
         ignoredDuplicate: false, createdByRequest: rows.eventByKey.createdByRequest ?? null
       };
     }
-    return { outcome: "conflict", code: "event_key_conflict", eventId: rows.eventByKey.eventId, createdByRequest: null };
+    return {
+      outcome: "conflict", code: "event_key_conflict",
+      eventId: rows.eventByKey.eventId, ignoredDuplicate: false, createdByRequest: null
+    };
   }
   if (incoming.businessKeyConfigured && rows.businessKey) {
     return {

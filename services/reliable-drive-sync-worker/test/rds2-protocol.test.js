@@ -670,3 +670,77 @@ test("R8 validateQuery rejects null, array and missing params objects", () => {
   // A present, empty params object remains the only accepted shape.
   assert.deepEqual(validateQuery({ storageVersion: 2, operation: "capabilities", params: {} }).params, {});
 });
+
+// ---------------------------------------------------------------------------
+// R9 regression: decideIntent returns a uniform decision shape on every
+// branch, and the replay branch never smuggles an eventId into the
+// createdByRequest field. Classification tallies are asserted automatically.
+// ---------------------------------------------------------------------------
+
+test("R9 decideIntent returns a uniform decision shape on every branch", () => {
+  const incoming = {
+    requestId: "req-1", eventId: "e-1", eventKey: "k-1",
+    eventType: "algorithm.learning.completed",
+    envelopeHash: "h-1", contentHash: "c-1", businessKeyConfigured: false
+  };
+  const noRows = { request: null, eventById: null, eventByKey: null, businessKey: null };
+  assert.deepEqual(decideIntent(noRows, incoming), {
+    outcome: "new", code: null, eventId: "e-1", ignoredDuplicate: false, createdByRequest: null
+  });
+
+  const requestRows = {
+    request: { requestId: "req-1", envelopeHash: "h-1", canonicalEventId: "e-1" },
+    eventById: null, eventByKey: null, businessKey: null
+  };
+  const replay = decideIntent(requestRows, incoming);
+  assert.deepEqual(replay, {
+    outcome: "replay", code: "already_recorded", eventId: "e-1", ignoredDuplicate: false, createdByRequest: null
+  });
+  assert.notEqual(replay.createdByRequest, replay.eventId, "createdByRequest must never hold an eventId");
+
+  const idRows = {
+    request: null,
+    eventById: { eventId: "e-1", contentHash: "c-1", createdByRequest: "req-0" },
+    eventByKey: null, businessKey: null
+  };
+  const alias = decideIntent(idRows, incoming);
+  assert.deepEqual(alias, {
+    outcome: "alias", code: "already_recorded", eventId: "e-1", ignoredDuplicate: false, createdByRequest: "req-0"
+  });
+  assert.notEqual(alias.createdByRequest, alias.eventId);
+
+  const conflict = decideIntent({
+    request: null, eventById: { eventId: "e-1", contentHash: "c-other", createdByRequest: "req-0" },
+    eventByKey: null, businessKey: null
+  }, incoming);
+  assert.deepEqual(conflict, {
+    outcome: "conflict", code: "event_id_conflict", eventId: "e-1", ignoredDuplicate: false, createdByRequest: null
+  });
+
+  const firstResult = decideIntent({
+    request: null, eventById: null, eventByKey: null,
+    businessKey: { eventId: "e-first", contentHash: "c-first", createdByRequest: "req-first" }
+  }, { ...incoming, eventType: "resume-knowledge.answer-scored", businessKeyConfigured: true });
+  assert.deepEqual(firstResult, {
+    outcome: "firstResult", code: "already_recorded", eventId: "e-first", ignoredDuplicate: true, createdByRequest: "req-first"
+  });
+
+  const identityConflict = decideIntent({
+    request: { requestId: "req-1", envelopeHash: "h-1", canonicalEventId: "e-req" },
+    eventById: { eventId: "e-1", contentHash: "c-1", createdByRequest: "req-0" },
+    eventByKey: null, businessKey: null
+  }, incoming);
+  assert.deepEqual(identityConflict, {
+    outcome: "conflict", code: "identity_of_intent_conflict", eventId: null, ignoredDuplicate: false, createdByRequest: null
+  });
+});
+
+test("R9 classification kinds tally to 5 reads, 1 adminOnly, 1 disabled and 11 writes", () => {
+  const tally = { read: 0, adminOnly: 0, disabled: 0, write: 0 };
+  for (const eventType of Object.keys(KIND_BY_TYPE)) {
+    const { kind } = classifySubmission(submissionFor(eventType));
+    tally[kind] += 1;
+  }
+  assert.deepEqual(tally, { read: 5, adminOnly: 1, disabled: 1, write: 11 });
+  assert.equal(Object.keys(KIND_BY_TYPE).length, 18);
+});
