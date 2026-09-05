@@ -122,7 +122,15 @@ export async function acceptEvent({ io, principal, envelope, now }) {
   const recheck = async () => {
     if (recheckBudget <= 0) throw acceptError("unresolved_intent_race", 503);
     recheckBudget -= 1;
-    const freshRows = await intent();
+    let freshRows;
+    try {
+      freshRows = await intent();
+    } catch {
+      // A failing recheck can no longer classify the intent, so the outcome
+      // is a stable, sanitized, retryable error — never the raw storage
+      // failure and never a guess about the submission's disposition.
+      throw acceptError("unresolved_intent_race", 503);
+    }
     const freshDecision = decideIntent(freshRows, incoming);
     if (freshDecision.outcome === "new") throw acceptError("unresolved_intent_race", 503);
     return { rows: freshRows, decision: freshDecision };

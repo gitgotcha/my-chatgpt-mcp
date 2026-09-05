@@ -869,3 +869,53 @@ test("R3 normalized-equivalent names and absent optional identity fields are acc
     assert.equal(state.events, 2, `(${binding}) both positive samples are stored`);
   });
 });
+
+// ---------------------------------------------------------------------------
+// R1b regression: a race recheck whose lookup fails must surface a stable,
+// sanitized, retryable 503 — never the raw storage error — while keeping the
+// at-most-one recheck budget.
+// ---------------------------------------------------------------------------
+
+test("R1b a failing race recheck is converted to a sanitized retryable 503", async () => {
+  await runAcceptTest(async ({ binding, rawDb, principal }) => {
+    let lookupCalls = 0;
+    const racingIo = createInvocationIo({
+      db: {
+        prepare: (sql) => rawDb.prepare(sql),
+        batch: async (records) => {
+          // Pre-check (3 statements) succeeds; the commit batch (6) races
+          // against a concurrent winner; the recheck lookup (second 3-statement
+          // batch) fails with a raw storage error.
+          if (records.length === 6) {
+            await acceptEvent({
+              io: cleanIoFor(rawDb), principal, now: NOW, envelope: algorithmEnvelope()
+            });
+          }
+          if (records.length === 3) {
+            lookupCalls += 1;
+            if (lookupCalls === 2) throw new Error("D1 temporarily unavailable");
+          }
+          return rawDb.batch(records);
+        }
+      },
+      queues: {},
+      fetchImpl: async () => new Response("{}", { status: 200 }),
+      limit: WRITE_LIMIT
+    });
+    await assert.rejects(
+      () => acceptEvent({ io: racingIo, principal, envelope: algorithmEnvelope(), now: NOW }),
+      (error) => {
+        assert.equal(error.code, "unresolved_intent_race", `(${binding}) stable retryable code`);
+        assert.equal(error.status, 503, `(${binding}) retryable status`);
+        assert.equal(error.message, "unresolved_intent_race", `(${binding}) the message must be the code itself`);
+        assert.ok(!String(error.message).includes("temporarily"), `(${binding}) no storage error text may leak`);
+        return true;
+      },
+      `(${binding}) the failing recheck must be sanitized`
+    );
+    assert.equal(lookupCalls, 2, `(${binding}) exactly one pre-check and one recheck lookup`);
+    const state = await counts(rawDb);
+    assert.equal(state.events, 1, `(${binding}) only the race winner's event exists`);
+    assert.equal(state.requests, 1);
+  });
+});
