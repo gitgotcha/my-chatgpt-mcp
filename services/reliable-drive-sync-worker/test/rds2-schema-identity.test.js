@@ -115,8 +115,8 @@ test("business key uniqueness is per user and partial", async () => {
     const insert = (userId, businessKey) => {
       sequence += 1;
       return db.prepare(
-        `INSERT INTO rds2_events (user_id, namespace, projection_name, event_id, event_key, business_key, event_type, envelope_json, content_hash, created_at)
-         VALUES (?, 'resume-knowledge', 'mastery', ?, ?, ?, 'resume-knowledge.answer-scored', '{}', ?, ?)`
+        `INSERT INTO rds2_events (user_id, namespace, projection_name, event_id, event_key, business_key, event_type, created_by_request, envelope_json, content_hash, created_at)
+         VALUES (?, 'resume-knowledge', 'mastery', ?, ?, ?, 'resume-knowledge.answer-scored', 'seed-req', '{}', ?, ?)`
       ).bind(userId, `e-${sequence}`, `k-${sequence}`, businessKey, `c-${sequence}`, NOW);
     };
     await insert(USER_A, "biz-1").run();
@@ -135,8 +135,8 @@ test("oversized JSON units are rejected by CHECK constraints", async () => {
     await applySchema(db, MIGRATION_SQL);
     const big = "x".repeat(256 * 1024 + 1);
     await assert.rejects(async () => db.prepare(
-      `INSERT INTO rds2_events (user_id, namespace, projection_name, event_id, event_key, event_type, envelope_json, content_hash, created_at)
-       VALUES ('u', 'algorithm', 'learning', 'e-big', 'k-big', 'algorithm.learning.completed', ?, 'c', ?)`
+      `INSERT INTO rds2_events (user_id, namespace, projection_name, event_id, event_key, event_type, created_by_request, envelope_json, content_hash, created_at)
+       VALUES ('u', 'algorithm', 'learning', 'e-big', 'k-big', 'algorithm.learning.completed', 'seed-req', ?, 'c', ?)`
     ).bind(big, NOW).run(), undefined, `${binding}: envelope over 256KiB must be rejected`);
     await assert.rejects(async () => db.prepare(
       `INSERT INTO rds2_projection_rows (user_id, namespace, projection_name, generation, row_kind, row_key, value_json, updated_at)
@@ -194,8 +194,8 @@ test("credentials bind identity and revoked credentials are rejected", async () 
     await seedUser(db, { userId: USER_B, name: "其他用户", hash: await hashText(credentialB) });
     await db.batch([
       db.prepare(
-        `INSERT INTO rds2_events (user_id, namespace, projection_name, event_id, event_key, event_type, envelope_json, content_hash, created_at)
-         VALUES (?, 'algorithm', 'learning', 'e-b1', 'k-b1', 'algorithm.learning.completed', '{}', 'c', ?)`
+        `INSERT INTO rds2_events (user_id, namespace, projection_name, event_id, event_key, event_type, created_by_request, envelope_json, content_hash, created_at)
+         VALUES (?, 'algorithm', 'learning', 'e-b1', 'k-b1', 'algorithm.learning.completed', 'seed-req', '{}', 'c', ?)`
       ).bind(USER_B, NOW)
     ]);
     const principalA = await authenticate({ db, credential: credentialA });

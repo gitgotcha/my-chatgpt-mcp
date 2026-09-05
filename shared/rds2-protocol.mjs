@@ -142,36 +142,47 @@ export function decideIntent(rows, incoming) {
   }
   const distinctEvents = new Set(referenced.map((entry) => entry.eventId));
   if (distinctEvents.size > 1) {
-    return { outcome: "conflict", code: "identity_of_intent_conflict", eventId: null };
+    return { outcome: "conflict", code: "identity_of_intent_conflict", eventId: null, createdByRequest: null };
   }
   if (rows.request) {
     if (rows.request.envelopeHash === incoming.envelopeHash) {
       return {
         outcome: "replay", code: "already_recorded",
-        eventId: rows.request.canonicalEventId, ignoredDuplicate: false
+        eventId: rows.request.canonicalEventId, ignoredDuplicate: false,
+        createdByRequest: rows.request.canonicalEventId
       };
     }
-    return { outcome: "conflict", code: "request_id_conflict", eventId: rows.request.canonicalEventId };
+    return {
+      outcome: "conflict", code: "request_id_conflict",
+      eventId: rows.request.canonicalEventId, createdByRequest: null
+    };
   }
   if (rows.eventById) {
     if (rows.eventById.contentHash === incoming.contentHash) {
-      return { outcome: "alias", code: "already_recorded", eventId: rows.eventById.eventId, ignoredDuplicate: false };
+      return {
+        outcome: "alias", code: "already_recorded", eventId: rows.eventById.eventId,
+        ignoredDuplicate: false, createdByRequest: rows.eventById.createdByRequest ?? null
+      };
     }
-    return { outcome: "conflict", code: "event_id_conflict", eventId: rows.eventById.eventId };
+    return { outcome: "conflict", code: "event_id_conflict", eventId: rows.eventById.eventId, createdByRequest: null };
   }
   if (rows.eventByKey) {
     if (rows.eventByKey.contentHash === incoming.contentHash) {
-      return { outcome: "alias", code: "already_recorded", eventId: rows.eventByKey.eventId, ignoredDuplicate: false };
+      return {
+        outcome: "alias", code: "already_recorded", eventId: rows.eventByKey.eventId,
+        ignoredDuplicate: false, createdByRequest: rows.eventByKey.createdByRequest ?? null
+      };
     }
-    return { outcome: "conflict", code: "event_key_conflict", eventId: rows.eventByKey.eventId };
+    return { outcome: "conflict", code: "event_key_conflict", eventId: rows.eventByKey.eventId, createdByRequest: null };
   }
   if (incoming.businessKeyConfigured && rows.businessKey) {
     return {
       outcome: "firstResult", code: "already_recorded",
-      eventId: rows.businessKey.eventId, ignoredDuplicate: true
+      eventId: rows.businessKey.eventId, ignoredDuplicate: true,
+      createdByRequest: rows.businessKey.createdByRequest ?? null
     };
   }
-  return { outcome: "new", code: null, eventId: incoming.eventId ?? null, ignoredDuplicate: false };
+  return { outcome: "new", code: null, eventId: incoming.eventId ?? null, ignoredDuplicate: false, createdByRequest: null };
 }
 
 // ---------------------------------------------------------------------------

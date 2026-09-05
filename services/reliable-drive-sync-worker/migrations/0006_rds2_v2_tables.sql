@@ -42,6 +42,7 @@ CREATE TABLE rds2_events (
   event_key TEXT NOT NULL,
   business_key TEXT,
   event_type TEXT NOT NULL,
+  created_by_request TEXT NOT NULL,
   envelope_json TEXT NOT NULL CHECK (length(envelope_json) <= 262144),
   content_hash TEXT NOT NULL,
   created_at TEXT NOT NULL,
