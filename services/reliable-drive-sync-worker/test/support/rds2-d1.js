@@ -52,7 +52,9 @@ export function createSqliteD1({ path = ":memory:" } = {}) {
     return make([]);
   };
   return {
+    __rds2Simulated: true,
     prepare: (sql) => makeStatement(sql),
+    exec: (sql) => db.exec(sql),
     // Explicit transaction: a D1 batch is all-or-nothing, so the simulator
     // wraps every batch in BEGIN IMMEDIATE / COMMIT / ROLLBACK. Statements
     // execute sequentially; a rejection rolls the whole batch back.
@@ -72,6 +74,77 @@ export function createSqliteD1({ path = ":memory:" } = {}) {
     },
     close: () => db.close()
   };
+}
+
+// Splits a migration script into top-level statements. Trigger bodies contain
+// semicolons and nested CASE...END blocks, so a depth counter over
+// BEGIN/CASE/END words decides statement boundaries; -- and /* */ comments are
+// stripped first because they may legally contain semicolons.
+export function splitSqlStatements(sqlText) {
+  const statements = [];
+  let current = "";
+  let depth = 0;
+  let inString = false;
+  for (let index = 0; index < sqlText.length; index += 1) {
+    const char = sqlText[index];
+    if (inString) {
+      current += char;
+      if (char === "'") {
+        if (sqlText[index + 1] === "'") { current += "'"; index += 1; }
+        else inString = false;
+      }
+      continue;
+    }
+    if (char === "-" && sqlText[index + 1] === "-") {
+      while (index < sqlText.length && sqlText[index] !== "\n") index += 1;
+      current += " ";
+      continue;
+    }
+    if (char === "/" && sqlText[index + 1] === "*") {
+      index += 2;
+      while (index < sqlText.length && !(sqlText[index] === "*" && sqlText[index + 1] === "/")) index += 1;
+      index += 1;
+      current += " ";
+      continue;
+    }
+    if (char === "'") { inString = true; current += char; continue; }
+    if (/[A-Za-z_]/.test(char)) {
+      let word = "";
+      let cursor = index;
+      while (cursor < sqlText.length && /[A-Za-z_]/.test(sqlText[cursor])) {
+        word += sqlText[cursor];
+        cursor += 1;
+      }
+      const upper = word.toUpperCase();
+      if (upper === "BEGIN" || upper === "CASE") depth += 1;
+      else if (upper === "END") depth -= 1;
+      current += word;
+      index = cursor - 1;
+      continue;
+    }
+    if (char === ";" && depth <= 0) {
+      const trimmed = current.trim();
+      if (trimmed) statements.push(trimmed);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  const tail = current.trim();
+  if (tail) statements.push(tail);
+  return statements;
+}
+
+// Applies a migration script: the simulator executes it natively; a real D1
+// binding receives each split statement in one transactional batch.
+export async function applySchema(db, sqlText) {
+  if (db.__rds2Simulated) {
+    db.exec(sqlText);
+    return;
+  }
+  const statements = splitSqlStatements(sqlText);
+  if (!statements.length) return;
+  await db.batch(statements.map((sql) => db.prepare(sql)));
 }
 
 export async function createMiniflareD1() {

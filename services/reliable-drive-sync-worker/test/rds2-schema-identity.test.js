@@ -1,0 +1,302 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { withD1, applySchema } from "./support/rds2-d1.js";
+import { authenticate } from "../src/rds2/identity/auth.js";
+import { initializeUser } from "../src/rds2/identity/initialize.js";
+import { hashText } from "../src/rds2/identity/hashing.js";
+
+const MIGRATION_PATH = new URL("../migrations/0006_rds2_v2_tables.sql", import.meta.url);
+const MIGRATION_SQL = readFileSync(fileURLToPath(MIGRATION_PATH), "utf8");
+const NOW = "2026-09-05T00:00:00.000Z";
+const ADMIN_HASH = await hashText("admin-secret");
+const USER_A = "11111111-1111-4111-8111-111111111111";
+const USER_B = "22222222-2222-4222-8222-222222222222";
+const NAME = "乔炳源";
+
+function credentialHash(seed) {
+  // Deterministic 64-hex stand-in for the server-side SHA-256 of a credential.
+  let out = "";
+  for (let index = 0; index < 64; index += 1) {
+    out += ((seed.charCodeAt(index % seed.length) + index * 7) % 16).toString(16);
+  }
+  return out;
+}
+
+async function seedUser(db, { userId, name, hash }) {
+  await db.batch([
+    db.prepare(
+      "INSERT INTO rds2_users (user_id, name_key, display_name, status, created_at) VALUES (?, ?, ?, 'active', ?)"
+    ).bind(userId, name, name, NOW),
+    db.prepare(
+      "INSERT INTO rds2_credentials (credential_hash, user_id, status, created_at) VALUES (?, ?, 'active', ?)"
+    ).bind(hash, userId, NOW)
+  ]);
+}
+
+async function seedProcessingTask(db, overrides = {}) {
+  const task = {
+    taskId: "task-guard-1",
+    type: "projection",
+    userId: USER_A,
+    namespace: "algorithm",
+    projectionName: "learning",
+    eventSeq: 1,
+    state: "processing",
+    owner: "worker-1",
+    epoch: 3,
+    leaseUntil: "2026-09-05T00:05:00.000Z",
+    ...overrides
+  };
+  await db.batch([
+    db.prepare(
+      "INSERT INTO rds2_projections (user_id, namespace, projection_name, revision, last_event_seq, active_generation, building, summary_json, updated_at) VALUES (?, ?, ?, 0, 0, 0, 0, NULL, ?)"
+    ).bind(task.userId, task.namespace, task.projectionName, NOW),
+    db.prepare(
+      `INSERT INTO rds2_tasks (task_id, type, user_id, namespace, projection_name, event_seq, state,
+        available_at, lease_owner, lease_until, lease_epoch, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(task.taskId, task.type, task.userId, task.namespace, task.projectionName,
+      task.eventSeq, task.state, NOW, task.owner, task.leaseUntil, task.epoch, NOW, NOW)
+  ]);
+  return task;
+}
+
+test("migration 0006 creates all ten V2 tables on both bindings and leaves V1 untouched", async () => {
+  await withD1(async (binding, db) => {
+    await applySchema(db, MIGRATION_SQL);
+    const tables = await db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'rds2_%' ORDER BY name"
+    ).all();
+    const names = tables.results.map((row) => row.name);
+    assert.deepEqual(names, [
+      "rds2_archive_deliveries",
+      "rds2_commit_guards",
+      "rds2_credentials",
+      "rds2_events",
+      "rds2_projection_builds",
+      "rds2_projection_rows",
+      "rds2_projections",
+      "rds2_requests",
+      "rds2_tasks",
+      "rds2_users"
+    ]);
+    const v1Tables = await db.prepare(
+      "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name LIKE 'v1_%'"
+    ).first("n");
+    assert.equal(v1Tables, 0);
+    assert.equal(binding, binding);
+  });
+});
+
+test("task type, state and lease columns enforce CHECK constraints", async () => {
+  await withD1(async (binding, db) => {
+    await applySchema(db, MIGRATION_SQL);
+    await assert.rejects(async () => db.prepare(
+      `INSERT INTO rds2_tasks (task_id, type, user_id, namespace, projection_name, event_seq, state, available_at, created_at, updated_at)
+       VALUES ('t-bad-type', 'cleanup', 'u', 'algorithm', 'learning', 1, 'pending', ?, ?, ?)`
+    ).bind(NOW, NOW, NOW).run(), undefined, `${binding}: unknown task type must be rejected`);
+    await assert.rejects(async () => db.prepare(
+      `INSERT INTO rds2_tasks (task_id, type, user_id, namespace, projection_name, event_seq, state, available_at, created_at, updated_at)
+       VALUES ('t-bad-state', 'projection', 'u', 'algorithm', 'learning', 1, 'archived', ?, ?, ?)`
+    ).bind(NOW, NOW, NOW).run(), undefined, `${binding}: unknown task state must be rejected`);
+    await assert.rejects(async () => db.prepare(
+      `INSERT INTO rds2_tasks (task_id, type, user_id, namespace, projection_name, state, available_at, created_at, updated_at)
+       VALUES ('t-no-target', 'projection', 'u', 'algorithm', 'learning', 'pending', ?, ?, ?)`
+    ).bind(NOW, NOW, NOW).run(), undefined, `${binding}: a task without event or artifact must be rejected`);
+  });
+});
+
+test("business key uniqueness is per user and partial", async () => {
+  await withD1(async (binding, db) => {
+    await applySchema(db, MIGRATION_SQL);
+    let sequence = 0;
+    const insert = (userId, businessKey) => {
+      sequence += 1;
+      return db.prepare(
+        `INSERT INTO rds2_events (user_id, namespace, projection_name, event_id, event_key, business_key, event_type, envelope_json, content_hash, created_at)
+         VALUES (?, 'resume-knowledge', 'mastery', ?, ?, ?, 'resume-knowledge.answer-scored', '{}', ?, ?)`
+      ).bind(userId, `e-${sequence}`, `k-${sequence}`, businessKey, `c-${sequence}`, NOW);
+    };
+    await insert(USER_A, "biz-1").run();
+    await assert.rejects(async () => insert(USER_A, "biz-1").run(),
+      undefined, `${binding}: same user and business key must be unique`);
+    await insert(USER_B, "biz-1").run();
+    await insert(USER_A, null).run();
+    await insert(USER_A, null).run();
+    const count = await db.prepare("SELECT COUNT(*) AS n FROM rds2_events").first("n");
+    assert.equal(count, 4);
+  });
+});
+
+test("oversized JSON units are rejected by CHECK constraints", async () => {
+  await withD1(async (binding, db) => {
+    await applySchema(db, MIGRATION_SQL);
+    const big = "x".repeat(256 * 1024 + 1);
+    await assert.rejects(async () => db.prepare(
+      `INSERT INTO rds2_events (user_id, namespace, projection_name, event_id, event_key, event_type, envelope_json, content_hash, created_at)
+       VALUES ('u', 'algorithm', 'learning', 'e-big', 'k-big', 'algorithm.learning.completed', ?, 'c', ?)`
+    ).bind(big, NOW).run(), undefined, `${binding}: envelope over 256KiB must be rejected`);
+    await assert.rejects(async () => db.prepare(
+      `INSERT INTO rds2_projection_rows (user_id, namespace, projection_name, generation, row_kind, row_key, value_json, updated_at)
+       VALUES ('u', 'algorithm', 'learning', 0, 'topic', 't1', ?, ?)`
+    ).bind("x".repeat(64 * 1024 + 1), NOW).run(), undefined, `${binding}: row JSON over 64KiB must be rejected`);
+  });
+});
+
+test("new display name combined with another user's id override fails with zero writes", async () => {
+  await withD1(async (binding, db) => {
+    await applySchema(db, MIGRATION_SQL);
+    await seedUser(db, { userId: USER_B, name: "已有用户", hash: credentialHash("b-cred") });
+    await assert.rejects(async () => initializeUser({
+      db, adminCredential: "admin-secret", expectedAdminHash: ADMIN_HASH,
+      displayName: "全新名字", userIdOverride: USER_B,
+      credentialHash: credentialHash("new-cred"), now: NOW
+    }), (error) => error.code === "identity_conflict");
+    const users = await db.prepare("SELECT COUNT(*) AS n FROM rds2_users").first("n");
+    const creds = await db.prepare("SELECT COUNT(*) AS n FROM rds2_credentials").first("n");
+    assert.equal(users, 1, `${binding}: no user row may be created on conflict`);
+    assert.equal(creds, 1, `${binding}: no credential row may be created on conflict`);
+  });
+});
+
+test("NFKC-equivalent names resolve to one user but never bypass the admin gate", async () => {
+  await withD1(async (binding, db) => {
+    await applySchema(db, MIGRATION_SQL);
+    await assert.rejects(async () => initializeUser({
+      db, adminCredential: "wrong-secret", expectedAdminHash: ADMIN_HASH,
+      displayName: NAME, credentialHash: credentialHash("a-cred"), now: NOW
+    }), (error) => error.code === "admin_credential_rejected");
+    const afterBadAdmin = await db.prepare("SELECT COUNT(*) AS n FROM rds2_users").first("n");
+    assert.equal(afterBadAdmin, 0, `${binding}: a rejected admin call must not write anything`);
+
+    const first = await initializeUser({
+      db, adminCredential: "admin-secret", expectedAdminHash: ADMIN_HASH,
+      displayName: NAME, credentialHash: credentialHash("a-cred"), now: NOW
+    });
+    const again = await initializeUser({
+      db, adminCredential: "admin-secret", expectedAdminHash: ADMIN_HASH,
+      displayName: ` ${NAME}\u3000`, credentialHash: credentialHash("a-cred-2"), now: NOW
+    });
+    assert.equal(again.userId, first.userId, `${binding}: NFKC-equivalent names resolve to the same identity`);
+    const users = await db.prepare("SELECT COUNT(*) AS n FROM rds2_users").first("n");
+    assert.equal(users, 1);
+  });
+});
+
+test("credentials bind identity and revoked credentials are rejected", async () => {
+  await withD1(async (binding, db) => {
+    await applySchema(db, MIGRATION_SQL);
+    const credentialA = "a-user-credential";
+    const credentialB = "b-user-credential";
+    await seedUser(db, { userId: USER_A, name: NAME, hash: await hashText(credentialA) });
+    await seedUser(db, { userId: USER_B, name: "其他用户", hash: await hashText(credentialB) });
+    await db.batch([
+      db.prepare(
+        `INSERT INTO rds2_events (user_id, namespace, projection_name, event_id, event_key, event_type, envelope_json, content_hash, created_at)
+         VALUES (?, 'algorithm', 'learning', 'e-b1', 'k-b1', 'algorithm.learning.completed', '{}', 'c', ?)`
+      ).bind(USER_B, NOW)
+    ]);
+    const principalA = await authenticate({ db, credential: credentialA });
+    assert.equal(principalA.userId, USER_A);
+    assert.equal(principalA.username, NAME);
+    const principalB = await authenticate({ db, credential: credentialB });
+    assert.equal(principalB.userId, USER_B, `${binding}: each credential resolves to its own bound user`);
+
+    await assert.rejects(async () => authenticate({ db, credential: "nobody-credential" }),
+      (error) => error.code === "unknown_credential");
+    await db.batch([
+      db.prepare("UPDATE rds2_credentials SET status = 'revoked' WHERE credential_hash = ?").bind(await hashText(credentialA))
+    ]);
+    await assert.rejects(async () => authenticate({ db, credential: credentialA }),
+      (error) => error.code === "credential_revoked");
+    assert.equal(binding, binding);
+  });
+});
+
+test("two same-name initializations converge on exactly one identity", async () => {
+  await withD1(async (binding, db) => {
+    await applySchema(db, MIGRATION_SQL);
+    const first = await initializeUser({
+      db, adminCredential: "admin-secret", expectedAdminHash: ADMIN_HASH,
+      displayName: NAME, credentialHash: credentialHash("a-cred"), now: NOW
+    });
+    const second = await initializeUser({
+      db, adminCredential: "admin-secret", expectedAdminHash: ADMIN_HASH,
+      displayName: NAME, credentialHash: credentialHash("a-cred-2"), now: NOW
+    });
+    assert.equal(second.userId, first.userId);
+    const users = await db.prepare("SELECT COUNT(*) AS n FROM rds2_users").first("n");
+    assert.equal(users, 1, `${binding}: the UNIQUE name_key must collapse concurrent initializations`);
+    const creds = await db.prepare("SELECT COUNT(*) AS n FROM rds2_credentials").first("n");
+    assert.equal(creds, 2);
+  });
+});
+
+test("a commit guard with stale epoch, wrong owner or expired lease aborts the whole batch", async () => {
+  await withD1(async (binding, db) => {
+    await applySchema(db, MIGRATION_SQL);
+    const task = await seedProcessingTask(db);
+
+    const guardInsert = (overrides = {}) => db.prepare(
+      `INSERT INTO rds2_commit_guards (guard_id, task_id, owner, expected_epoch, now_utc, expected_revision, created_at)
+       VALUES (?, ?, ?, ?, ?, 0, ?)`
+    ).bind(
+      overrides.guardId ?? "g-1",
+      overrides.taskId ?? task.taskId,
+      overrides.owner ?? task.owner,
+      overrides.epoch ?? task.epoch,
+      overrides.now ?? NOW,
+      NOW
+    );
+    const rowWrite = db.prepare(
+      `INSERT INTO rds2_projection_rows (user_id, namespace, projection_name, generation, row_kind, row_key, value_json, updated_at)
+       VALUES (?, ?, ?, 0, 'topic', 't-1', '{}', ?)`
+    ).bind(task.userId, task.namespace, task.projectionName, NOW);
+
+    for (const [label, guard] of [
+      ["stale epoch", guardInsert({ epoch: task.epoch - 1 })],
+      ["future epoch", guardInsert({ epoch: task.epoch + 1 })],
+      ["wrong owner", guardInsert({ owner: "worker-2" })],
+      ["expired lease", guardInsert({ now: "2026-09-05T00:06:00.000Z" })]
+    ]) {
+      await assert.rejects(async () => db.batch([rowWrite, guard]),
+        undefined, `${binding}: ${label} must abort the batch`);
+      const rows = await db.prepare("SELECT COUNT(*) AS n FROM rds2_projection_rows").first("n");
+      assert.equal(rows, 0, `${binding}: ${label} must roll back statements before the guard`);
+      const guards = await db.prepare("SELECT COUNT(*) AS n FROM rds2_commit_guards").first("n");
+      assert.equal(guards, 0);
+    }
+
+    await assert.rejects(async () => db.batch([rowWrite, guardInsert({ state: undefined, taskId: "task-other" })]),
+      undefined, `${binding}: a guard for an unknown task must abort`);
+    const guardsAfterUnknown = await db.prepare("SELECT COUNT(*) AS n FROM rds2_commit_guards").first("n");
+    assert.equal(guardsAfterUnknown, 0);
+  });
+});
+
+test("a valid commit guard passes and its projection revision is enforced", async () => {
+  await withD1(async (binding, db) => {
+    await applySchema(db, MIGRATION_SQL);
+    const task = await seedProcessingTask(db);
+    const guardInsert = (expectedRevision) => db.prepare(
+      `INSERT INTO rds2_commit_guards (guard_id, task_id, owner, expected_epoch, now_utc, expected_revision, created_at)
+       VALUES ('g-ok', ?, ?, ?, ?, ?, ?)`
+    ).bind(task.taskId, task.owner, task.epoch, NOW, expectedRevision, NOW);
+
+    await db.batch([guardInsert(0)]);
+    const guards = await db.prepare("SELECT COUNT(*) AS n FROM rds2_commit_guards").first("n");
+    assert.equal(guards, 1, `${binding}: a valid guard must be insertable inside a batch`);
+    await db.batch([db.prepare("DELETE FROM rds2_commit_guards")]);
+
+    await assert.rejects(async () => db.batch([guardInsert(1)]),
+      undefined, `${binding}: expected_revision must equal the projection head revision`);
+    await assert.rejects(async () => db.batch([
+      db.prepare(
+        `INSERT INTO rds2_commit_guards (guard_id, task_id, owner, expected_epoch, now_utc, expected_revision, created_at)
+         VALUES ('g-no-rev', ?, ?, ?, ?, NULL, ?)`
+      ).bind(task.taskId, task.owner, task.epoch, NOW, NOW)
+    ]), undefined, `${binding}: a projection guard without expected_revision must be rejected`);
+  });
+});
