@@ -6,6 +6,7 @@ import { claimForDispatch, markQueued, failTask } from "./repository.js";
 
 export const QUEUE_BY_TASK_TYPE = Object.freeze({
   projection: "RDS2_PROJECTION_QUEUE",
+  projection_build: "RDS2_PROJECTION_QUEUE",
   archive_event: "RDS2_ARCHIVE_QUEUE",
   archive_delta: "RDS2_ARCHIVE_QUEUE"
 });

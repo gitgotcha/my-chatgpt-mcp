@@ -58,7 +58,7 @@ CREATE INDEX rds2_events_scope_seq_idx
 
 CREATE TABLE rds2_tasks (
   task_id TEXT PRIMARY KEY,
-  type TEXT NOT NULL CHECK (type IN ('projection', 'archive_event', 'archive_delta')),
+  type TEXT NOT NULL CHECK (type IN ('projection', 'projection_build', 'archive_event', 'archive_delta')),
   user_id TEXT NOT NULL,
   namespace TEXT NOT NULL,
   projection_name TEXT NOT NULL,
@@ -76,7 +76,7 @@ CREATE TABLE rds2_tasks (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   CHECK (type <> 'projection' OR (event_seq IS NOT NULL AND artifact_id IS NULL)),
-  CHECK (type = 'projection' OR artifact_id IS NOT NULL),
+  CHECK (type IN ('projection', 'projection_build') OR artifact_id IS NOT NULL),
   CHECK ((lease_owner IS NULL AND lease_until IS NULL)
       OR (lease_owner IS NOT NULL AND lease_until IS NOT NULL))
 );
