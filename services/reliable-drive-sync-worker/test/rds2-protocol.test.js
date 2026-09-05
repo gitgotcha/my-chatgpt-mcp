@@ -744,3 +744,15 @@ test("R9 classification kinds tally to 5 reads, 1 adminOnly, 1 disabled and 11 w
   assert.deepEqual(tally, { read: 5, adminOnly: 1, disabled: 1, write: 11 });
   assert.equal(Object.keys(KIND_BY_TYPE).length, 18);
 });
+
+test("R9b identity is optional as a block but username is required inside it", () => {
+  const base = submissionFor("algorithm.learning.completed");
+  const withoutIdentity = structuredClone(base);
+  delete withoutIdentity.identity;
+  assert.equal(classifySubmission(withoutIdentity).kind, "write");
+  assert.throws(
+    () => classifySubmission({ ...base, identity: { userId: USER } }),
+    (error) => error.message === "invalid_identity"
+  );
+  assert.equal(classifySubmission({ ...base, identity: { username: NAME } }).kind, "write");
+});

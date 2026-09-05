@@ -10,10 +10,12 @@ contract; the code is normative for behaviour, this file is normative for intent
 A business envelope is exactly the shape validated by the V1 validator
 (`services/reliable-drive-sync-worker/src/protocol.js`, re-exported here):
 `schemaVersion: "1.2"`, `namespace`, `eventType` (one of the 18 allowed
-types), optional `identity {userId?, username?}`, optional `payload`, and a
-non-empty transport `requestId`. Payload field sets per event type, identity
-field rules and event-schema validation are defined there and are NOT
-duplicated or relaxed in V2.
+types), optional `identity`, optional `payload`, and a non-empty transport
+`requestId`. The `identity` block may be omitted entirely; when it IS
+provided, `username` is required (non-empty string) and `userId` is optional
+but must be a UUID. Payload field sets per event type, identity field rules
+and event-schema validation are defined there and are NOT duplicated or
+relaxed in V2.
 
 ## Submission classification
 
