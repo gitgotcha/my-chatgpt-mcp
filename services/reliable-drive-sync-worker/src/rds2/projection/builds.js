@@ -185,11 +185,7 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
         io.db.prepare(
           `UPDATE rds2_projection_builds SET continuation_json = ?, updated_at = ?
            WHERE build_id = ? AND stage = 'scanning'`
-        ).bind(canonicalJson({
-          nextEventSeq: pageResult.continuation.nextEventSeq,
-          stagedCount: pageResult.continuation.stagedCount,
-          page: continuation.page + 1
-        }), now, build.build_id),
+        ).bind(canonicalJson(pageResult.continuation), now, build.build_id),
         io.db.prepare(
           `INSERT INTO rds2_tasks (task_id, type, user_id, namespace, projection_name, event_seq, artifact_id,
              state, available_at, created_at, updated_at)

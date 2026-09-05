@@ -40,7 +40,29 @@ export async function projectOne({ io, taskId, owner, now, reducer, lease = null
     return stepResult("retry", taskId, "deferred_predecessor");
   }
 
-  const plan = reducer.plan({ scope, event, head });
+  // Execute the reducer's declared read plan: bounded point lookups on the
+  // active generation, one batch, however long the history is.
+  const readPlan = reducer.reads ? reducer.reads({ scope, event }) : [];
+  let rows = {};
+  if (readPlan.length) {
+    const readResults = await io.db.batch(readPlan.map((read) => io.db.prepare(
+      `SELECT row_key, member_key, sort_key, value_json FROM rds2_projection_rows
+       WHERE user_id = ? AND namespace = ? AND projection_name = ?
+         AND generation = ? AND row_kind = ? AND row_key = ?`
+    ).bind(scope.userId, scope.namespace, scope.projectionName, head.activeGeneration,
+      read.rowKind, read.rowKey)));
+    rows = Object.fromEntries(readPlan.map((read, index) => {
+      const row = readResults[index]?.results?.[0];
+      return [read.as, row ? {
+        rowKey: row.row_key,
+        memberKey: row.member_key,
+        sortKey: row.sort_key,
+        value: JSON.parse(row.value_json)
+      } : null];
+    }));
+  }
+
+  const plan = reducer.plan({ scope, event, head, rows });
   if (plan.rebuild) {
     await ensureBuild({ db: io.db, scope, baseRevision: head.revision, now });
     await deferTask({ db: io.db, lease: activeLease, now, availableAt: now });

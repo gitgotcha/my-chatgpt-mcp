@@ -30,7 +30,9 @@ export function createSqliteD1({ path = ":memory:" } = {}) {
     const hasReturning = /\bRETURNING\b/i.test(sql);
     const isRead = !hasReturning && /^\s*(SELECT|WITH|PRAGMA|EXPLAIN)\b/i.test(sql);
     // Real D1 reports changes 0 for plain reads regardless of connection
-    // state, and the actual write count for RETURNING statements.
+    // state, and the actual write count for RETURNING statements. rows_read
+    // on reads mirrors the rows the statement pulled (an upper bound of the
+    // scan cost for point lookups), so scale tests can measure it.
     const metaFor = () => {
       if (isRead) return { changes: 0, last_row_id: Number(state().r), duration: 0 };
       const s = state();
@@ -46,18 +48,20 @@ export function createSqliteD1({ path = ":memory:" } = {}) {
       },
       async all() {
         const rows = rowsFor(...bound);
-        return { success: true, meta: metaFor(), results: rows };
+        const meta = metaFor();
+        return { success: true, meta: { ...meta, rows_read: isRead ? rows.length : 0 }, results: rows };
       },
       async run() {
         if (returnsRows) {
           const rows = rowsFor(...bound);
-          return { success: true, results: rows, meta: metaFor() };
+          const meta = metaFor();
+          return { success: true, results: rows, meta: { ...meta, rows_read: rows.length } };
         }
         const result = stmt.run(...bound);
         return {
           success: true,
           results: [],
-          meta: { changes: result.changes ?? 0, last_row_id: Number(result.lastInsertRowid ?? 0), duration: 0 }
+          meta: { changes: result.changes ?? 0, last_row_id: Number(result.lastInsertRowid ?? 0), duration: 0, rows_read: 0 }
         };
       },
       __isRds2SimulatedStatement: true,
