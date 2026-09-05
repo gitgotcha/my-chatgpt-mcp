@@ -13,6 +13,11 @@ export const MINIFLARE_VERSION = "4.20260730.0";
 export function createSqliteD1({ path = ":memory:" } = {}) {
   const db = new DatabaseSync(path);
   db.exec("PRAGMA foreign_keys = ON;");
+  // Connection-level write counters, read AFTER a statement executed, mirror
+  // real D1 metadata for RETURNING statements (changes = actual writes,
+  // last_row_id = connection state) without inferring them from row counts.
+  const connectionState = db.prepare("SELECT changes() AS c, last_insert_rowid() AS r");
+  const state = () => connectionState.get();
   const makeStatement = (sql) => {
     const stmt = db.prepare(sql);
     // node:sqlite rows use a null prototype; D1 returns plain objects, so
@@ -22,6 +27,15 @@ export function createSqliteD1({ path = ":memory:" } = {}) {
     // Result-set statements (SELECT or RETURNING) are detected up front so a
     // RETURNING insert can never be reduced to a bare run() that drops rows.
     const returnsRows = stmt.columns().length > 0;
+    const hasReturning = /\bRETURNING\b/i.test(sql);
+    const isRead = !hasReturning && /^\s*(SELECT|WITH|PRAGMA|EXPLAIN)\b/i.test(sql);
+    // Real D1 reports changes 0 for plain reads regardless of connection
+    // state, and the actual write count for RETURNING statements.
+    const metaFor = () => {
+      if (isRead) return { changes: 0, last_row_id: Number(state().r), duration: 0 };
+      const s = state();
+      return { changes: Number(s.c), last_row_id: Number(s.r), duration: 0 };
+    };
     const make = (bound) => ({
       bind: (...values) => make(values),
       async first(...args) {
@@ -32,12 +46,14 @@ export function createSqliteD1({ path = ":memory:" } = {}) {
       },
       async all() {
         const rows = rowsFor(...bound);
-        return { success: true, meta: { changes: 0, last_row_id: 0, duration: 0 }, results: rows };
+        return { success: true, meta: metaFor(), results: rows };
       },
       async run() {
-        const result = returnsRows
-          ? { changes: rowsFor(...bound).length, lastInsertRowid: 0 }
-          : stmt.run(...bound);
+        if (returnsRows) {
+          const rows = rowsFor(...bound);
+          return { success: true, results: rows, meta: metaFor() };
+        }
+        const result = stmt.run(...bound);
         return {
           success: true,
           results: [],

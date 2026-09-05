@@ -230,3 +230,42 @@ test("budget snapshot records category, index and count without payloads", () =>
   assert.equal(budget.snapshot().used, 3);
   assert.throws(() => budget.consume("d1"), (error) => error.code === "budget_exhausted");
 });
+
+test("R6 simulator metadata matches real D1 field by field", async () => {
+  await withD1(async (binding, db) => {
+    await db.batch([db.prepare("CREATE TABLE rds2_meta_probe (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)")]);
+    const capture = {};
+    const cap = async (label, stmt) => {
+      const r = await stmt.all();
+      capture[label] = { changes: r.meta.changes, results: r.results, last_row_id: r.meta.last_row_id };
+    };
+    await cap("read-empty", db.prepare("SELECT COUNT(*) AS n FROM rds2_meta_probe"));
+    await cap("insert-returning-1", db.prepare("INSERT INTO rds2_meta_probe (v) VALUES (?) RETURNING id").bind("a"));
+    await cap("insert-returning-2", db.prepare("INSERT INTO rds2_meta_probe (v) VALUES (?) RETURNING id").bind("b"));
+    await cap("read-two", db.prepare("SELECT COUNT(*) AS n FROM rds2_meta_probe"));
+    await cap("update-returning-hit", db.prepare("UPDATE rds2_meta_probe SET v = ? WHERE v = ? RETURNING id").bind("x", "a"));
+    await cap("update-returning-miss", db.prepare("UPDATE rds2_meta_probe SET v = ? WHERE v = ? RETURNING id").bind("y", "missing"));
+    await cap("delete-returning", db.prepare("DELETE FROM rds2_meta_probe WHERE v = ? RETURNING id").bind("x"));
+    await cap("insert-plain", db.prepare("INSERT INTO rds2_meta_probe (v) VALUES (?)").bind("p"));
+
+    // Field-by-field D1 semantics, asserted identically on both bindings:
+    assert.equal(capture["read-empty"].changes, 0, `(${binding}) SELECT reports changes 0`);
+    assert.deepEqual(capture["read-empty"].results, [{ n: 0 }]);
+    assert.equal(capture["insert-returning-1"].changes, 1, `(${binding}) INSERT RETURNING reports its write count`);
+    assert.deepEqual(capture["insert-returning-1"].results, [{ id: 1 }]);
+    assert.equal(capture["insert-returning-1"].last_row_id, 1, `(${binding}) INSERT RETURNING reports its rowid`);
+    assert.equal(capture["insert-returning-2"].changes, 1);
+    assert.deepEqual(capture["insert-returning-2"].results, [{ id: 2 }]);
+    assert.equal(capture["insert-returning-2"].last_row_id, 2);
+    assert.equal(capture["read-two"].changes, 0, `(${binding}) SELECT after writes still reports changes 0`);
+    assert.deepEqual(capture["read-two"].results, [{ n: 2 }]);
+    assert.equal(capture["update-returning-hit"].changes, 1);
+    assert.deepEqual(capture["update-returning-hit"].results, [{ id: 1 }]);
+    assert.equal(capture["update-returning-miss"].changes, 0);
+    assert.deepEqual(capture["update-returning-miss"].results, []);
+    assert.equal(capture["delete-returning"].changes, 1);
+    assert.deepEqual(capture["delete-returning"].results, [{ id: 1 }]);
+    assert.equal(capture["insert-plain"].changes, 1, `(${binding}) a plain insert reports its write count`);
+    assert.deepEqual(capture["insert-plain"].results, []);
+  });
+});
