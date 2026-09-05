@@ -574,3 +574,192 @@ test("lookupIntent exposes the four idempotency rows and one head is seeded per 
     assert.equal(head, 0, "the head stays at revision 0 until the projection commits");
   });
 });
+
+// ---------------------------------------------------------------------------
+// R1 regression: an alias/firstResult request-row race must go through the
+// unified lookupIntent/decideIntent recheck. A concurrent writer that binds
+// the same requestId to a different event (or different content) must never
+// make the loser return a foreign success receipt.
+// ---------------------------------------------------------------------------
+
+function raceProxyIo(rawDb, { onLengthOne } = {}) {
+  return createInvocationIo({
+    db: {
+      prepare: (sql) => rawDb.prepare(sql),
+      batch: async (records) => {
+        if (records.length === 1 && onLengthOne) {
+          await onLengthOne();
+        }
+        return rawDb.batch(records);
+      }
+    },
+    queues: {},
+    fetchImpl: async () => new Response("{}", { status: 200 }),
+    limit: WRITE_LIMIT
+  });
+}
+
+async function seedForeignRequestRow(rawDb, { requestId, eventId, envelopeHash, receipt }) {
+  await rawDb.batch([
+    rawDb.prepare(
+      "INSERT INTO rds2_requests (user_id, request_id, envelope_hash, canonical_event_id, receipt_json, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+    ).bind(USER, requestId, envelopeHash, eventId, JSON.stringify(receipt), NOW)
+  ]);
+}
+
+function cleanIoFor(rawDb) {
+  return createInvocationIo({ db: rawDb, queues: {}, fetchImpl: async () => new Response("{}", { status: 200 }), limit: WRITE_LIMIT });
+}
+
+test("R1 alias race binding the requestId to another event conflicts instead of replaying", async () => {
+  await runAcceptTest(async ({ binding, rawDb, principal }) => {
+    await acceptEvent({ io: cleanIoFor(rawDb), principal, now: NOW, envelope: algorithmEnvelope() });
+    const winnerEnvelope = algorithmEnvelope({
+      envelope: { requestId: "req-x" },
+      event: { eventId: "66666666-0000-4000-8000-00000000000b", eventKey: "r1-winner-key" }
+    });
+    const loserEnvelope = algorithmEnvelope({ envelope: { requestId: "req-x" } });
+    const racingIo = raceProxyIo(rawDb, {
+      onLengthOne: async () => {
+        await acceptEvent({ io: cleanIoFor(rawDb), principal, now: NOW, envelope: winnerEnvelope });
+      }
+    });
+    await assert.rejects(
+      () => acceptEvent({ io: racingIo, principal, envelope: loserEnvelope, now: NOW }),
+      (error) => {
+        assert.equal(error.status, 409, `(${binding}) the race must surface a stable 409`);
+        assert.ok(
+          ["identity_of_intent_conflict", "request_id_conflict"].includes(error.code),
+          `(${binding}) unexpected conflict code ${error.code}`
+        );
+        return true;
+      },
+      `(${binding}) the loser must not receive a success receipt for another event`
+    );
+    const state = await counts(rawDb);
+    assert.equal(state.events, 2, `(${binding}) only the winner's own event may exist`);
+    assert.equal(state.requests, 2, `(${binding}) one row per recorded request`);
+    const bound = await rawDb.prepare(
+      "SELECT canonical_event_id FROM rds2_requests WHERE request_id = 'req-x'"
+    ).first("canonical_event_id");
+    assert.equal(bound, "66666666-0000-4000-8000-00000000000b", `(${binding}) the winner's binding is untouched`);
+  });
+});
+
+test("R1 alias race with the identical request replays the consistent receipt", async () => {
+  await runAcceptTest(async ({ binding, rawDb, principal }) => {
+    await acceptEvent({ io: cleanIoFor(rawDb), principal, now: NOW, envelope: algorithmEnvelope() });
+    const aliasEnvelope = algorithmEnvelope({ envelope: { requestId: "req-x" } });
+    const winnerReceipt = { receipt: null };
+    const racingIo = raceProxyIo(rawDb, {
+      onLengthOne: async () => {
+        winnerReceipt.receipt = await acceptEvent({ io: cleanIoFor(rawDb), principal, now: NOW, envelope: aliasEnvelope });
+      }
+    });
+    const loserReceipt = await acceptEvent({ io: racingIo, principal, envelope: aliasEnvelope, now: NOW });
+    assert.deepEqual(loserReceipt, winnerReceipt.receipt, `(${binding}) the loser must replay the identical consistent receipt`);
+    assert.equal(loserReceipt.eventId, EVENT_ID);
+    const state = await counts(rawDb);
+    assert.equal(state.events, 1, `(${binding}) no extra event may appear`);
+    assert.equal(state.requests, 2, `(${binding}) exactly one request row for req-x`);
+  });
+});
+
+test("R1 alias race with same event but different content conflicts as request_id_conflict", async () => {
+  await runAcceptTest(async ({ binding, rawDb, principal }) => {
+    await acceptEvent({ io: cleanIoFor(rawDb), principal, now: NOW, envelope: algorithmEnvelope() });
+    await seedForeignRequestRow(rawDb, {
+      requestId: "req-x",
+      eventId: EVENT_ID,
+      envelopeHash: "h-from-another-content",
+      receipt: { storageVersion: 2, attemptedRequestId: "req-x", canonicalRequestId: "req-1", eventId: EVENT_ID, jobId: "j", userId: USER, disposition: "already_recorded", ignoredDuplicate: false, cloudPersistence: "d1_committed" }
+    });
+    const racingIo = raceProxyIo(rawDb);
+    await assert.rejects(
+      () => acceptEvent({
+        io: racingIo, principal, now: NOW,
+        envelope: algorithmEnvelope({ envelope: { requestId: "req-x" } })
+      }),
+      (error) => error.code === "request_id_conflict" && error.status === 409,
+      `(${binding}) a same-event different-envelope row must conflict`
+    );
+  });
+});
+
+test("R1 firstResult race binding the requestId to another event conflicts", async () => {
+  await runAcceptTest(async ({ binding, rawDb, principal }) => {
+    await acceptEvent({
+      io: cleanIoFor(rawDb), principal, now: NOW,
+      envelope: answerScoredEnvelope({ requestId: "score-1", eventId: "a0000000-0000-4000-8000-000000000004" })
+    });
+    const loserEnvelope = answerScoredEnvelope({ requestId: "score-x", eventId: "a0000000-0000-4000-8000-000000000005" });
+    const winnerEnvelope = algorithmEnvelope({
+      envelope: { requestId: "score-x" },
+      event: { eventId: "66666666-0000-4000-8000-00000000000c", eventKey: "r1-score-race-key" }
+    });
+    const racingIo = raceProxyIo(rawDb, {
+      onLengthOne: async () => {
+        await acceptEvent({ io: cleanIoFor(rawDb), principal, now: NOW, envelope: winnerEnvelope });
+      }
+    });
+    await assert.rejects(
+      () => acceptEvent({ io: racingIo, principal, envelope: loserEnvelope, now: NOW }),
+      (error) => {
+        assert.equal(error.status, 409, `(${binding}) the race must surface a stable 409`);
+        assert.ok(
+          ["identity_of_intent_conflict", "request_id_conflict"].includes(error.code),
+          `(${binding}) unexpected conflict code ${error.code}`
+        );
+        return true;
+      }
+    );
+    const state = await counts(rawDb);
+    assert.equal(state.events, 2, `(${binding}) only the first score and the winner's own event exist`);
+  });
+});
+
+test("R1 firstResult race with the identical request replays the consistent receipt", async () => {
+  await runAcceptTest(async ({ binding, rawDb, principal }) => {
+    await acceptEvent({
+      io: cleanIoFor(rawDb), principal, now: NOW,
+      envelope: answerScoredEnvelope({ requestId: "score-1", eventId: "a0000000-0000-4000-8000-000000000004" })
+    });
+    const dupEnvelope = answerScoredEnvelope({ requestId: "score-x", eventId: "a0000000-0000-4000-8000-000000000005" });
+    const winnerReceipt = { receipt: null };
+    const racingIo = raceProxyIo(rawDb, {
+      onLengthOne: async () => {
+        winnerReceipt.receipt = await acceptEvent({ io: cleanIoFor(rawDb), principal, now: NOW, envelope: dupEnvelope });
+      }
+    });
+    const loserReceipt = await acceptEvent({ io: racingIo, principal, envelope: dupEnvelope, now: NOW });
+    assert.deepEqual(loserReceipt, winnerReceipt.receipt, `(${binding}) identical duplicate race must replay one receipt`);
+    assert.equal(loserReceipt.ignoredDuplicate, true);
+    const state = await counts(rawDb);
+    assert.equal(state.events, 1, `(${binding}) still only the first score event`);
+    assert.equal(state.requests, 2);
+  });
+});
+
+test("R1 firstResult race with different content under the same requestId conflicts", async () => {
+  await runAcceptTest(async ({ binding, rawDb, principal }) => {
+    await acceptEvent({
+      io: cleanIoFor(rawDb), principal, now: NOW,
+      envelope: answerScoredEnvelope({ requestId: "score-1", eventId: "a0000000-0000-4000-8000-000000000004" })
+    });
+    await seedForeignRequestRow(rawDb, {
+      requestId: "score-x",
+      eventId: "a0000000-0000-4000-8000-000000000004",
+      envelopeHash: "h-from-another-content",
+      receipt: { storageVersion: 2, attemptedRequestId: "score-x", canonicalRequestId: "score-1", eventId: "a0000000-0000-4000-8000-000000000004", jobId: "j", userId: USER, disposition: "already_recorded", ignoredDuplicate: true, cloudPersistence: "d1_committed" }
+    });
+    const racingIo = raceProxyIo(rawDb);
+    await assert.rejects(
+      () => acceptEvent({
+        io: racingIo, principal, now: NOW,
+        envelope: answerScoredEnvelope({ requestId: "score-x", eventId: "a0000000-0000-4000-8000-000000000005" })
+      }),
+      (error) => error.code === "request_id_conflict" && error.status === 409,
+      `(${binding}) a same-event different-envelope row must conflict on the firstResult path too`
+    );
+  });
+});

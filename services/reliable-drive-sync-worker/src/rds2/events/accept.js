@@ -100,6 +100,17 @@ export async function acceptEvent({ io, principal, envelope, now }) {
   };
 
   const intent = () => lookupIntent({ db: io.db, principal, envelope });
+  // One submission owns exactly one full race recheck, shared by the commit
+  // batch and the alias request-row write; neither catch may retry on its own.
+  let recheckBudget = 1;
+  const recheck = async () => {
+    if (recheckBudget <= 0) throw acceptError("unresolved_intent_race", 503);
+    recheckBudget -= 1;
+    const freshRows = await intent();
+    const freshDecision = decideIntent(freshRows, incoming);
+    if (freshDecision.outcome === "new") throw acceptError("unresolved_intent_race", 503);
+    return { rows: freshRows, decision: freshDecision };
+  };
   let rows = await intent();
   let decision = decideIntent(rows, incoming);
   let acceptedReceipt = null;
@@ -109,11 +120,9 @@ export async function acceptEvent({ io, principal, envelope, now }) {
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
       // Unique-constraint race: re-query and re-decide with the SAME pure
-      // function, at most once. A still-"new" verdict is a retryable anomaly,
-      // never silently reported as success.
-      rows = await intent();
-      decision = decideIntent(rows, incoming);
-      if (decision.outcome === "new") throw acceptError("unresolved_intent_race", 503);
+      // function. A still-"new" verdict is a retryable anomaly, never
+      // silently reported as success.
+      ({ rows, decision } = await recheck());
     }
   }
 
@@ -125,8 +134,19 @@ export async function acceptEvent({ io, principal, envelope, now }) {
     case "alias":
     case "firstResult": {
       const receipt = await buildReferencedReceipt(decision, principal, requestId, envelope);
-      const stored = await recordRequestRow({ io, principal, envelope, envelopeHash, receipt, now });
-      return stored ?? receipt;
+      try {
+        await recordRequestRow({ io, principal, envelopeHash, receipt, now });
+        return receipt;
+      } catch (error) {
+        if (!isUniqueViolation(error)) throw error;
+        // The requestId was bound concurrently while we were writing the alias
+        // row. Only a re-decided consistent outcome may be returned: a replay
+        // requires the very same envelope hash, anything else is a stable 409.
+        ({ rows, decision } = await recheck());
+        if (decision.outcome === "replay") return rows.request.receipt;
+        if (decision.outcome === "conflict") throw acceptError(decision.code, 409);
+        throw acceptError("unresolved_intent_race", 503);
+      }
     }
     case "conflict":
       throw acceptError(decision.code, 409);
@@ -154,33 +174,24 @@ async function buildReferencedReceipt(decision, principal, requestId, envelope) 
   };
 }
 
-async function recordRequestRow({ io, principal, envelope, envelopeHash, receipt, now }) {
+async function recordRequestRow({ io, principal, envelopeHash, receipt, now }) {
   const timestamp = now ?? new Date().toISOString();
-  try {
-    await io.db.batch([
-      io.db.prepare(
-        `INSERT INTO rds2_requests (user_id, request_id, envelope_hash, canonical_event_id, receipt_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`
-      ).bind(
-        principal.userId,
-        receipt.attemptedRequestId,
-        envelopeHash,
-        receipt.eventId,
-        canonicalJson(receipt),
-        timestamp
-      )
-    ]);
-    return null;
-  } catch (error) {
-    if (isUniqueViolation(error)) {
-      // The same requestId was recorded concurrently: return its frozen row.
-      const existing = await io.db.prepare(
-        "SELECT receipt_json FROM rds2_requests WHERE user_id = ? AND request_id = ?"
-      ).bind(principal.userId, receipt.attemptedRequestId).first("receipt_json");
-      return JSON.parse(existing);
-    }
-    throw error;
-  }
+  // UNIQUE violations are handled by the caller's unified recheck, never by
+  // reading the conflicting row's receipt here: that row may belong to a
+  // different event.
+  await io.db.batch([
+    io.db.prepare(
+      `INSERT INTO rds2_requests (user_id, request_id, envelope_hash, canonical_event_id, receipt_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).bind(
+      principal.userId,
+      receipt.attemptedRequestId,
+      envelopeHash,
+      receipt.eventId,
+      canonicalJson(receipt),
+      timestamp
+    )
+  ]);
 }
 
 async function commitNewEvent({ io, principal, envelope, now, businessKey }) {
