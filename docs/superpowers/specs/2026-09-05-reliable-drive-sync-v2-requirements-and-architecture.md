@@ -8,6 +8,14 @@
 > 1. §8/§7.2/§12 示例与 canary 领域名统一为 Schema 1.2 协议白名单中的 `algorithm`；`algorithm-learning` 仅作为 Skill 名称与展示标签，不是 envelope namespace。
 > 2. §12/§21.1/§22 的“全量/增量等价”改为 **V2 全量 fold（同一 `event_seq` 排序语义）与增量的等价**；旧 V1 Rebuild 模型按业务时间排序，只作领域规则参照，不再声称逐字段等价。
 > 3. §10.2 明确读取接口为带身份绑定的 `POST /v2/query`，不提供仅凭全局 Bearer 的跨用户 GET 查询。
+>
+> **修订记录（Rev 3，2026-09-05，依据 Codex 复审）**：
+> 1. §7.2/§13：Queue 消息体固定为 `{taskId, taskType, attempt}`；D1 Outbox 与 Queue 的唯一业务关联键是确定性 `taskId`；`queue_message_id` 降级为 nullable 诊断字段（生产端 `Queue.send()` 不返回消息 ID，不得参与幂等、恢复与业务查询）；允许同一 `taskId` 重复发布，重复消费无副作用由 D1 状态、租约、游标与归档幂等保证；两个 DLQ 必须配置消费者。
+> 2. §15：每次 Worker invocation 根部只建一个 `SubrequestBudget`，传给该 invocation 内全部 D1、Queue、Drive、fetch 客户端；业务上限固定 40；每类外部调用执行前 consume；恢复器在 */5 cron 中预留 15 额度（V1 reconciler 先行不动）。
+> 3. §17：身份授权来自服务端凭据映射表 `rds2_credentials`（Bearer 凭据哈希 → userId），请求体 identity 字段仅作一致性核对，不作为授权依据；admin token 仅限初始化，不继承读取权限。
+> 4. §7.2：`rds2_business_events` 新增 `business_dedupe_key`（nullable）与部分唯一索引，服务端从 envelope 派生（当前仅 `resume-knowledge.answer-scored` 使用 `userId|localDate|questionKey`），同日首次评分由数据库约束与服务端派生保证，不依赖生产者自律。
+> 5. §7.2/§21：投影 CAS 用 BEFORE UPDATE 触发器把旧游标写入变成 SQL 错误使整个 batch 回滚；D1 真实性验证升级为 Miniflare/workerd 真 binding 集成测试（node:sqlite 适配器仅作快速单元测试）。
+> 6. §19.2：发布顺序固定为十步（本地测试→暗部署→合成用户→合成 canary→单客户端 MCP 切换→真实 algorithm canary→其他域→Skill/插件→一周稳定观察→二次确认关 V1）。
 
 ## 1. 本次改造要解决什么
 
@@ -205,17 +213,28 @@ flowchart TD
 |---|---|
 | `task_id` | 后台任务主键，可作为用户看到的 job/receipt 标识。 |
 | `task_type` | `project_event` 或 `archive_artifact`。 |
-| `event_seq` | 投影任务对应的业务事件；非对应类型时可为空。 |
-| `archive_delivery_id` | 归档任务对应的交付记录；非对应类型时可为空。 |
+| `event_seq` | 投影任务对应的业务事件；`project_event` 类型非空，`archive_artifact` 类型必须为空。 |
+| `archive_delivery_id` | 归档任务对应的交付记录；`archive_artifact` 类型非空，`project_event` 类型必须为空。 |
 | `state` | `pending`、`dispatching`、`queued`、`processing`、`completed`、`needs_attention`。 |
 | `attempt_count` | 已尝试次数。 |
 | `lease_owner`、`lease_until` | 防止两个 Worker 同时认领同一任务。 |
-| `queue_message_id` | 最近一次 Queue 回执，用于排障，不作为业务真相。 |
+| `queue_message_id` | nullable 诊断字段。生产端 `Queue.send()` 不返回消息 ID，本字段通常为空，仅在消费者侧排障时可选记录；不参与幂等、恢复与业务查询。 |
 | `last_error_code` | 机器可读的脱敏错误码。 |
 | `available_at` | 下一次允许重试的时间。 |
 | 时间字段 | 创建、更新、完成时间。 |
 
 事件接收时，`business_events` 行和对应的 `project_event` 行必须在同一个 D1 原子批次中成功或一起回滚。
+
+Outbox 表必须带类型-字段一致性 CHECK 约束，四类非法行（未知类型、两字段同时为空、同时存在、类型与字段不匹配）全部在建表层拒绝：
+
+```sql
+CHECK (task_type IN ('project_event', 'archive_artifact')),
+CHECK (
+  (task_type = 'project_event' AND event_seq IS NOT NULL AND archive_delivery_id IS NULL)
+  OR
+  (task_type = 'archive_artifact' AND archive_delivery_id IS NOT NULL AND event_seq IS NULL)
+)
+```
 
 #### `rds2_projections`
 
@@ -229,7 +248,7 @@ flowchart TD
 | `content_hash` | 检测相同内容和归档幂等。 |
 | `updated_at` | 投影更新时间。 |
 
-主键为 `(user_id, namespace, projection_name)`。投影更新必须采用游标条件或事务，较旧消费者不能覆盖较新投影。
+主键为 `(user_id, namespace, projection_name)`。投影更新的事务设计：UPDATE 语句不带 `last_event_seq = ?` 谓词，改由 BEFORE UPDATE 触发器在 `NEW.last_event_seq <= OLD.last_event_seq` 时 `RAISE(ABORT, 'stale_projection_write')`——旧游标消费者写入会变成 SQL 错误，整个 D1 batch 回滚，不存在“投影没更新但任务已完成”的部分副作用。
 
 #### `rds2_archive_deliveries`
 
@@ -308,7 +327,7 @@ flowchart TD
 | 同一业务作用域的 `eventKey` 已存在，新 `eventId/requestId` 再提交 | 返回 `already_recorded` 和首次事件回执，不覆盖首次得分 | 删除本次 SQLite 行并向用户说明首次结果仍有效 |
 | Queue 或 Worker 重复执行后台任务 | 依据 D1 游标、唯一键和任务状态变成无副作用重放 | 不产生第二个业务结果 |
 
-“同一道题同一自然日只记录第一次明确回答”由 `eventKey` 的业务作用域唯一约束实现；不能依靠客户端记忆，也不能让第二次回答覆盖第一条事件。
+“同一道题同一自然日只记录第一次明确回答”由服务端派生的 `business_dedupe_key` 唯一约束实现（V2 选择数据库约束方案，不依赖生产者自律）：Worker 对 `resume-knowledge.answer-scored` 事件从已校验 envelope 提取 `userId|localDate|questionKey` 派生去重键，写入 `rds2_business_events.business_dedupe_key`（nullable），配部分唯一索引；其他事件类型该列为空。Reducer 仍保留防御性去重。
 
 ## 10. 接收接口与回执语义
 
@@ -401,26 +420,30 @@ publicView(nextState) -> clientSafeSnapshot
 
 旧的全历史 rebuild 模型不能继续出现在在线热路径。等价语义定义为：对同一组事件，**按权威 `event_seq` 排序的 V2 全量 fold（一次性 apply 全部事件）必须与分成任意批次的增量 apply 结果逐字段一致**。这是 V2 自身的排序语义：`event_seq` 是接收顺序，迟到或回填事件的业务效果按接收顺序折叠，与 V1 按业务时间排序的 rebuild 结果可能不同。旧 V1 Rebuild 模型只作领域规则参照（correction、reviewVersion、同日首次评分等语义来源），不作为逐字段等价 Oracle；这些领域规则各自建立领域不变量测试。
 
-首个生产 canary 使用 `algorithm` 领域。稳定后依次覆盖 profile、interview 和 resume-knowledge。现有 correction、invalidation、同日首次评分、依赖顺序等领域规则必须在领域不变量测试中得到证明，不能因为改成增量就弱化。
+每个 Reducer 的 `state_json` 必须保留足够信息以撤销既有贡献（非单调修订：supersede/invalidate、更高 reviewVersion 替换、同作用域重放），不能只保存聚合计数；最小充分结构是已接受事件列表（按 event_seq 有序）加派生索引，聚合结果在 `publicView` 中从状态确定性重算。
+
+首个生产 canary 使用 `algorithm` 领域。稳定后依次覆盖 profile、interview 和 resume-knowledge。现有 supersede/invalidate、reviewVersion 替换、同日首次评分等领域规则必须在领域不变量测试中得到证明，不能因为改成增量就弱化。
 
 ## 13. Queue 与 D1 Outbox 的配合
 
-Queue 采用至少一次、可能乱序的事实模型。建议建立：
+Queue 采用至少一次、可能乱序的事实模型。必须建立：
 
-- 投影主队列，消费者 `max_batch_size=10`；
-- Drive 归档主队列，消费者 `max_batch_size=8`；
-- 两个对应的 Dead Letter Queue；
+- 投影主队列 `rds2-project`，消费者 `max_batch_size=10`；
+- Drive 归档主队列 `rds2-archive`，消费者 `max_batch_size=8`；
+- 两个 Dead Letter Queue `rds2-project-dlq`、`rds2-archive-dlq`，**各自也必须配置消费者**，按 `batch.queue` 路由，把消息体中的 `taskId` 对应的 Outbox 行置为 `needs_attention`；
 - 明确的 `max_retries` 和退避；
-- 每条消息只携带定位信息，不携带唯一业务真相。
+- 每条消息体固定为 `{ taskId, taskType, attempt }`，只携带定位信息，不携带唯一业务真相；
+- D1 Outbox 与 Queue 消息的唯一业务关联键是确定性 `taskId`；生产端 `Queue.send()` 不返回消息 ID，`queue_message_id` 只能作为 nullable 诊断字段，不参与幂等、恢复和业务查询。
 
 D1 Outbox 是恢复依据：
 
 - 发布 Queue 前用短租约认领任务；
-- 发布成功后记录 Queue message ID 和 `queued`；
+- 发布成功后置 `queued`（`queue_message_id` 保持 NULL 或仅存诊断值）；
 - 发布失败则释放租约并设置下一次 `available_at`；
-- 定时恢复器只取到期任务，使用有上限的小批量，不允许 `LIMIT 100 + Promise.all`；
+- **“发送成功、状态回写失败”不可避免**：此时恢复器无法确认消息是否已入队，只能重新发布相同 `taskId`，因此**同一 `taskId` 被重复发布是正常事实**；重复消费无副作用由 D1 状态机、租约、投影游标触发器和归档幂等键保证，不得设计或断言“不会重复发布”；
+- 定时恢复器只取到期任务，使用有上限的小批量，不允许 `LIMIT 100 + Promise.all`；在 `*/5` cron 中与 V1 reconciler 同一 invocation 顺序执行：V1 先行、行为不变，V2 恢复器预留 15 额度并用 try/catch 隔离，V2 失败不得阻止 V1；
 - 消费者崩溃后，过期租约可被回收；
-- 达到重试阈值转入 `needs_attention`，不得静默丢弃。
+- 达到重试阈值或进入 DLQ 转入 `needs_attention`，不得静默丢弃。
 
 ## 14. Drive V2 归档规则
 
@@ -451,7 +474,7 @@ Drive 投影快照可以保留多个不可变版本。在线读取只使用 D1 �
 
 ### 15.1 统一预算器
 
-所有会触发 Worker 外部绑定或网络访问的封装，在调用前必须通过统一 `SubrequestBudget` 申请额度。预算器至少提供：
+每次 Worker invocation 的入口根部只创建一个 `SubrequestBudget`，并把同一个实例传给该 invocation 内全部 D1、Queue、Drive、fetch 封装。预算器至少提供：
 
 ```text
 remaining()
@@ -460,18 +483,23 @@ assertWithinLimit()
 snapshotByCategory()
 ```
 
-业务硬上限为 40。额度不足时停止领取新对象，完成或安全释放已领取任务；不得先调用再记账，也不得通过捕获平台异常来判断是否超限。
+业务硬上限为 40，不得以平台内部服务额度可能更高为由放宽。`consume` 的类别至少包括：`d1`、`queue`、`drive_oauth`、`drive_list`、`drive_create`、`drive_upload`、`drive_read_meta`、`drive_read_content`、`redirect`、`fetch_other`。每个外部调用（含 D1 binding 调用、Queue send、Drive 每个 HTTP 请求、重定向）必须在执行前 consume；额度不足时停止领取新对象，完成或安全释放已领取任务（释放租约本身的 D1 成本也计入预算）；不得先调用再记账，也不得通过捕获平台异常来判断是否超限。
+
+Drive 原语的真实成本以源码为准：OAuth token 一次 fetch；`listChildren` 每页一次 GET；文件夹创建一次 multipart POST；JSON 上传一次；`readJson` 是 metadata + content 两次 GET；内容 readback 必须使用独立的 content-only 原语（一次 GET），该原语需要独立接口与“恰好一次请求”的测试；V1 `createJson`/`readJson` 行为不变。
 
 ### 15.2 每类调用的上限
 
 | Worker 调用类型 | 单批上限 | 允许的外部行为 | 业务上限 |
 |---|---:|---|---:|
-| `POST /v2/events` | 1 个事件 | 鉴权、D1 原子接收、至多一次 Queue 唤醒 | ≤ 10 |
+| `POST /v2/events` | 1 个事件 | 鉴权（含凭据哈希查表）、D1 原子接收、至多一次 Queue 唤醒 | ≤ 10 |
+| `POST /v2/query` | 1 个查询 | 鉴权、D1 投影/状态读取 | ≤ 10 |
+| `POST /v2/users/init` | 1 个身份 | admin 鉴权、D1 用户+凭据+空投影原子创建 | ≤ 10 |
 | 投影消费者 | 10 个新事件 | D1 读取/批处理、至多受控 Queue 唤醒；不访问 Drive | ≤ 20 |
-| Queue 恢复器 | 小批到期任务 | D1 认领并分批发布 Queue | ≤ 30 |
-| Drive 归档消费者 | 8 个对象 | 一次 token 获取、确定性目录解析、每对象精确查找/新建/readback | ≤ 40 |
+| Queue 恢复器（*/5 cron） | 5 个到期任务 | D1 认领并分批发布 Queue（每任务 3 次 binding：认领、发布、回写） | ≤ 15（预留，与 V1 reconciler 共存） |
+| `rds2-project-dlq` / `rds2-archive-dlq` 消费者 | 与主队列相同 | D1 按 `taskId` 置 `needs_attention` | ≤ 10 |
+| Drive 归档消费者 | ≤ 8 个对象（按剩余额度动态计算，认领按 `(userId, namespace)` 分组） | 一次 token、按组解析目录链、每对象精确查找/新建/content-only readback、释放租约 | ≤ 40 |
 
-实施计划必须用可注入假客户端统计真实调用次数，并覆盖最坏分支：8 个对象全部不存在、全部需要创建且全部 readback。任何测试路径只要超过 40 就失败。
+实施计划必须用可注入假客户端统计真实调用次数（同时统计 D1、Queue、Drive 与裸 fetch，不得只统计 fetch），并覆盖最坏分支。任何测试路径只要超过 40 就失败。多用户混合积压（8 个对象跨多个 `(userId, namespace)` 组）必须有独立最坏路径测试，验证按剩余额度自适应缩批并释放未执行租约。
 
 此外还需有生产指标：总调用数、按类别调用数、剩余额度、提前停止批次次数。日志不得包含 Bearer、OAuth token、完整 envelope、完整用户画像或 Drive 文件正文。
 
@@ -493,10 +521,13 @@ snapshotByCategory()
 ## 17. 身份与安全边界
 
 - `rds2_users.user_id` 使用权威 UUID，不以展示名或 Drive 文件夹名充当主键。
+- **身份授权来自服务端凭据映射**：新表 `rds2_credentials(credential_hash, user_id, created_at)`，`credential_hash` 为 Bearer 凭据的 SHA-256；请求到达时由凭据哈希查表派生权威 `user_id`，请求体中的 `identity.userId/displayName` 仅作一致性核对（不一致拒绝），**不得把请求体里的 userId 当作授权依据**；凭据仅由 admin 初始化入口签发并只返回一次明文。
+- admin token（`RDS2_ADMIN_TOKEN`）与普通用户凭据严格分离：admin 仅限 `POST /v2/users/init`，不得读取投影或事件状态；普通凭据不得初始化身份。
 - 展示名通过 NFKC 和 trim 生成 `name_key`，保持当前全局身份语义。
-- 客户端提供 userId 时必须核对，不能盲信；缺少可确认身份时停止事件写入。
+- 请求体提供 userId 时只作一致性核对，授权一律以服务端凭据派生的 userId 为准；凭据无法映射到用户时停止事件写入。
 - 身份注册与业务事件接收必须有明确契约；传输失败时不得擅自创建第二个用户。
 - Worker 写接口必须鉴权；Queue 消费只接受 Cloudflare Queue 绑定上下文，不暴露可伪造的公网同步入口。
+- 写入与读取的越权测试必须覆盖：用户 A 的凭据提交用户 B 的身份被拒绝；A 无法读取 B 的投影；A 无法查询 B 的 requestId/eventId；篡改 username、nameKey、userId 任一字段均不能越权。
 - 错误响应使用稳定、脱敏的机器错误码；详细异常只进入受控日志。
 - Drive、D1、Queue 凭证只通过 Worker secrets/bindings 注入，不写入仓库、回执或测试快照。
 
@@ -523,7 +554,18 @@ snapshotByCategory()
 
 ### 19.2 发布门
 
-建议的发布阶段是：完整绿色基线、V2 D1 表与暗部署、合成用户 canary（带身份初始化）、algorithm 单域 canary、本地 MCP/Skill 切换、其他领域逐个启用、稳定观察、最后关闭 V1 写入和 QStash。
+发布阶段固定为十步，顺序不得调整：
+
+1. 本地完整测试绿色；
+2. 暗部署，所有 V2 开关关闭；
+3. 创建合成用户（admin 初始化）；
+4. 合成用户全链路 canary（接收→投影→归档→读取）；
+5. 单客户端 MCP 切换到 V2（进程级 `RELIABLE_DRIVE_SYNC_WRITE_VERSION=v2`）；
+6. 真实 algorithm canary（namespace 白名单放行）；
+7. 其他领域逐个开启；
+8. Skill 文案与插件切换；
+9. 至少一周稳定观察；
+10. 用户二次确认后关闭 V1/QStash。
 
 每阶段必须可单独回滚。回滚通过功能开关和上一部署版本完成，不删除任何已经被 V2 接收的事件。已经接收 V2 事件后，不允许把同一业务事实自动改写到 V1。
 
@@ -551,16 +593,16 @@ snapshotByCategory()
 - 同一合法 envelope 重试任意次数，D1 只有一条业务事件并返回同一 receipt。
 - 任意三个 ID 冲突均得到确定响应，永久冲突不进入无限重试。
 - 事件和初始投影任务原子提交，不存在“有事件、无后续任务”。
-- Queue 重复、乱序、丢消息和消费者崩溃都不会丢事件或重复修改画像。
+- Queue 重复、乱序、丢消息和消费者崩溃都不会丢事件或重复修改画像；同一 taskId 重复发布后重复消费无副作用（投影只推进一次、归档对象只生成一份）。
 - 增量投影与按 `event_seq` 排序的 V2 全量 fold 在相同合法事件序列上结果逐字段等价。
 - 在线读取只访问 D1 投影，不扫描 Drive。
 - Drive 归档支持成功、重试、响应丢失恢复、同名异内容阻断和 DLQ/人工处理。
 
 ### 21.2 性能与限制
 
-- 任意 Worker 调用的计数不超过 40 个外部子请求。
+- 任意 Worker 调用的计数不超过 40 个外部子请求（含 D1、Queue、Drive、fetch 与重定向，由每 invocation 单一预算器统计）。
 - 事件提交成本不随用户历史事件总量增长。
-- 投影每批最多 10 个新事件，归档每批最多 8 个对象。
+- 投影每批最多 10 个新事件，归档每批对象数按剩余额度动态计算且上限 8。
 - 恢复器不再出现 `LIMIT 100 + Promise.all` 的无界并发模式。
 
 ### 21.3 数据与安全
@@ -576,6 +618,7 @@ snapshotByCategory()
 - Worker、Bridge、共享契约、Skill 契约和端到端测试全部通过。
 - 已知 Node v26 warning 断言已替换为行为测试。
 - 存在可重复运行的最坏子请求预算测试和生产合成 canary。
+- D1 真实性验证使用 Miniflare/workerd 真 binding 集成测试，至少覆盖：migration 应用、prepare/bind/run/first/all、batch 回滚、event+outbox 原子接收、投影 CAS 并发、本地持久化（重启后数据仍在）；node:sqlite 适配器仅作快速单元测试，不作为 D1 验证。
 - 每个发布阶段有进入条件、退出条件、监控窗口和可验证回滚命令。
 - 关闭 V1/QStash 前，V2 的接收、投影、归档和状态查询均已通过生产 canary。
 
@@ -583,18 +626,24 @@ snapshotByCategory()
 
 Codex 收到计划后至少检查：
 
-- 是否完整覆盖五张表以及表间原子边界；
-- 是否把 Queue 当作唤醒器而非业务真相；
+- 是否完整覆盖五张表以及表间原子边界（含 Outbox 类型-字段 CHECK 约束与 `business_dedupe_key` 约束）；
+- 是否把 Queue 当作唤醒器而非业务真相；Queue 设计是否不依赖生产端 message ID（消息体固定 `{taskId, taskType, attempt}`，D1 关联键为确定性 `taskId`）；
+- 是否明确允许同一 taskId 重复发布，并有“发布成功但状态回写失败后重复发布”的测试；
+- 四个队列（两个主队列 + 两个 DLQ）是否全部配置了消费者；
 - 是否为三个 ID 分别定义了相同重试与冲突测试；
 - 是否所有在线快照都来自 D1 增量投影；
 - 是否有任何路径仍会扫描 Drive 全历史；
-- 是否每个 Worker 入口都有最坏 40 子请求证明；
+- 是否每个 Worker 入口（含 query、init、DLQ 消费者、scheduled 恢复器）都有最坏 40 子请求证明，且预算统计覆盖 D1/Queue/Drive/fetch/重定向；
+- 游标 CAS 是否用触发器/让 batch 整体失败的方式保证旧消费者零副作用；
+- readAfter 是否携带 userId/namespace 范围；
+- 身份是否为凭据映射派生而非请求字段匹配；
 - 是否保存了当前六个未提交的 V1 热修文件；
 - 是否避免迁移、覆盖或删除 V1 数据；
-- 是否给每个领域 Reducer 安排 V2 全量 fold（`event_seq` 序）与增量等价测试，以及领域不变量测试；
+- 是否给每个领域 Reducer 安排 V2 全量 fold（`event_seq` 序）与增量等价测试、领域不变量测试，且 state_json 支持撤销既有贡献；
 - 是否严格区分 D1 接收、投影完成和 Drive 归档完成；
-- 是否包含暗部署、canary、状态观测、DLQ、人工恢复和回滚；
-- 是否更新 `my-chatgpt-mcp` 与 `my-chatgpt-skills` 两个仓库的契约，而非只改 Worker。
+- 是否包含暗部署、canary、状态观测、DLQ、人工恢复和回滚，且发布顺序与 §19.2 十步一致；
+- 是否更新 `my-chatgpt-mcp` 与 `my-chatgpt-skills` 两个仓库的契约，而非只改 Worker；
+- V1/V2 cron 共存方式是否明确（顺序、预算、隔离、开关关闭时 V1 逐字节不变）。
 
 任何一项缺失，都应先退回计划修订，不进入实现。
 
