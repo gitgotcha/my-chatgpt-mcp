@@ -1,0 +1,44 @@
+// Single per-invocation budget ledger (Rev 6 addendum §9). Every entry point
+// creates exactly one budget; D1 executions, Queue sends and HTTP fetches are
+// counted by the io wrappers in invocation-io.js, always before the outbound
+// call is issued, so a rejected call causes zero side effects. Failed calls
+// still count because the consume happened first.
+
+export const BUDGET_CATEGORIES = new Set(["d1", "queue", "http"]);
+
+// Business total per invocation. The product hard boundary is 50; the business
+// cap is intentionally lower so failure bookkeeping stays inside 50 even when
+// an entry spends its whole quota. Entry-specific quotas (write 20, query 12,
+// projection 24, archive 16, recovery 32, dlq 8) are passed as `limit` by the
+// entry points and must never exceed this value.
+export const BUSINESS_SUBREQUEST_CAP = 40;
+export const PRODUCT_HARD_CAP = 50;
+
+export function createBudget(limit) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > PRODUCT_HARD_CAP) {
+    throw new Error("invalid_budget_limit");
+  }
+  let used = 0;
+  const entries = [];
+  return {
+    consume(category, count = 1) {
+      if (!BUDGET_CATEGORIES.has(category)) throw new Error("unknown_budget_category");
+      if (!Number.isInteger(count) || count < 1) throw new Error("invalid_budget_count");
+      if (used + count > limit) {
+        const error = new Error("budget_exhausted");
+        error.code = "budget_exhausted";
+        error.budget = { limit, used, requested: count, category };
+        throw error;
+      }
+      used += count;
+      entries.push({ category, index: used - count + 1, count });
+    },
+    remaining: () => limit - used,
+    snapshot: () => ({
+      limit,
+      used,
+      remaining: limit - used,
+      entries: entries.map((entry) => ({ ...entry }))
+    })
+  };
+}
