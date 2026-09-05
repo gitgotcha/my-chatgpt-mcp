@@ -29,6 +29,21 @@
 > 9. §17：admin token 作为期望值依赖注入（禁止与字符串字面量比较）；凭据生成使用 Web Crypto（`crypto.getRandomValues`）；凭据语义锁定为**追加签发**（旧凭据保留有效），`status/revoked_at` 为未来轮换预留，轮换必须与签发同事务。
 > 10. §21：新增十六条 Revision 4 验收门（真实 Miniflare 异步 D1、四唯一作用域并发、每类型一正一反样本、身份初始化零残留、10 事件 10+1 归档、精确任务完成、发布-回写失败全链路、queued 恢复、全通道预算、并发认领、状态上限、本地 Outbox 重启/超时/退避/阻塞/重放、无 Content-Length 413、暗部署全闭、逐 cron 预算、全绿门）。
 > 11. D1 接口模型：全部 Repository/Service/Dispatcher/Recovery/Projection/Archiver 调用链 async/await；`batch()` 接收绑定后的语句对象数组；UPDATE 影响行数读取 `result.meta.changes`；`src/rds2/*.js` 到仓库根 `shared/` 的相对路径为 `../../../../shared/…`。
+>
+> **修订记录（Rev 5，2026-09-05，依据 Codex 四审退回意见，编号与四审一致）**：
+> 1. §15.1 预算器总量口径：`consume(category, count)` 必须同时满足"该类别余量充足"与"全类别合计 + count ≤ 40"两个条件才放行。失败样本：已消费 `d1=38` 后 `consume("queue")` 单类别检查通过，但合计 39→40 后再 `consume("d1")` 使合计达 41。预期行为：任何使合计超过 40 的 consume 抛出 `subrequest_budget_exceeded`，不得只查单类别。
+> 2. §15.1/§15.3 归档预算支撑：OAuth token POST 本身必须经 `budgetFetch` 计入 `drive_oauth`；tokenProvider 在同一 invocation 内 memoize（与 `google-drive.js:114` 仓库层 `tokenPromise ??=` 语义一致）；`budgetFetch` 固定 `redirect: "manual"`，每次手动跟随前计 `redirect`；一切计数唯一收口在预算化封装，禁止实现侧再维护平行计数器与 `budgetD1` 重复记账。
+> 3. §3 决策 15/§15.1 D1 适配器语句对象：本地适配器为每次 `prepare` 创建私有包装语句对象（持有 sql 与绑定参数，不复用、不伪装成真实 D1PreparedStatement 之外的双套接口）；`all()` 必须返回 `{ results: [...] }` 形状；`batch(statements)` 顺序执行并返回逐语句结果数组；`run()` 返回含 `meta.changes` 的对象；同一接口断言套件同时跑 node:sqlite 适配器与 Miniflare 真 binding。
+> 4. §17 身份初始化错绑：注册/解析必须双向核对——`name_key → user_id` 命中后反向校验该行 `name_key` 与本次入参规范化结果一致，签发凭据前再校验该凭据哈希未绑定其他 `user_id`。失败样本：两个展示名经 NFKC 折叠后产生相同 `name_key`，正向解析把新凭据绑到旧用户的 `user_id`。预期行为：任一方向不一致即 `identity_conflict` 拒绝，初始化 batch 零残留。
+> 5. §10/§17 协议兼容冲突：协议事实分层冻结——envelope `identity` 仅含 `userId/username`（`protocol.js:28` `IDENTITY_FIELDS`）；`system.user.resolve` 的 payload 要求 `displayName` 且不允许任何其他字段（`protocol.js:36,404`），`payload.username` 写法必被 `invalid_payload` 拒绝，全部作废；事件类型分类固定为"V1 兼容全集 18 种"，V2 不新增事件类型（V2 是存储架构版本，不是协议版本）。
+> 6. §9 幂等矩阵闭环：矩阵样本修正；补充投影期冲突闭环——同 `eventKey` 不同内容的冲突在接收期由矩阵第 4 条拦截，若历史数据使投影期重建遇到 `event_key_conflict`（`generic-profile-model.js:58`），该任务必须转 `needs_attention` 并保留现场，禁止静默去重继续。
+> 7. §12 首次投影启动：投影引擎读不到投影行时必须调用 `emptyProjection(identity)` 生成初始状态，禁止把 `{}` 直接传给 reducer；序号与游标全部以 `(user_id, namespace, projection_name)` 为作用域，禁止全局 `lastSeq+1` 跨用户推进；`publicView` 必须从最小充分状态确定性重算并回填 `userId/username`，禁止输出 `userId: null`。
+> 8. §13/§14 Queue 批处理统一：全部 Queue 消费者统一 batch 级签名 `async queue(batch, env, ctx)`，按 `batch.queue` 路由投影/归档/DLQ；唤醒一律经 Dispatcher；恢复器调用与 Dispatcher 相同的 `.run()` 接口；重试阈值在 Dispatcher 内接线为 `needs_attention`。
+> 9. §14 归档失败覆盖：归档结果三集合分离——`delivered`、`needs_attention`、`released`（未执行已释放租约）互不包含；完成语句按精确 `archive_delivery_id` 逐条 UPDATE 且谓词携带 `lease_owner`；每行 delivery 只对应一个归档对象，`drive_file_id` 不得复写多个对象；`needs_attention` 行不得被后续 batch 的完成语句覆盖为 `delivered`。
+> 10. §14/§15.1/§15.3 Drive 原语签名：冻结现有 `googleUpload(env, parentId, name, content, mimeType, fetchImpl, tokenProvider)` 签名（`google-drive.js:71`，第五参是 `mimeType`），V2 不改变 V1 原语行为；废弃"上传时自写 appProperties 哈希、list 带回比对"方案（自写元数据不构成内容证据）；重放一致性改为 content-only readback 哈希校验，重放成本由 1 修正为 2（查找 1 + readback 1），全新对象 3 不变，最坏合计仍为 38 ≤ 40。
+> 11. §12 Reducer 状态保真：四域最小充分状态细化到字段级映射（唯一事实来源为四个 reducer 源码）：generic-profile 一个事件可携带多条 `observations[]`（`generic-profile-contract.js:47`，每条固定 6 字段），状态须按 `(dimensionKey, subjectKey)` 分组保留条目序列以支撑"最近负向后两个独立 sourceRef 正向才关闭弱点"（`generic-profile-model.js:144-168`）；interview 边界校验后 `profileChanges` 仅 8 字段（`protocol.js:76-78`），`statusOf` 有效输入只有 `outcome`，关闭需 `passingSessionIds≥2 && passingVariantIds≥2`；resume-knowledge 评分依赖 `total`（四维加总校验）与 `feedback.issues/issueCategories`，mastery 按 `0.6·new + 0.4·prev` 混合，缺 questionBank 必须输出 `resume_required`；数组型状态字段设每键容量上限，超限转 `needs_attention`。
+> 12. §11/§10.1 本地 Outbox 运行时错误：`node:sqlite` 的 `DatabaseSync` 没有 `.transaction()`（Node 22/26 均实测 `typeof db.transaction === "undefined"`；V1 `local-outbox.mjs` 全部使用 `exec`），V2 多写操作必须用显式 `exec("BEGIN IMMEDIATE")` / `exec("COMMIT")` + 异常时 `exec("ROLLBACK")`；`markSending` 的 UPDATE 谓词必须含 `state='pending' AND available_at <= now`；退避表下标从 0 开始（首档不得直接跳 60s）；`blocked` 行不得被待发查询返回；`persistence.localOutbox: "acknowledged"` 只能出现在 Worker 完成 D1 原子提交后返回的 durable receipt 中，本地发送前不得预构造。
+> 13. §19.2/§21 发布与自检可执行：runbook 中 PowerShell 脚本必须以 `powershell -File`/`pwsh -File` 调用（禁止 `node xxx.ps1`）；发布前置步骤显式补齐——创建四条 Cloudflare Queue（当前 `wrangler.toml` 无 `[[queues]]` 段）、应用 D1 迁移、启用 V2 恢复器 cron；回滚动作是"恢复上一部署版本并关闭功能开关"，删除与"空白名单 fail-closed 503"矛盾的"清空白名单"表述。
 
 ## 1. 本次改造要解决什么
 
@@ -74,7 +89,7 @@ Workbuddy 应基于本文件另行生成可执行实施计划，不能直接实�
 12. 所有后台处理都按“至少一次投递、允许乱序、业务结果恰好一次”设计。
 13. 用户身份先在 D1 明确注册或解析；事件接收热路径不得扫描 Drive 来判断身份。
 14. 旧数据不迁移。V1 冻结为历史只读数据源，V2 从显式初始化后的新状态开始。
-15. D1 接口模型与真实 Cloudflare D1 一致：`first/all/run/batch` 全部异步；`batch()` 接收绑定后的语句对象数组；UPDATE 影响行数读 `result.meta.changes`；本地 SQLite 适配器模拟同一套 D1 API，不创造第二套接口。
+15. D1 接口模型与真实 Cloudflare D1 一致：`first/all/run/batch` 全部异步；`batch()` 接收绑定后的语句对象数组；`all()` 返回 `{ results: [...] }` 形状；`run()` 返回含 `meta.changes` 的对象；UPDATE 影响行数读 `result.meta.changes`。本地 SQLite 适配器模拟同一套 D1 API，不创造第二套接口：适配器为每次 `prepare` 生成私有包装语句对象（持有 sql 文本与绑定参数，绑定后不可再绑定），`batch` 顺序执行并返回逐语句结果数组；同一套接口断言套件（形状、异步、`meta.changes`、batch 回滚）必须同时通过 node:sqlite 适配器与 Miniflare 真 binding。
 16. V2 恢复器使用独立 cron invocation（`2-57/5 * * * *`），与 V1 三条 cron 无共享预算；V1 cron 表达式与行为逐字节保留。
 
 ## 4. 当前 V1 基线和受保护内容
@@ -267,8 +282,8 @@ CHECK (
 | `user_id`、`namespace`、`projection_name` | 共同确定一个用户的一种投影。 |
 | `projection_version` | 投影数据格式版本。 |
 | `last_event_seq` | 已经处理到哪个权威事件游标。 |
-| `state_json` | Reducer 下次增量更新所需的完整内部状态。 |
-| `public_view_json` | 提供给 Skill/客户端读取的最小公开快照。 |
+| `state_json` | Reducer 下次增量更新所需的完整内部状态；身份初始化写入的初始行为 NULL，引擎首次处理时经 `emptyProjection(identity)` 生成（§12 首次启动规则）。 |
+| `public_view_json` | 提供给 Skill/客户端读取的最小公开快照；初始行为 NULL，首次投影运行后由 `publicView` 重算回填（含 `userId/username`）。 |
 | `content_hash` | 检测相同内容和归档幂等。 |
 | `updated_at` | 投影更新时间。 |
 
@@ -299,7 +314,8 @@ CHECK (
 | `artifact_json`、`artifact_hash` | 已冻结的待归档内容及哈希。 |
 | `drive_path` | 确定性目标路径。 |
 | `state` | `pending`、`delivering`、`delivered`、`needs_attention`。 |
-| `drive_file_id` | 成功后保存的 Drive 文件 ID。 |
+| `lease_owner`、`lease_until` | 归档认领租约；完成 UPDATE 谓词携带 `lease_owner`，防止旧消费者的迟到完成覆盖新租约状态（意见 9）。 |
+| `drive_file_id` | 成功后保存的 Drive 文件 ID；每行只对应一个归档对象，不复写多个对象。 |
 | `attempt_count`、错误和时间字段 | 重试与审计。 |
 
 投影事务应同时写入最新投影、归档对象和 `archive_artifact` Outbox 任务。归档器只上传 `artifact_json`，不得在上传时重新构建业务内容。
@@ -377,6 +393,8 @@ CHECK (
 
 矩阵判定优先级：第 2/3 条冲突 → 第 6 条 corrupt → 第 1 条 exact_retry → 第 4/5 条 already_recorded → 新事件。仅命中 `eventId` 且内容一致时属于第 1 条（同一事实的幂等重放，返回原 receipt），不得判为新事件。
 
+投影期冲突闭环：以上矩阵覆盖接收期。若合法历史数据在投影期重建时仍触发 `event_key_conflict`（例如账本中存在同 `eventKey` 不同内容的极端人工修复现场），投影任务必须转 `needs_attention` 并保留冲突两端的 `event_id` 供人工裁决，禁止静默去重后继续——静默继续会让冲突事实永久丢失（对应 `generic-profile-model.js` 重建期的 `event_key_conflict` 抛出语义）。
+
 “同一道题同一自然日只记录第一次明确回答”由服务端派生的 `business_dedupe_key` 唯一约束实现（V2 选择数据库约束方案，不依赖生产者自律）：Worker 对 `resume-knowledge.answer-scored` 事件从已校验 envelope 提取 `userId|localDate|questionKey` 派生去重键，写入 `rds2_business_events.business_dedupe_key`（nullable），配部分唯一索引；其他事件类型该列为空。Reducer 仍保留防御性去重。
 
 ## 10. 接收接口与回执语义
@@ -415,7 +433,7 @@ CHECK (
 }
 ```
 
-`cloud_accepted` 只表示 D1 已经原子保存事件与任务。任何客户端、Skill 或日志都不得把它描述为“Drive 已同步”或“快照已更新”。
+`cloud_accepted` 只表示 D1 已经原子保存事件与任务。任何客户端、Skill 或日志都不得把它描述为“Drive 已同步”或“快照已更新”。`persistence.localOutbox: "acknowledged"` 只允许由 Worker 在 D1 原子提交成功后返回的 durable receipt 携带；本地客户端在发送请求前不得预构造含有该字段的回执对象。
 
 ### 10.2 读取接口
 
@@ -451,7 +469,11 @@ V2 必须补强：
 - 网络超时、5xx 和临时限流恢复为 pending，并采用有上限的退避；
 - “D1 已提交但响应丢失”时，用同一三个 ID 重试并取得原回执；
 - 接收成功后可删除 payload 行，但必须保留最小本地 receipt 记录供排障；
-- 抽取 Worker 和本地共同使用的纯 V2 协议模块，避免两端校验规则漂移。
+- 抽取 Worker 和本地共同使用的纯 V2 协议模块，避免两端校验规则漂移；
+- 多写操作使用显式事务：`exec("BEGIN IMMEDIATE")` 开始、全部成功后 `exec("COMMIT")`、任一异常时 `exec("ROLLBACK")`——`node:sqlite` 的 `DatabaseSync` 没有 `.transaction()` 方法（Node 22/26 均实测 `typeof db.transaction === "undefined"`），禁止按 better-sqlite3 的习惯调用；
+- `markSending` 的原子认领 UPDATE 谓词必须同时含 `state='pending'` 与 `available_at <= now`，以影响行数 = 1 为认领成功；未认领成功的行本次 flush 不得发送；
+- 退避表下标从 0 开始，首次失败取第一档，不得直接跳 60s 档；
+- 待发查询只返回 `state='pending' AND available_at <= now` 的行，`blocked` 行不得出现在任何待发或重试查询结果中。
 
 旧本地 V1 Outbox 文件不迁移、不删除。V2 默认使用独立的 `outbox-v2.sqlite`；正式切换前应先让用户选择处理仍处于 pending 的 V1 行，不能静默遗弃。
 
@@ -465,6 +487,8 @@ applyEvent(currentState, validatedEvent) -> nextState
 publicView(nextState) -> clientSafeSnapshot
 ```
 
+首次启动规则：`emptyProjection(identity)` 是唯一合法的初始状态来源——投影引擎读不到投影行、或读到的行 `state_json` 为 NULL（身份初始化写入的初始行）时必须调用它，禁止把 `{}` 或其他临时字面量传给 `applyEvent`；身份初始化时已为每个 namespace 写入初始投影行（§17），引擎侧的空行兜底是同一契约的防线。游标与序号全部以 `(user_id, namespace, projection_name)` 为作用域，禁止用全局最大 `event_seq` 或共享计数器跨用户推进；`publicView` 必须从最小充分状态确定性重算并回填 `userId/username`，任何路径都不得输出 `userId: null` 的公开视图。
+
 投影器必须：
 
 1. 按 `(user_id, namespace, projection_name)` 读取当前投影和 `last_event_seq`；
@@ -476,10 +500,11 @@ publicView(nextState) -> clientSafeSnapshot
 
 `state_json` 必须是最小充分状态，禁止保存完整事件数组（否则等于把“扫描 Drive 全历史”换成“每次读取并重写全历史 JSON”，状态大小、CPU、序列化与 D1 读写量仍随历史无限增长）：
 
-- `algorithm`：按 `eventKey` 的去重索引（key → `{seq, outcome, topic, problemId}` 等最小字段）+ 主题聚合计数 + 当前头部；
-- `profile`：按 `eventKey` 的最小贡献记录（`seq/action/outcome/dimension/subject/targets/observedAt`）+ active/inactive 关系；
-- `interview`：每 session 只保存选中 review 的最小字段副本；
-- `resume-knowledge`：当前有效 `resumeVersion` 对应的最新 question bank + 按 `localDate|questionKey` 的评分索引；
+- `algorithm`（事实来源 `algorithm-profile-model.js`）：按 `eventKey` 首见去重索引 + 每 topic 的 `{attempts, negative, positive, neutral, lastOutcome, lastObservedAt, problemIds, eventKeys}` 聚合 + `latestByProblem` 最新结局索引（支撑 `pendingProblemIds`）+ `currentTopic`；`weaknesses`（`negative>0` 且按 negative 降序）在 `publicView` 中从聚合确定性重算，不入状态；
+- `profile`（事实来源 `generic-profile-contract.js`/`generic-profile-model.js`）：一个事件可携带多条 `observations[]`（每条固定 `dimensionKey/subjectKey/outcome/evidence/confidence/sourceRef` 六字段）；状态按 `eventKey` 保存最小事件副本（`seq/action/observedAt/targetEventKey` + observations 最小表示）与 active/inactive 关系，并按 `(dimensionKey, subjectKey)` 建立分组索引；`stableStrengths/openWeaknesses/improvingSignals/observations` 四分类（含“最近负向后两个独立 sourceRef 正向才关闭弱点”规则）在 `publicView` 中重算；
+- `interview`（事实来源 `profile-model.js` + `protocol.js`）：每 session 保存选中 review（最高 `reviewVersion`）的最小字段副本（`completedAt/evidenceConfidence/applyProfileChanges/profileChanges`）；边界校验后 `profileChanges` 仅含 `kind/outcome/domain/weaknessId/variantId/competencyId/title/evidenceRefs` 八字段，`statusOf` 的有效输入只有 `outcome`；每 weakness 保存 `{status, passingSessionIds, passingVariantIds, evidenceRefs, confidence, title}`，关闭规则 `passingSessionIds≥2 && passingVariantIds≥2`；`generalCompetencies` 按 competencyId 保存 `{status, evidenceRefs, confidence}`；
+- `resume-knowledge`（事实来源 `resume-knowledge-model.js`）：当前有效 `resumeVersion` 的最新 question bank 最小副本 + 按 `localDate|questionKey` 的评分索引（每条含 `total/scoredAt/eventId/eventKey/feedback.issues/feedback.issueCategories`）；`questionMastery` 按 questionKey 保存 `{masteryScore, lastScoredLocalDate, attempts, lastTotal, lastEventId}`，mastery 混合 `0.6·new + 0.4·prev`；`knowledgePoints/coverage/weaknesses/nextReview/recentIssues` 在 `publicView` 中重算；缺少 question bank 时必须输出 `resume_required` 而非猜测空画像；
+- 数组型状态字段（`problemIds/eventKeys/sourceRefs/passingSessionIds/…`）设每键容量上限，写入前断言，超限转 `needs_attention`（`state_limit_exceeded`），不得静默截断；
 - 完整历史只存在于不可变的 `rds2_business_events` 账本，不复制进 `state_json`。
 
 `state_json` 序列化后上限 **2 MiB**：投影引擎写入前断言长度，超限时该任务转 `needs_attention`（`state_limit_exceeded`），不得静默截断。增长测试必须证明正常业务序列下状态不进入超限区间；若未来逼近上限，用不可变账本离线 fold 重建（人工触发，不属在线热路径）。聚合结果在 `publicView` 中从最小充分状态确定性重算。
@@ -499,6 +524,7 @@ Queue 采用至少一次、可能乱序的事实模型。必须建立：
 - 两个 Dead Letter Queue `rds2-project-dlq`、`rds2-archive-dlq`，**各自也必须配置消费者**，按 `batch.queue` 路由，把消息体中的 `taskId` 对应的 Outbox 行置为 `needs_attention`；
 - 明确的 `max_retries` 和退避；
 - 每条消息体固定为 `{ taskId, taskType, attempt }`，只携带定位信息，不携带唯一业务真相；
+- 消费者签名统一为 batch 级 `async queue(batch, env, ctx)`：单入口按 `batch.queue` 路由到投影、归档或 DLQ 处理器，所有处理器共享同一签名与预算器构造方式；投影侧与归档侧不得各自定义不同形态（如一个逐消息、一个按 batch）的 handler；
 - D1 Outbox 与 Queue 消息的唯一业务关联键是确定性 `taskId`；生产端 `Queue.send()` 不返回消息 ID，`queue_message_id` 只能作为 nullable 诊断字段，不参与幂等、恢复和业务查询。
 
 D1 Outbox 是恢复依据，状态机规则（全部真实 D1 可验证）：
@@ -507,6 +533,7 @@ D1 Outbox 是恢复依据，状态机规则（全部真实 D1 可验证）：
 - Dispatcher 必须**自己原子认领** `pending` 任务（按 taskId 单条条件 UPDATE…RETURNING），不得假设调用者已认领；只发送成功置为 `dispatching` 的任务；
 - 发布成功后置 `queued` 并写 `queued_at`（`queue_message_id` 保持 NULL 或仅存诊断值）；`markQueued` 只接受 `dispatching` 行，对 `queued` 行重放不得调用它；
 - 发布失败则释放租约并设置下一次 `available_at`；
+- 所有唤醒（接收后即时唤醒与恢复器补唤醒）一律经 Dispatcher 认领发布，禁止处理器之间直接互相 `Queue.send()`；恢复器复用 Dispatcher 的同一 `.run()` 入口，只替换任务来源；`attempt_count` 达到阈值或消息进入 DLQ 时置 `needs_attention` 的接线必须在 Dispatcher/DLQ 消费者内完成，不得只写在文档；
 - **“发送成功、状态回写失败”不可避免**：此时保留租约让行留在 `dispatching`，租约过期被回收后相同 `taskId` 会重新发布；因此**同一 `taskId` 被重复发布是正常事实**；重复消费无副作用由 D1 状态机、租约、投影游标触发器和归档幂等键保证，不得设计或断言“不会重复发布”；
 - 状态更新只认实际影响行数：D1 语义下读取 `result.meta.changes`，更新影响 0 行必须视为失败；直接发送 `processing/needs_attention/completed` 行是非法状态迁移，必须显式拒绝（`illegal_state_transition`）；
 - **陈旧 `queued` 回收**：恢复器额外回收 `state='queued' AND queued_at <= now - 10 分钟` 的行复位为 `pending`（Queue 消息丢失后任务可重新发布，不得永久失联）；
@@ -533,12 +560,13 @@ DriveRoot/my-chatGPT-skills-v2/
 - **Queue handler 根部创建一个共享预算器**；从本批消息取得精确 `taskId` 集合；
 - **原子认领**本批消息对应的 Outbox 行（单条条件 `UPDATE…RETURNING` 置 `processing`）与对应 delivery（置 `delivering`）；未被本批认领的 pending 行**不得顺带扫描处理**；
 - 按 `(userId, namespace)` 对已认领对象分组，每组复用 token 与目录解析结果；
-- 每个 artifact 更新**自己的** delivery 状态与自己的 archive task；不得把循环中处理的对象都记到触发任务头上；
+- 每个 artifact 更新**自己的** delivery 状态与自己的 archive task；不得把循环中处理的对象都记到触发任务头上；完成 UPDATE 按精确 `archive_delivery_id` 逐条执行且谓词携带 `lease_owner`（防止旧消费者的完成语句覆盖新租约的处理中状态）；
+- 归档结果三集合分离：`delivered`、`needs_attention`、`released`（预算不足未执行并已释放租约）互不包含；完成语句谓词限 `state='delivering'`，`needs_attention` 行不得被后续 batch 覆盖为 `delivered`；每行 delivery 只对应一个归档对象，一次投影产生的 N+1 个对象各占独立 delivery 行与独立 `drive_file_id`；
 - 已处理对象逐条 `message.ack()`；预算不足时未执行对象显式释放租约并调用 `message.retry()`，不得静默吞掉；
 - 同名精确查找返回多个文件时进入 `needs_attention`（`drive_ambiguous_name`），不得任选一个；
 - 文件名、父目录、内容和哈希在 D1 `archive_deliveries` 中先冻结；上传时只处理冻结内容；`artifact_hash` 针对冻结的规范字节（`artifact_json` 字符串本身）计算，不得依赖 `JSON.parse → JSON.stringify` 后碰巧得到同一字节序列；
 - 重试先按父目录和精确文件名查询，不扫描历史事件集合；
-- 已存在且哈希一致视为成功重放；已存在但哈希不同进入 `needs_attention`，禁止覆盖；
+- 重放一致性必须经内容校验：按父目录与精确文件名命中后，对该文件做 content-only readback 并重算 SHA-256 与冻结 `artifact_hash` 比对（自写的 appProperties 等元数据不构成内容证据，不得作为比对依据）；已存在且内容哈希一致视为成功重放；已存在但哈希不同进入 `needs_attention`，禁止覆盖；
 - 新建后做精确 readback（content-only，恰好一次 GET）和哈希校验；
 - 目录层级冻结为：`<V2 根>/users/<userId>/<namespace>/{events,snapshots}/`（V2 根目录 ID 由 secret `RDS2_DRIVE_ROOT_FOLDER_ID` 注入，不在 invocation 内解析 V2 根本身）；
 - 同一 Worker 调用内复用 OAuth token 和已解析的确定性父目录；
@@ -559,9 +587,11 @@ assertWithinLimit()
 snapshotByCategory()
 ```
 
-业务硬上限为 40，不得以平台内部服务额度可能更高为由放宽。`consume` 的类别至少包括：`d1`、`queue`、`drive_oauth`、`drive_list`、`drive_create`、`drive_upload`、`drive_read_meta`、`drive_read_content`、`redirect`、`fetch_other`。每个外部调用（含 D1 binding 调用、Queue send、Drive 每个 HTTP 请求、重定向）必须在执行前 consume；额度不足时停止领取新对象，完成或安全释放已领取任务（释放租约本身的 D1 成本也计入预算）；不得先调用再记账，也不得通过捕获平台异常来判断是否超限。
+业务硬上限为 40，不得以平台内部服务额度可能更高为由放宽。`consume` 必须同时通过两项检查才放行：该类别本次扣减后不为负、且全类别合计（含本次 count）不超过 40——任何使合计超过 40 的 `consume` 抛出 `subrequest_budget_exceeded`；只查单类别余量的实现视为缺陷。`consume` 的类别至少包括：`d1`、`queue`、`drive_oauth`、`drive_list`、`drive_create`、`drive_upload`、`drive_read_meta`、`drive_read_content`、`redirect`、`fetch_other`。每个外部调用（含 D1 binding 调用、Queue send、Drive 每个 HTTP 请求、重定向）必须在执行前 consume；额度不足时停止领取新对象，完成或安全释放已领取任务（释放租约本身的 D1 成本也计入预算）；不得先调用再记账，也不得通过捕获平台异常来判断是否超限。
 
 `budgetD1` 必须同时支持真实 D1 的三种调用形态，每种都计入 `d1` 类别：`prepare(sql).first()/all()/run()`（无绑定）、`prepare(sql).bind(...params).first()/all()/run()`、`batch(D1PreparedStatement[])`（一次 batch 计 1，因为是一次网络往返）。UPDATE 影响行数一律读 `result.meta.changes`。
+
+计数唯一收口在预算化封装：OAuth token POST 本身经 `budgetFetch` 计入 `drive_oauth`；tokenProvider 在同一 invocation 内 memoize（与现有仓库层 `tokenPromise ??=` 语义一致），不得每次调用重新获取；`budgetFetch` 固定 `redirect: "manual"`，每次手动跟随重定向前计入 `redirect`；实现侧禁止再维护平行计数器（与 `budgetD1` 等封装重复记账）。
 
 Drive 原语的真实成本以 `google-drive.js` 源码为准：OAuth token 一次 fetch；`googleUpload`（multipart，含文件夹创建与 JSON 上传）一次 fetch；`listChildren`/精确同名查找每页一次 GET；`readJson` 是 metadata + content 两次 GET；内容 readback 必须使用独立的 content-only 原语（一次 GET），该原语需要独立接口与“恰好一次请求”的测试；V1 `createJson`/`readJson` 行为不变。重定向必须在每次跟随前计入 `redirect`。
 
@@ -573,7 +603,7 @@ V2 恢复器**不与 V1 cron 共享 invocation**。`wrangler.toml` 的 crons 数
 
 目录层级：`<V2 根（secret 注入，不解析）>/users/<userId>/<namespace>/{events,snapshots}/`。每组的冷目录解析 = 5 次 list + 5 次 create（users、`<userId>`、`<namespace>`、`events`、`snapshots` 各级查找 1 次、缺失创建 1 次），热目录（invocation 内已解析）为 0。
 
-每个归档对象的成本 = 精确同名查找 1（list q）+ 新建上传 1（multipart）+ content-only readback 1 = **3**（已存在且哈希一致的重放 = 1，无上传无回读）。
+每个归档对象的成本 = 精确同名查找 1（list q）+ 新建上传 1（multipart）+ content-only readback 1 = **3**；重放（文件已存在）也必须 content-only readback 校验内容哈希 = 查找 1 + readback 1 = **2**（无上传）。最坏合计仍为全部全新对象的 38 ≤ 40。
 
 单组 8 个全新对象的最坏路径（全部冷）：
 
@@ -610,7 +640,9 @@ V2 恢复器**不与 V1 cron 共享 invocation**。`wrangler.toml` 的 crons 数
 ## 17. 身份与安全边界
 
 - `rds2_users.user_id` 使用权威 UUID，不以展示名或 Drive 文件夹名充当主键。
-- **身份授权来自服务端凭据映射**：新表 `rds2_credentials(credential_hash, user_id, created_at)`，`credential_hash` 为 Bearer 凭据的 SHA-256；请求到达时由凭据哈希查表派生权威 `user_id`，请求体中的 `identity.userId/displayName` 仅作一致性核对（不一致拒绝），**不得把请求体里的 userId 当作授权依据**；凭据仅由 admin 初始化入口签发并只返回一次明文。
+- **身份授权来自服务端凭据映射**：新表 `rds2_credentials(credential_hash, user_id, created_at)`，`credential_hash` 为 Bearer 凭据的 SHA-256；请求到达时由凭据哈希查表派生权威 `user_id`，请求体中的 `identity.userId/username` 仅作一致性核对（不一致拒绝），**不得把请求体里的 userId 当作授权依据**；凭据仅由 admin 初始化入口签发并只返回一次明文。
+- 协议事实分层冻结：envelope `identity` 仅含 `userId/username` 两字段（`protocol.js` `IDENTITY_FIELDS`），不存在 `identity.displayName`；`displayName` 只出现在 `system.user-registered` 与 `system.user.resolve` 的 payload（后者不允许任何其他 payload 字段），计划、测试与实现中的 `payload.username` 写法一律作废；V2 不新增事件类型，18 种 V1 类型全部按“V1 兼容全集”对待。
+- 身份注册与解析必须双向核对：`name_key → user_id` 命中后反向校验该行 `name_key` 与本次入参规范化结果一致；签发凭据前校验该凭据哈希未绑定其他 `user_id`；任一方向不一致即 `identity_conflict` 拒绝（防 NFKC 折叠把新凭据错绑到旧用户）。
 - admin token（`RDS2_ADMIN_TOKEN`）与普通用户凭据严格分离：admin 仅限 `POST /v2/users/init`，不得读取投影或事件状态；普通凭据不得初始化身份。
 - 展示名通过 NFKC 和 trim 生成 `name_key`，保持当前全局身份语义。
 - 请求体提供 userId 时只作一致性核对，授权一律以服务端凭据派生的 userId 为准；凭据无法映射到用户时停止事件写入。
@@ -645,6 +677,8 @@ V2 恢复器**不与 V1 cron 共享 invocation**。`wrangler.toml` 的 crons 数
 - V1 在 V2 稳定后停止新写，历史保留只读。
 
 ### 19.2 发布门
+
+首次部署前的一次性前置（runbook 必须以可逐条执行的命令呈现）：创建四条 Cloudflare Queue（`rds2-project`/`rds2-archive` 及各自 DLQ，当前 `wrangler.toml` 无 `[[queues]]` 段）；应用 V2 D1 迁移；在 `wrangler.toml` 追加 V2 恢复器 cron 并部署；脚本调用按真实解释器书写（PowerShell 脚本用 `powershell -File`/`pwsh -File`，禁止 `node xxx.ps1`）。回滚语义统一为“恢复上一部署版本并关闭功能开关”，不存在“清空白名单”这一动作（空白名单本身即 fail-closed 503，与回滚目标矛盾）。
 
 发布阶段固定为十步，顺序不得调整：
 
