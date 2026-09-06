@@ -43,6 +43,7 @@ invocation 预算断言，审核文档入库，临时探针已定点清理。
 | R4b | `dc9b379` | g2-r4 a build owner that loses the lease before the guard commits | `test/rds2-projection-engine.test.js` |
 | DOC | `1793e65` | docs(rds2): commit the G2 review document with an acceptance addendum | `docs/…/2026-09-06-rds2-g2-codex-review.md` |
 | R2d/R4c/R3b | `fedb44a` | g2 close the remaining R2/R3/R4 supplementary cases | `test/rds2-projection-engine.test.js` |
+| R3c | `f3a859d` | g2-r3 make the duplicate-message case reach already_applied | `test/rds2-projection-engine.test.js` |
 
 ## 2. 逐项记录
 
@@ -136,7 +137,8 @@ invocation 预算断言，审核文档入库，临时探针已定点清理。
 
 命令：`node --test services/reliable-drive-sync-worker/test/*.js` 与
 `node --test tools/reliable-drive-sync-mcp/test/*.mjs`（即根 `package.json` 的
-`test:worker` / `test:bridge`）。补充方案全部提交后复跑，两个运行时、两个套件均无失败。
+`test:worker` / `test:bridge`）。**末次复跑在 `f3a859d`（R3 重复消息用例改写）之后**，
+两个运行时、两个套件均无失败。
 
 双 binding：`withD1` 让每条 D1 用例在 SQLite 模拟器与 Miniflare/workerd D1 上各跑一遍，全部通过。
 
@@ -152,6 +154,7 @@ invocation 预算断言，审核文档入库，临时探针已定点清理。
 | 6. 审核文档入库 + 数字纠正 | 原文结论与复现证据原样保留，追加 §5 验收调整说明 | `1793e65` |
 | 7. C5 标注 + 同 invocation 断言 | 已标注为变异测试证据；补「同一 invocation 换新客户端不改预算」 | `1b931bc` |
 | 追加：审核文档逐条补测对账 | R2 中间页上限（20 行 / 64KiB / 256KiB）、R4 同 scope 双 build、R4 存储失败、R3 重复消息 | `fedb44a` |
+| 追加：R3 重复消息用例改写 | 原版只断言「拿不到租约」（`noop`），未触达 `already_applied` 分支 → 改为显式重新入队后派发，断言 `completed / already_applied` | `f3a859d` |
 
 ### 6.1 红灯与证据性质
 
@@ -163,13 +166,47 @@ invocation 预算断言，审核文档入库，临时探针已定点清理。
 | C5 每 invocation 独立预算 | 变异：预算改模块级共享 | `not ok 1`（`budget_exhausted`）；还原后绿 |
 | R5 / R7 / R2 边界与场景 | 既有正确行为，允许首次即绿 | 均双 binding 绿 |
 
-### 6.2 未做之事
+### 6.2 变异审计（证明新增用例非空洞）
+
+首轮即绿的新增用例共 14 条。为排除「断言恒真、实现怎么改都绿」的空洞用例，对其中
+10 条可注入的语义属性逐一做变异（改动实现 → 期望该用例转红 → 还原后复绿）：
+
+| 被变异的属性 | 变异方式 | 结果 |
+|---|---|---|
+| R2 跨用户事件归属 | 页查询去掉 `user_id` 过滤 | 红（`not ok 1`）：A 的构建数出 B 的事件 |
+| R2 冻结目标上界 | 放宽 `nextSeq <= targetEventSeq + 1` | 红：构建期间追加事件被提前计入 |
+| R2 页长即完成判定 | 判定条件改为「页满即激活」 | 红：6 事件用例在第 1 页就激活，计数不符 |
+| R2 中间页行改数上限 | 放宽 20 行上限 | 红：`more than 20 row changes` 用例放行 |
+| R5 零事件构建页数 | 让空构建也写 1 个页包 | 红：`pages=0` 断言失败 |
+| R5 就地激活（无第三页任务） | 激活后仍再排一页任务 | 红：`buildTasks === 2` 断言失败 |
+| R7 同名歧义必须 fail closed | `existing.length === 1` 改为 `>= 1`（挑一个赢家） | 红：上传数不再为 0 |
+| R3 重复消息收敛 | `eventSeq <= head.lastEventSeq` 改为 `<` | 红（改写后）：不再返回 `already_applied` |
+| R4 同 scope 只允许一个运行中的构建 | 去掉 JS 快速路径的 `building` CAS | **仍绿**：被数据库层吸收（见下） |
+| R4 丢租约不得谎报完成 | 判定改回「丢租约也报 `build_activated`」 | 红：`noop/lease_lost` 断言失败 |
+
+两条需要复审注意的审计结论：
+
+1. **「同 scope 只允许一个运行中的构建」由数据库层兜底。** 仅变异 JS 快速路径时用例仍绿，
+   因为部分唯一索引 `rds2_projection_builds_running_idx … WHERE stage IN ('scanning','activating')`
+   已经拦住了第二次插入。为证明该断言非空洞，同时移除该索引后再跑 → 转红；随后
+   `migrations/0006_rds2_v2_tables.sql` 已原样还原。也就是说：这条约束在 D1 上有**双保险**，
+   单靠 JS 侧回退不会让它失效。
+2. **`R3 a duplicate queue message` 初版确实是弱用例。** 它只断言了「任务已 processing、
+   拿不到租约」（`noop`），从未走到 `already_applied` 分支，因此任何实现改动都不会让它变红。
+   已改写（`f3a859d`）：显式把任务重置为 `pending` 并重新派发，断言结果必须是
+   `completed / already_applied`；改写后在上述 `<=` → `<` 变异下转红，证明断言有效。
+
+变异过的文件（`builds.js`、`engine.js`、`archiver.js`、`migrations/0006_rds2_v2_tables.sql`）
+均已还原并校验 `git status` 干净；本轮除 `builds.js` 的 R2b 外没有任何实现改动入库。
+
+### 6.3 未做之事
 
 - 未构造「人为空尾页」用例（按裁定，该路径不重新开放）。
 - 未为九行探针表另写九份独立脚本（按裁定，正式测试断言等价即可）。
 - 未放宽任何断言迁就实现。
+- 未为「32 条语句上限」构造人为用例：构建路径单次批最多 29 条语句，该上限不可达（见 §3 第 7 条）。
 
-### 6.3 需要复审注意：本轮唯一的额外实现变更
+### 6.4 需要复审注意：本轮唯一的额外实现变更
 
 R2 的新测试暴露了一个实现缺口，已修（`4f69982`，仅 `projection/builds.js` 一处）：
 
@@ -177,7 +214,8 @@ R2 的新测试暴露了一个实现缺口，已修（`4f69982`，仅 `projectio
 - **修复**：游标同时受两个上界约束（本次读取页 `lastEventSeq + 1` 与冻结目标 `+ 1`）；部分消费仍然合法（可以小于页长度），越过即 park 为 `build_no_progress`。
 - **可回退性**：该提交独立，可用 `git revert 4f69982` 单独撤回；撤回后 `R2 a reducer that claims to have consumed past the page it was handed is refused` 会转红。
 
-### 6.4 工作区状态
+### 6.5 工作区状态
 
-- 分支 `feat/rds2-v2`（worktree `C:\Users\27846\my-chatgpt-mcp-v2`），`git status` 干净，无未跟踪残留。
+- 分支 `feat/rds2-v2`（worktree `C:\Users\27846\my-chatgpt-mcp-v2`），末次提交 `f3a859d`，
+  `git status` 干净，无未跟踪残留（变异审计期间临时改动的 4 个文件均已还原并校验）。
 - 未 push、未部署、未进入 T09/T10、未操作真实数据；仍停在 G2 待复审。
