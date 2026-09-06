@@ -23,7 +23,7 @@ const FOLDER_ID = "folder-archive-root";
 const ARCHIVE_LIMIT = 16;
 
 // In-memory Drive speaking the real Google REST surface the client uses.
-function fakeDriveFetch({ files = new Map(), nextId = { n: 0 }, fail = {} } = {}) {
+function fakeDriveFetch({ files = new Map(), nextId = { n: 0 }, fail = {}, listBody } = {}) {
   const state = { uploads: 0, reads: 0, lists: 0 };
   const parseMultipart = (body) => {
     const parts = body.split("--drive-mcp-boundary");
@@ -51,6 +51,7 @@ function fakeDriveFetch({ files = new Map(), nextId = { n: 0 }, fail = {} } = {}
       const trashedOk = q.includes("trashed = false");
       assert.ok(nameMatch && parentMatch && trashedOk,
         `the list query must pin name, parent and trashed=false, got ${q}`);
+      if (listBody !== undefined) return new Response(listBody, { status: 200 });
       const matches = [...files.values()].filter((file) =>
         file.name === nameMatch[1] && file.parent === parentMatch[1]);
       return new Response(JSON.stringify({ files: matches.map(({ id, name }) => ({ id, name })) }), { status: 200 });
@@ -679,4 +680,125 @@ test("R5 replay switches generation and drops rows the superseded generation own
     (error) => error.code === "replay_artifact_invalid",
     "an unparseable artifact is a hard failure"
   );
+});
+
+// ---------------------------------------------------------------------------
+// G2-R7 regression: an exact Drive lookup must PROVE its result is complete
+// before anybody may conclude "there is no such object" and upload.
+// ---------------------------------------------------------------------------
+
+// A Drive stub that answers files.list with exactly the given body; the upload
+// endpoint is counted so "no upload happened" stays observable.
+function findExactClient(listBody) {
+  const state = { uploads: 0, lists: 0, listUrls: [] };
+  const io = createInvocationIo({
+    db: { prepare: () => { throw new Error("this lookup test never touches D1"); } },
+    queues: {},
+    fetchImpl: async (input) => {
+      const url = String(input);
+      if (url.includes("/drive/v3/files?")) {
+        state.lists += 1;
+        state.listUrls.push(url);
+        return new Response(listBody, { status: 200 });
+      }
+      if (url.startsWith("https://www.googleapis.com/upload/drive/v3/files")) {
+        state.uploads += 1;
+        return new Response(JSON.stringify({ id: "uploaded-file", name: "a.json" }), { status: 200 });
+      }
+      return new Response("unexpected call", { status: 500 });
+    },
+    limit: ARCHIVE_LIMIT
+  });
+  return {
+    state,
+    client: createArchiveClient({ env: {}, io, folderId: FOLDER_ID, tokenProvider: async () => "t" })
+  };
+}
+
+test("R7 the lookup asks Drive to prove completeness", async () => {
+  const { client, state } = findExactClient(JSON.stringify({ files: [] }));
+  await client.findExact("a.json");
+  const url = state.listUrls[0];
+  assert.ok(url.includes("nextPageToken"), "the request must ask for nextPageToken");
+  assert.ok(url.includes("incompleteSearch"), "the request must ask for incompleteSearch");
+  assert.ok(/pageSize=\d+/.test(url), "the request must pin an explicit small pageSize");
+});
+
+test("R7 an empty page that carries nextPageToken is refused, never 'not found'", async () => {
+  const { client, state } = findExactClient(JSON.stringify({ files: [], nextPageToken: "more" }));
+  await assert.rejects(
+    () => client.findExact("a.json"),
+    (error) => error.code === "drive_search_incomplete",
+    "a truncated result set must fail closed"
+  );
+  assert.equal(state.uploads, 0, "nothing may be uploaded on an incomplete search");
+});
+
+test("R7 a single hit that carries nextPageToken is refused too", async () => {
+  const { client, state } = findExactClient(JSON.stringify({
+    files: [{ id: "f1", name: "a.json" }], nextPageToken: "more"
+  }));
+  await assert.rejects(
+    () => client.findExact("a.json"),
+    (error) => error.code === "drive_search_incomplete"
+  );
+  assert.equal(state.uploads, 0);
+});
+
+test("R7 incompleteSearch is refused even without a page token", async () => {
+  const { client, state } = findExactClient(JSON.stringify({ files: [], incompleteSearch: true }));
+  await assert.rejects(
+    () => client.findExact("a.json"),
+    (error) => error.code === "drive_search_incomplete"
+  );
+  assert.equal(state.uploads, 0);
+});
+
+test("R7 a malformed or shapeless response is never 'not found'", async () => {
+  const bodies = ["{not json", JSON.stringify({ files: "nope" }),
+    JSON.stringify({ files: [{ name: "a.json" }] }), JSON.stringify([])];
+  for (const body of bodies) {
+    const { client, state } = findExactClient(body);
+    await assert.rejects(
+      () => client.findExact("a.json"),
+      (error) => error.code === "drive_response_invalid",
+      "a malformed response must not degrade to 'not found'"
+    );
+    assert.equal(state.uploads, 0);
+  }
+});
+
+test("R7 a complete single hit is still returned unchanged", async () => {
+  const { client, state } = findExactClient(JSON.stringify({ files: [{ id: "f1", name: "a.json" }] }));
+  const found = await client.findExact("a.json");
+  assert.deepEqual(found, [{ id: "f1", name: "a.json" }]);
+  assert.equal(state.uploads, 0);
+});
+
+test("R7 an incomplete search never uploads and never marks an artifact delivered", async () => {
+  await runArchiveTest(async ({ binding, rawDb }) => {
+    const drive = fakeDriveFetch({ listBody: JSON.stringify({ files: [], nextPageToken: "more" }) });
+    const makeIo = () => createInvocationIo({
+      db: rawDb,
+      queues: { RDS2_PROJECTION_QUEUE: { send: async () => {} }, RDS2_ARCHIVE_QUEUE: { send: async () => {} } },
+      fetchImpl: drive.fetchImpl, limit: ARCHIVE_LIMIT
+    });
+    const { taskId } = await seedArtifact(rawDb, {
+      objectName: "artifact-r7-incomplete.json", frozenJson: '{"r7":true}', taskId: "arch-r7"
+    });
+    await dispatchOne({ io: makeIo(), taskId, owner: "d", now: NOW });
+    const client = createArchiveClient({
+      env: {}, io: makeIo(), folderId: FOLDER_ID, tokenProvider: async () => "t"
+    });
+    const result = await archiveOne({ io: makeIo(), taskId, owner: "c", now: NOW, client });
+    assert.equal(result.code, "drive_search_incomplete", `(${binding}) ${JSON.stringify(result)}`);
+    assert.equal(drive.state.uploads, 0, `(${binding}) an incomplete search must not upload`);
+    const delivery = await rawDb.prepare(
+      "SELECT delivered_at, drive_file_id FROM rds2_archive_deliveries WHERE artifact_id = ?"
+    ).bind("artifact-arch-r7").first();
+    assert.equal(delivery.delivered_at, null, `(${binding}) nothing is reported as delivered`);
+    assert.equal(delivery.drive_file_id, null);
+    const task = await rawDb.prepare("SELECT state FROM rds2_tasks WHERE task_id = ?").bind(taskId).first("state");
+    assert.notEqual(task, "completed", `(${binding}) the task must not converge on success`);
+  });
 });

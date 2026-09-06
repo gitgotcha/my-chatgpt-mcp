@@ -96,6 +96,14 @@ export async function archiveOne({ io, taskId, owner, now, client, lease = null 
       await parkNeedsAttention({ db: io.db, lease: activeLease, now, code: error.code });
       return stepResult("needs_attention", taskId, error.code);
     }
+    if (error?.code === "drive_search_incomplete" || error?.code === "drive_response_invalid"
+      || error?.code === "drive_response_too_large") {
+      // Deterministic contract failures on the lookup side: the archive is
+      // NOT allowed to conclude "no such object" and upload, and retrying
+      // the same call cannot change the answer.
+      await parkNeedsAttention({ db: io.db, lease: activeLease, now, code: error.code });
+      return stepResult("needs_attention", taskId, error.code);
+    }
     const failed = await failTask({ db: io.db, lease: activeLease, now, code: "drive_error" });
     return stepResult(failed.state === "needs_attention" ? "needs_attention" : "retry",
       taskId, "drive_error");
