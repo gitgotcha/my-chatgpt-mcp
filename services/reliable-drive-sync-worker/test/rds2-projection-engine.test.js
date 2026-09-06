@@ -921,6 +921,95 @@ test("R4 a page task whose build is already settled converges itself", async () 
 });
 
 // ---------------------------------------------------------------------------
+// G2 acceptance correction: the probe row "old owner completes after losing
+// the lease" needs its own BUILD case. A settled-build task or an archive
+// task losing its lease is not the same assertion: here the old owner is
+// inside the activation path when the lease moves.
+// ---------------------------------------------------------------------------
+
+// Hands the lease to a new owner immediately before the guard batch runs —
+// i.e. after the old owner already read the head and staged its page.
+function leaseStealingIo(io, rawDb, taskId, newOwner = "new-owner") {
+  const inner = io.db;
+  return {
+    ...io,
+    db: {
+      prepare: (sql) => inner.prepare(sql),
+      batch: async (statements) => {
+        await rawDb.prepare(
+          `UPDATE rds2_tasks SET lease_owner = ?, lease_epoch = lease_epoch + 1, lease_until = ?, updated_at = ?
+           WHERE task_id = ? AND state = 'processing'`
+        ).bind(newOwner, "2999-01-01T00:00:00.000Z", NOW, taskId).run();
+        return inner.batch(statements);
+      }
+    }
+  };
+}
+
+test("R4 an owner that loses the lease before the activation guard commits cannot report success", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    await seedEventsThroughAccept(makeIo, rawDb, 2);
+    const before = await loadProjectionHead(io.db, SCOPE_A);
+    const build = await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: before.revision, now: NOW });
+    const pageTask = await rawDb.prepare(
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' ORDER BY created_at, task_id LIMIT 1"
+    ).first("task_id");
+    await dispatchOne({ io: makeIo(), taskId: pageTask, owner: "old-owner", now: NOW });
+
+    const result = await continueBuild({
+      io: leaseStealingIo(makeIo(), rawDb, pageTask), taskId: pageTask,
+      owner: "old-owner", now: NOW, reducer: algorithmReducer
+    });
+    assert.notEqual(result.outcome, "completed",
+      `(${binding}) losing the lease is never an activation, got ${JSON.stringify(result)}`);
+    assert.equal(result.code, "lease_lost", `(${binding}) the loss is diagnosed`);
+
+    // The new owner's lease is intact: the old owner did not complete, defer
+    // or overwrite anything behind its back.
+    const task = await rawDb.prepare(
+      "SELECT state, lease_owner FROM rds2_tasks WHERE task_id = ?"
+    ).bind(pageTask).first();
+    assert.equal(task.lease_owner, "new-owner", `(${binding}) the new owner still holds the lease`);
+    assert.notEqual(task.state, "completed", `(${binding}) the old owner must not complete the task`);
+
+    // No activation residue: head, generation and cursor are unchanged and no
+    // activation delta was archived.
+    const after = await loadProjectionHead(io.db, SCOPE_A);
+    assert.equal(after.revision, before.revision, `(${binding}) the revision did not move`);
+    assert.equal(after.activeGeneration, before.activeGeneration, `(${binding}) the generation did not switch`);
+    assert.equal(after.lastEventSeq, before.lastEventSeq, `(${binding}) the cursor did not advance`);
+    const buildRow = await rawDb.prepare("SELECT stage FROM rds2_projection_builds WHERE build_id = ?")
+      .bind(build.build_id).first("stage");
+    assert.equal(buildRow, "scanning", `(${binding}) the build is still running, not activated`);
+    // The two seeded events each archived their own normal delta; only a delta
+    // carrying the build manifest would be an activation.
+    const activationDeltas = (await rawDb.prepare(
+      "SELECT frozen_json FROM rds2_archive_deliveries WHERE object_type = 'projection_delta'"
+    ).all()).results.map((row) => JSON.parse(row.frozen_json)).filter((delta) => delta.build);
+    assert.equal(activationDeltas.length, 0, `(${binding}) no activation delta was written by the old owner`);
+    const guards = await rawDb.prepare("SELECT COUNT(*) AS n FROM rds2_commit_guards").first("n");
+    assert.equal(guards, 0, `(${binding}) the aborted guard left nothing behind`);
+
+    // And the scope is not wedged: once the queue hands the page to the new
+    // owner, the very same build still activates on the frozen target.
+    await rawDb.prepare(
+      `UPDATE rds2_tasks SET state = 'pending', lease_owner = NULL, lease_epoch = lease_epoch + 1,
+         lease_until = NULL, available_at = ?, updated_at = ? WHERE task_id = ?`
+    ).bind(NOW, NOW, pageTask).run();
+    const dispatchResult = await dispatchOne({ io: makeIo(), taskId: pageTask, owner: "new-owner", now: NOW });
+    assert.equal(dispatchResult.outcome, "continued",
+      `(${binding}) the queue can still hand the page to the new owner, got ${JSON.stringify(dispatchResult)}`);
+    const finished = await continueBuild({
+      io: makeIo(), taskId: pageTask, owner: "new-owner", now: NOW, reducer: algorithmReducer
+    });
+    assert.equal(finished.outcome, "completed",
+      `(${binding}) the new owner activates the build, got ${JSON.stringify(finished)} after ${JSON.stringify(dispatchResult)}`);
+    const settled = await loadProjectionHead(io.db, SCOPE_A);
+    assert.equal(settled.lastEventSeq, 2, `(${binding}) and lands on the frozen target`);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // G2 coverage fix: the "is there an unprocessed predecessor?" question is
 // answered by a bounded indexed existence probe over the EVENT TABLE, not by
 // counting a range, and the cost must not grow with the backlog.
