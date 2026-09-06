@@ -677,3 +677,84 @@ test("R3 the head cursor regression is aborted by the database", async () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// G2-R4 regression: build startup is a transactional CAS on the base
+// revision, a base-moved build aborts diagnostically instead of deferring
+// forever, page tasks bind their build and converge, and a lost lease never
+// reports success.
+// ---------------------------------------------------------------------------
+
+test("R4 ensureBuild refuses a stale base revision atomically", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo, sent }) => {
+    await seedEventsThroughAccept(makeIo, rawDb, 2, { project: false });
+    // The caller read revision 0, but the head moved before the CAS landed.
+    await rawDb.prepare(
+      `UPDATE rds2_projections SET revision = 1, last_event_seq = 2 WHERE user_id = ?`
+    ).bind(USER_A).run();
+    await assert.rejects(
+      () => ensureBuild({
+        db: rawDb, scope: { userId: USER_A, namespace: "algorithm", projectionName: "learning" },
+        baseRevision: 0, now: NOW
+      }),
+      (error) => error.code === "build_base_moved",
+      `(${binding}) a stale base must not create a build`
+    );
+    const builds = await rawDb.prepare(
+      "SELECT COUNT(*) AS n FROM rds2_projection_builds"
+    ).first("n");
+    assert.equal(Number(builds), 0, `(${binding}) no build row may exist`);
+    const head = await loadProjectionHead(io.db, { userId: USER_A, namespace: "algorithm", projectionName: "learning" });
+    assert.equal(head.building, 0, `(${binding}) the building flag stays unset`);
+  });
+});
+
+test("R4 a build whose base moved aborts diagnostically and releases the scope", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo, sent }) => {
+    await seedEventsThroughAccept(makeIo, rawDb, 2, { project: false });
+    await ensureBuild({
+      db: rawDb, scope: { userId: USER_A, namespace: "algorithm", projectionName: "learning" },
+      baseRevision: 0, now: NOW
+    });
+    // The base moved underneath the running build.
+    await rawDb.prepare(
+      `UPDATE rds2_projections SET revision = 1, last_event_seq = 2 WHERE user_id = ?`
+    ).bind(USER_A).run();
+    const nextTask = await rawDb.prepare(
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' LIMIT 1"
+    ).first("task_id");
+    await dispatchOne({ io: makeIo(), taskId: nextTask, owner: "dispatch", now: NOW });
+    const result = await continueBuild({ io: makeIo(), taskId: nextTask, owner: "builder", now: NOW, reducer: algorithmReducer });
+    assert.equal(result.outcome, "retry", `(${binding}) the moved build is diagnosable`);
+    assert.equal(result.code, "deferred_build_aborted");
+    const build = await rawDb.prepare("SELECT stage FROM rds2_projection_builds").first("stage");
+    assert.equal(build, "aborted", `(${binding}) the stale build is aborted`);
+    const head = await loadProjectionHead(io.db, { userId: USER_A, namespace: "algorithm", projectionName: "learning" });
+    assert.equal(head.building, 0, `(${binding}) the building flag is released`);
+    const task = await rawDb.prepare("SELECT state FROM rds2_tasks WHERE task_id = ?").bind(nextTask).first("state");
+    assert.equal(task, "pending", `(${binding}) the page task waits for a fresh decision`);
+  });
+});
+
+test("R4 a page task whose build is already settled converges itself", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo, sent }) => {
+    await seedEventsThroughAccept(makeIo, rawDb, 2, { project: false });
+    await ensureBuild({
+      db: rawDb, scope: { userId: USER_A, namespace: "algorithm", projectionName: "learning" },
+      baseRevision: 0, now: NOW
+    });
+    await drainBuildPages(makeIo, rawDb);
+    // A duplicate page task arrives after the build completed.
+    await rawDb.prepare(
+      `INSERT INTO rds2_tasks (task_id, type, user_id, namespace, projection_name, event_seq, artifact_id,
+         state, available_at, payload_json, created_at, updated_at)
+       VALUES ('build-dup', 'projection_build', ?, 'algorithm', 'learning', NULL, NULL, 'pending', ?, '{"buildId":"any-build"}', ?, ?)`
+    ).bind(USER_A, NOW, NOW, NOW).run();
+    await dispatchOne({ io: makeIo(), taskId: "build-dup", owner: "dispatch", now: NOW });
+    const result = await continueBuild({ io: makeIo(), taskId: "build-dup", owner: "builder", now: NOW, reducer: algorithmReducer });
+    assert.equal(result.outcome, "completed", `(${binding}) the duplicate page task converges`);
+    assert.equal(result.code, "build_already_settled");
+    const task = await rawDb.prepare("SELECT state FROM rds2_tasks WHERE task_id = ?").bind("build-dup").first("state");
+    assert.equal(task, "completed", `(${binding}) the duplicate task must not stay processing`);
+  });
+});

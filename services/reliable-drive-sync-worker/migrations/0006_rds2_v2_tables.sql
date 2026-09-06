@@ -170,6 +170,20 @@ BEGIN
   SELECT RAISE(ABORT, 'cursor_regression');
 END;
 
+-- Builds may only be created while the head is flagged as building; the flag
+-- is set by a CAS update on the exact base revision inside the same batch, so
+-- a build can never start on a stale base or without the flag (G2-R4).
+CREATE TRIGGER rds2_build_requires_building
+BEFORE INSERT ON rds2_projection_builds
+WHEN NOT EXISTS (
+  SELECT 1 FROM rds2_projections p
+  WHERE p.user_id = NEW.user_id AND p.namespace = NEW.namespace
+    AND p.projection_name = NEW.projection_name AND p.building = 1
+)
+BEGIN
+  SELECT RAISE(ABORT, 'build_requires_building_flag');
+END;
+
 -- Transaction guards. A guard row may only be inserted while the referenced
 -- task is processing under the claiming owner/epoch with an unexpired lease.
 -- The whole batch aborts otherwise, so stale writes can never persist.

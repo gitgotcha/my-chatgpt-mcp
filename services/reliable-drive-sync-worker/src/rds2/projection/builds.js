@@ -4,7 +4,7 @@
 // active generation and advances the event cursor. Old-generation rows stay
 // readable the whole time, and replayed pages cannot double-contribute
 // because staging rows are keyed and upserted.
-import { claimForProcessing, deferTask, parkNeedsAttention } from "../tasks/repository.js";
+import { claimForProcessing, deferTask, completeTask, getTask, parkNeedsAttention } from "../tasks/repository.js";
 import { commitActivation, assertRowChangesBounded, MAX_COMMIT_STATEMENTS } from "./commit.js";
 import { canonicalJson } from "../../../../../shared/rds2-protocol.mjs";
 import { deriveTaskId } from "../events/repository.js";
@@ -83,7 +83,10 @@ export async function fetchEventBySeq(db, scope, eventSeq) {
 }
 
 // Creates (or reuses) the single running build for a scope, flags the head as
-// building and schedules the first build-page task.
+// building and schedules the first build-page task. Startup is transactional:
+// the building flag is a CAS on the exact base revision and the build row's
+// insert trigger requires that flag, so a build can never start on a stale
+// base and a failed initiator can never leave half a build behind.
 export async function ensureBuild({ db, scope, baseRevision, now }) {
   const head = await loadProjectionHead(db, scope);
   const running = await db.prepare(
@@ -100,23 +103,44 @@ export async function ensureBuild({ db, scope, baseRevision, now }) {
   const targetEventSeq = Number(target);
   const stagingGeneration = head.activeGeneration + 1;
   const buildId = await deriveTaskId(scope, `build-${baseRevision}-${targetEventSeq}`, "build");
-  await db.batch([
-    db.prepare(
-      `INSERT INTO rds2_projection_builds (build_id, user_id, namespace, projection_name, base_revision,
-         target_event_seq, stage, staging_generation, continuation_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'scanning', ?, NULL, ?, ?)`
-    ).bind(buildId, scope.userId, scope.namespace, scope.projectionName, baseRevision,
-      targetEventSeq, stagingGeneration, now, now),
-    db.prepare(
-      `UPDATE rds2_projections SET building = 1, updated_at = ?
-       WHERE user_id = ? AND namespace = ? AND projection_name = ?`
-    ).bind(now, scope.userId, scope.namespace, scope.projectionName),
-    db.prepare(
-      `INSERT INTO rds2_tasks (task_id, type, user_id, namespace, projection_name, event_seq, artifact_id,
-         state, available_at, created_at, updated_at)
-       VALUES (?, 'projection_build', ?, ?, ?, NULL, NULL, 'pending', ?, ?, ?)`
-    ).bind(await buildPageTaskId(scope, buildId, 1), scope.userId, scope.namespace, scope.projectionName, now, now, now)
-  ]);
+  const buildPageTask = await buildPageTaskId(scope, buildId, 1);
+  try {
+    await db.batch([
+      // CAS: the flag flips only from revision 0-state on the exact base.
+      db.prepare(
+        `UPDATE rds2_projections SET building = 1, updated_at = ?
+         WHERE user_id = ? AND namespace = ? AND projection_name = ?
+           AND revision = ? AND building = 0`
+      ).bind(now, scope.userId, scope.namespace, scope.projectionName, baseRevision),
+      // The insert trigger requires building = 1, so a lost CAS aborts the
+      // whole batch — no build row on a stale base.
+      db.prepare(
+        `INSERT INTO rds2_projection_builds (build_id, user_id, namespace, projection_name, base_revision,
+           target_event_seq, stage, staging_generation, continuation_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'scanning', ?, NULL, ?, ?)`
+      ).bind(buildId, scope.userId, scope.namespace, scope.projectionName, baseRevision,
+        targetEventSeq, stagingGeneration, now, now),
+      db.prepare(
+        `INSERT INTO rds2_tasks (task_id, type, user_id, namespace, projection_name, event_seq, artifact_id,
+           state, available_at, payload_json, created_at, updated_at)
+         VALUES (?, 'projection_build', ?, ?, ?, NULL, NULL, 'pending', ?, json_set('{}', '$.buildId', json_quote(?)), ?, ?)`
+      ).bind(buildPageTask, scope.userId, scope.namespace, scope.projectionName, now, buildId, now, now)
+    ]);
+  } catch (error) {
+    // Re-read: a racing winner with the same base is fine, a moved base is a
+    // diagnosable refusal — either way nothing was half-created.
+    const winner = await db.prepare(
+      `SELECT build_id, stage, base_revision, target_event_seq, staging_generation
+       FROM rds2_projection_builds
+       WHERE user_id = ? AND namespace = ? AND projection_name = ?
+         AND stage IN ('scanning', 'activating')`
+    ).bind(scope.userId, scope.namespace, scope.projectionName).first();
+    if (winner && Number(winner.base_revision) === baseRevision) return winner;
+    const failure = new Error("build_base_moved");
+    failure.code = "build_base_moved";
+    failure.cause = error;
+    throw failure;
+  }
   return { build_id: buildId, stage: "scanning", base_revision: baseRevision, target_event_seq: targetEventSeq, staging_generation: stagingGeneration };
 }
 
@@ -128,19 +152,43 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
   const lease = await claimForProcessing({ db: io.db, taskId, owner, now });
   if (!lease) return stepResult("noop", taskId, "not_claimable");
   const scope = lease.scope;
-  const build = await io.db.prepare(
-    `SELECT build_id, base_revision, target_event_seq, stage, staging_generation, continuation_json
-     FROM rds2_projection_builds
-     WHERE user_id = ? AND namespace = ? AND projection_name = ?
-       AND stage IN ('scanning', 'activating')`
-  ).bind(scope.userId, scope.namespace, scope.projectionName).first();
-  if (!build) return stepResult("noop", taskId, "no_running_build");
+  // Page tasks bind their build: the authoritative build row is loaded by the
+  // task's payload buildId, never by "whatever is currently running".
+  const taskRow = await getTask(io.db, taskId);
+  const boundBuildId = (() => {
+    try { return JSON.parse(taskRow?.payload_json ?? "{}")?.buildId ?? null; }
+    catch { return null; }
+  })();
+  const build = boundBuildId
+    ? await io.db.prepare(
+        `SELECT build_id, base_revision, target_event_seq, stage, staging_generation, continuation_json
+         FROM rds2_projection_builds WHERE build_id = ?`
+      ).bind(boundBuildId).first()
+    : null;
+  if (!build || !["scanning", "activating"].includes(build.stage)) {
+    // The build is already settled (completed, aborted or replaced): the page
+    // task converges instead of holding a processing lease forever.
+    const done = await completeTask({ db: io.db, lease, now });
+    return done.rowsWritten
+      ? stepResult("completed", taskId, "build_already_settled")
+      : stepResult("noop", taskId, "no_running_build");
+  }
   const head = await loadProjectionHead(io.db, scope);
   if (head.revision !== Number(build.base_revision)) {
-    // The head moved under the build: the build is obsolete and must be
-    // restarted rather than activated on top of a foreign base.
+    // The head moved under the build: abort it diagnostically, release the
+    // building flag and let the next pass re-decide from the fresh head.
+    await io.db.batch([
+      io.db.prepare(
+        `UPDATE rds2_projection_builds SET stage = 'aborted', continuation_json = NULL, updated_at = ?
+         WHERE build_id = ? AND stage IN ('scanning', 'activating')`
+      ).bind(now, build.build_id),
+      io.db.prepare(
+        `UPDATE rds2_projections SET building = 0, updated_at = ?
+         WHERE user_id = ? AND namespace = ? AND projection_name = ? AND building = 1`
+      ).bind(now, scope.userId, scope.namespace, scope.projectionName)
+    ]);
     await deferTask({ db: io.db, lease, now, availableAt: now });
-    return stepResult("retry", taskId, "build_base_moved");
+    return stepResult("retry", taskId, "deferred_build_aborted");
   }
   const targetEventSeq = Number(build.target_event_seq);
   const effectivePageSize = validatePageSize(pageSize);
@@ -242,10 +290,10 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
         }), now, build.build_id),
         io.db.prepare(
           `INSERT INTO rds2_tasks (task_id, type, user_id, namespace, projection_name, event_seq, artifact_id,
-             state, available_at, created_at, updated_at)
-           VALUES (?, 'projection_build', ?, ?, ?, NULL, NULL, 'pending', ?, ?, ?)
+             state, available_at, payload_json, created_at, updated_at)
+           VALUES (?, 'projection_build', ?, ?, ?, NULL, NULL, 'pending', ?, json_set('{}', '$.buildId', json_quote(?)), ?, ?)
            ON CONFLICT (task_id) DO NOTHING`
-        ).bind(nextTaskId, scope.userId, scope.namespace, scope.projectionName, now, now, now),
+        ).bind(nextTaskId, scope.userId, scope.namespace, scope.projectionName, now, build.build_id, now, now),
         io.db.prepare(
           `UPDATE rds2_tasks SET state = 'completed', lease_owner = NULL, lease_until = NULL, updated_at = ?
            WHERE task_id = ? AND state = 'processing'
