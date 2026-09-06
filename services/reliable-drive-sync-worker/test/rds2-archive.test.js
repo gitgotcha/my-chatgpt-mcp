@@ -962,6 +962,44 @@ test("R7 an incomplete search never uploads and never marks an artifact delivere
 // is not a way around it. A genuinely separate invocation gets its own budget.
 // ---------------------------------------------------------------------------
 
+test("R7 two same-name objects park the whole archive task as ambiguous_artifact", async () => {
+  await runArchiveTest(async ({ binding, rawDb }) => {
+    const frozen = JSON.stringify({ ambiguous: NAME, n: 1 });
+    const drive = fakeDriveFetch();
+    // Same folder, same name, two different ids — and the lookup is complete:
+    // no nextPageToken, no incompleteSearch, so "two hits" is the truth.
+    drive.files.set("dup-a", { id: "dup-a", name: "artifact-ambiguous.json", content: '{"someone":"else"}', parent: FOLDER_ID });
+    drive.files.set("dup-b", { id: "dup-b", name: "artifact-ambiguous.json", content: '{"another":"owner"}', parent: FOLDER_ID });
+    const makeIo = (limit = ARCHIVE_LIMIT) => createInvocationIo({
+      db: rawDb,
+      queues: { RDS2_PROJECTION_QUEUE: { send: async () => {} }, RDS2_ARCHIVE_QUEUE: { send: async () => {} } },
+      fetchImpl: drive.fetchImpl, limit
+    });
+    const { artifactHash } = await seedArtifact(rawDb, {
+      objectName: "artifact-ambiguous.json", frozenJson: frozen, taskId: "arch-amb"
+    });
+    await dispatchOne({ io: makeIo(), taskId: "arch-amb", owner: "d", now: NOW });
+    const client = createArchiveClient({
+      env: {}, io: makeIo(), folderId: FOLDER_ID, tokenProvider: async () => "t"
+    });
+    const result = await archiveOne({ io: makeIo(), taskId: "arch-amb", owner: "c", now: NOW, client });
+
+    assert.equal(result.outcome, "needs_attention", `(${binding}) ${JSON.stringify(result)}`);
+    assert.equal(result.code, "ambiguous_artifact", `(${binding}) the ambiguity is named`);
+    assert.equal(drive.state.uploads, 0, `(${binding}) neither object is overwritten`);
+    assert.equal(drive.state.reads, 0, `(${binding}) neither object is read back — no winner is guessed`);
+    const task = await rawDb.prepare("SELECT state FROM rds2_tasks WHERE task_id = ?").bind("arch-amb").first("state");
+    assert.equal(task, "needs_attention", `(${binding}) the task parks instead of completing`);
+    const delivery = await rawDb.prepare(
+      "SELECT delivered_at, drive_file_id, frozen_json, artifact_hash FROM rds2_archive_deliveries WHERE artifact_id = ?"
+    ).bind("artifact-arch-amb").first();
+    assert.equal(delivery.delivered_at, null, `(${binding}) no successful delivery time is filled in`);
+    assert.equal(delivery.drive_file_id, null, `(${binding}) no file id is claimed`);
+    assert.equal(delivery.frozen_json, frozen, `(${binding}) the frozen bytes are untouched`);
+    assert.equal(delivery.artifact_hash, artifactHash, `(${binding}) the frozen hash is untouched`);
+  });
+});
+
 test("C5 a spent invocation budget stops Drive calls and only a new invocation gets a fresh one", async () => {
   await runArchiveTest(async ({ binding, rawDb }) => {
     const drive = fakeDriveFetch();
