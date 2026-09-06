@@ -160,15 +160,19 @@ export async function reclaimStale({ db, taskId, now }) {
   return { rowsWritten: Number(result.meta?.changes ?? 0) };
 }
 
-export async function findStaleTaskIds({ db, now, limit }) {
+// Due work for the recovery pass: pending tasks whose availability has come
+// (fresh events, new delta tasks, build pages, backoff-expired retries) plus
+// tasks whose lease expired. Only the latter need reclaiming.
+export async function findDueTasks({ db, now, limit }) {
   const result = await db.prepare(
-    `SELECT task_id FROM rds2_tasks
-     WHERE state IN ('dispatching', 'queued', 'processing')
-       AND (lease_until IS NULL OR lease_until <= ?)
-     ORDER BY updated_at, task_id
+    `SELECT task_id, type, state FROM rds2_tasks
+     WHERE (state = 'pending' AND available_at <= ?)
+        OR (state IN ('dispatching', 'queued', 'processing')
+            AND (lease_until IS NULL OR lease_until <= ?))
+     ORDER BY available_at, task_id
      LIMIT ?`
-  ).bind(now, limit).all();
-  return result.results.map((row) => row.task_id);
+  ).bind(now, now, limit).all();
+  return result.results.map((row) => ({ taskId: row.task_id, type: row.type, state: row.state }));
 }
 
 // An integrity failure (hash mismatch, ambiguous object) parks the task for

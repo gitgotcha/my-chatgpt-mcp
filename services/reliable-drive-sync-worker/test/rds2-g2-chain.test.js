@@ -5,8 +5,9 @@ import { fileURLToPath } from "node:url";
 import { withD1, applySchema } from "./support/rds2-d1.js";
 import { createInvocationIo } from "../src/rds2/io/invocation-io.js";
 import { acceptEvent } from "../src/rds2/events/accept.js";
-import { dispatchOne } from "../src/rds2/tasks/dispatcher.js";
+
 import { recoverOnce as recoverPass } from "../src/rds2/tasks/recovery.js";
+import { claimForProcessing } from "../src/rds2/tasks/repository.js";
 import { projectOne } from "../src/rds2/projection/engine.js";
 import { algorithmReducer } from "../src/rds2/projection/algorithm.js";
 import { createArchiveClient } from "../src/rds2/archive/drive-client.js";
@@ -109,26 +110,24 @@ function learningEnvelope({ requestId, eventId, topic, outcome, observedAt }) {
   };
 }
 
-async function drainTasks({ rawDb, makeIo, rounds = 6 }) {
+// R1: the ONLY dispatcher is the recovery pass; the consumer side processes
+// exactly the queue messages that pass actually sent, one invocation each.
+async function drainTasks({ rawDb, makeIo, sent, rounds = 10 }) {
   for (let round = 0; round < rounds; round += 1) {
-    const rows = await rawDb.prepare(
-      "SELECT task_id, type FROM rds2_tasks WHERE state IN ('pending', 'dispatching', 'queued') ORDER BY task_id"
-    ).all();
-    if (!rows.results.length) break;
-    for (const row of rows.results) {
-      await dispatchOne({ io: makeIo(), taskId: row.task_id, owner: `dispatch-${row.task_id}`, now: NOW });
-      if (row.type === "projection") {
-        await projectOne({ io: makeIo(), taskId: row.task_id, owner: "consumer", now: NOW, reducer: algorithmReducer });
+    const stats = await recoverPass({ io: makeIo(32), now: NOW, limit: 4 });
+    const messages = sent.splice(0, sent.length).map((entry) => entry.message);
+    for (const message of messages) {
+      const lease = await claimForProcessing({ db: rawDb, taskId: message.taskId, owner: `consumer-${round}`, now: NOW });
+      if (!lease) continue;
+      if (message.type === "projection") {
+        await projectOne({ io: makeIo(), taskId: message.taskId, owner: "consumer", now: NOW, reducer: algorithmReducer, lease });
       } else {
-        // One archive invocation = one fresh budget holding both the D1 and
-        // the Drive calls, exactly like the real entry point.
         const io = makeIo(16);
-        const client = createArchiveClient({
-          env: {}, io, folderId: FOLDER_ID, tokenProvider: async () => "token"
-        });
-        await archiveOne({ io, taskId: row.task_id, owner: "consumer", now: NOW, client });
+        const client = createArchiveClient({ env: {}, io, folderId: FOLDER_ID, tokenProvider: async () => "token" });
+        await archiveOne({ io, taskId: message.taskId, owner: "consumer", now: NOW, client, lease });
       }
     }
+    if (!stats.dispatched && !messages.length) break;
   }
 }
 
@@ -149,7 +148,7 @@ test("G2: a synthetic algorithm event completes the full local chain", async () 
     assert.equal(receipt.cloudPersistence, "d1_committed");
     assert.ok(receipt.jobId, "the receipt names its projection task");
 
-    await drainTasks({ rawDb, makeIo });
+    await drainTasks({ rawDb, makeIo, sent });
 
     // Persistence dimension: exactly one event and one request.
     const ledger = await rawDb.prepare(
@@ -198,13 +197,13 @@ test("G2: a synthetic algorithm event completes the full local chain", async () 
     });
     assert.deepEqual(replay, receipt, `(${binding}) the replay returns the identical receipt`);
     const driveSize = drive.files.size;
-    await drainTasks({ rawDb, makeIo });
+    await drainTasks({ rawDb, makeIo, sent });
     assert.equal(drive.files.size, driveSize, `(${binding}) the replay archives nothing new`);
   });
 });
 
 test("G2: a task lost between dispatch and projection is recovered by the recovery pass", async () => {
-  await runChain(async ({ binding, rawDb, makeIo }) => {
+  await runChain(async ({ binding, rawDb, makeIo, sent }) => {
     const principal = { userId: USER, username: NAME };
     await acceptEvent({
       io: makeIo(), principal, now: NOW,
@@ -229,7 +228,7 @@ test("G2: a task lost between dispatch and projection is recovered by the recove
     const recoveryIo = makeIo(32);
     const stats = await recoverPass({ io: recoveryIo, now: NOW, limit: 4 });
     assert.equal(stats.reclaimed, 1, `(${binding}) the stale task is reclaimed`);
-    assert.equal(stats.dispatched, 1);
+    assert.equal(stats.dispatched, 2, `(${binding}) the stale task AND the fresh archive task dispatch`);
     await projectOne({ io: makeIo(), taskId, owner: "consumer", now: NOW, reducer: algorithmReducer });
     const head = await rawDb.prepare(
       "SELECT revision, summary_json FROM rds2_projections WHERE user_id = ?"
@@ -241,7 +240,7 @@ test("G2: a task lost between dispatch and projection is recovered by the recove
 });
 
 test("G2: three events project in order with interleaved per-user scopes", async () => {
-  await runChain(async ({ binding, rawDb, makeIo }) => {
+  await runChain(async ({ binding, rawDb, makeIo, sent }) => {
     const principal = { userId: USER, username: NAME };
     const events = [
       learningEnvelope({ requestId: "req-g2-3a", eventId: "44444444-4444-4444-8444-444444444446", topic: "two-sum", outcome: "incorrect", observedAt: "2026-09-06T01:00:00.000Z" }),
@@ -252,7 +251,7 @@ test("G2: three events project in order with interleaved per-user scopes", async
       await acceptEvent({ io: makeIo(), principal, envelope, now: NOW });
     }
     // Process every task through the full chain until nothing is left.
-    await drainTasks({ rawDb, makeIo, rounds: 8 });
+    await drainTasks({ rawDb, makeIo, sent, rounds: 8 });
     const head = await rawDb.prepare(
       "SELECT revision, summary_json FROM rds2_projections WHERE user_id = ?"
     ).bind(USER).first();

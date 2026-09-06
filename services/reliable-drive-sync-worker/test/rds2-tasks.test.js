@@ -328,3 +328,63 @@ test("DLQ handling only trusts the taskId and loads the task from D1", async () 
     assert.equal(unknown.code, "unknown_task", `(${binding}) an unknown DLQ taskId is a safe no-op`);
   });
 });
+
+// ---------------------------------------------------------------------------
+// G2-R1 regression: the recovery pass is the ONLY dispatcher in this version.
+// It must cover due pending tasks (fresh events, new delta tasks, build pages,
+// backoff-expired retries) as well as expired leases, and its limit cannot be
+// amplified by the caller.
+// ---------------------------------------------------------------------------
+
+test("R1 recovery dispatches due pending tasks after acceptance", async () => {
+  await runTaskTest(async ({ binding, rawDb, io, sent }) => {
+    const fresh = await seedTask(rawDb);
+    const stale = await seedTask(rawDb, { state: "processing", leaseEpoch: 1 });
+    await rawDb.prepare("UPDATE rds2_tasks SET lease_owner = 'w', lease_until = ? WHERE task_id = ?")
+      .bind("2026-09-05T23:00:00.000Z", stale.taskId).run();
+    const future = await seedTask(rawDb, { availableAt: LATER });
+
+    const stats = await recoverOnce({ io, now: NOW, limit: 4 });
+    assert.equal(stats.dispatched, 2, `(${binding}) the due pending and the stale task both dispatch`);
+    assert.equal(stats.reclaimed, 1, `(${binding}) only the stale lease needs reclaiming`);
+    const sentIds = sent.map((entry) => entry.message.taskId).sort();
+    assert.deepEqual(sentIds, [fresh.taskId, stale.taskId].sort(), `(${binding}) queue sends match due tasks`);
+    const futureRow = await getTask(rawDb, future.taskId);
+    assert.equal(futureRow.state, "pending", `(${binding}) a future task is not sent early`);
+    assert.equal(futureRow.failure_count, 0, `(${binding}) waiting is not a failure`);
+    const freshRow = await getTask(rawDb, fresh.taskId);
+    assert.equal(freshRow.state, "queued");
+    assert.equal(freshRow.failure_count, 0);
+  });
+});
+
+test("R1 recovery limit cannot be amplified by the caller", async () => {
+  await runTaskTest(async ({ binding, rawDb, io, sent }) => {
+    for (let index = 0; index < 6; index += 1) {
+      await seedTask(rawDb);
+    }
+    const stats = await recoverOnce({ io, now: NOW, limit: 100 });
+    assert.equal(stats.dispatched, 4, `(${binding}) the recovery pass stays at four tasks`);
+    assert.equal(sent.length, 4);
+    const stillPending = await rawDb.prepare(
+      "SELECT COUNT(*) AS n FROM rds2_tasks WHERE state = 'pending'"
+    ).first("n");
+    assert.equal(Number(stillPending), 2, `(${binding}) the rest wait for the next pass`);
+  });
+});
+
+test("R1 backoff-expired pending tasks resume through recovery without extra failures", async () => {
+  await runTaskTest(async ({ binding, rawDb, io, sent }) => {
+    const task = await seedTask(rawDb, { failureCount: 1 });
+    // Backoff availability 30s after NOW-ish; recovery runs after it passed.
+    const past = "2026-09-06T00:00:31.000Z";
+    await rawDb.prepare("UPDATE rds2_tasks SET available_at = ? WHERE task_id = ?").bind(past, task.taskId).run();
+    const before = await getTask(rawDb, task.taskId);
+    assert.equal(before.failure_count, 1);
+    const stats = await recoverOnce({ io, now: past, limit: 4 });
+    assert.equal(stats.dispatched, 1, `(${binding}) the backoff-expired task dispatches`);
+    const row = await getTask(rawDb, task.taskId);
+    assert.equal(row.failure_count, 1, `(${binding}) resuming after backoff adds no failure`);
+    assert.equal(row.state, "queued");
+  });
+});
