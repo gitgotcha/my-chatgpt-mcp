@@ -14,6 +14,22 @@ export const BUDGET_CATEGORIES = new Set(["d1", "queue", "http"]);
 export const BUSINESS_SUBREQUEST_CAP = 40;
 export const PRODUCT_HARD_CAP = 50;
 
+// Sub-requests a failure close-out may still need (failTask reads then writes,
+// an authoritative re-check reads twice). A stage is only entered when its own
+// worst case PLUS this reserve still fits — checking the balance once at the
+// entry does not reserve anything, because later stages would spend it.
+export const CLOSE_OUT_RESERVE = 4;
+
+/**
+ * Can this stage start and still leave room to book a failure?
+ * Always evaluated against the SAME per-invocation budget; budgets are never
+ * reset to work around a gate.
+ */
+export function canAffordStage(budget, stageCost, reserve = CLOSE_OUT_RESERVE) {
+  if (!budget || typeof budget.remaining !== "function") return true;
+  return budget.remaining() >= stageCost + reserve;
+}
+
 export function createBudget(limit) {
   // The business cap of 40 is a fixed design boundary of this version: no
   // entry point may configure a budget beyond it, whatever the platform

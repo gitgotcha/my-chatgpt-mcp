@@ -1510,6 +1510,66 @@ test("F2 an incremental projection that keeps failing counts and parks like the 
   });
 });
 
+test("F2 a stage that would leave no room to book a failure waits instead of spending the reserve", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    await seedEventsThroughAccept(makeIo, rawDb, 2);
+    const before = await loadProjectionHead(io.db, SCOPE_A);
+    const build = await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: before.revision, now: NOW });
+    const pageTask = await rawDb.prepare(
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' LIMIT 1"
+    ).first("task_id");
+
+    const ioWithLimit = (limit) => createInvocationIo({
+      db: rawDb,
+      queues: {
+        RDS2_PROJECTION_QUEUE: { send: async () => {} },
+        RDS2_ARCHIVE_QUEUE: { send: async () => {} }
+      },
+      fetchImpl: async () => new Response("{}", { status: 200 }),
+      limit
+    });
+
+    // load(4) + reserve(4): the load fits, the FIRST PAGE query does not.
+    const tight = ioWithLimit(8);
+    await rawDb.prepare("UPDATE rds2_tasks SET state = 'queued', available_at = ? WHERE task_id = ?")
+      .bind(NOW, pageTask).run();
+    const firstResult = await continueBuild({
+      io: tight, taskId: pageTask, owner: "builder", now: NOW, reducer: algorithmReducer
+    });
+    assert.equal(firstResult.outcome, "retry", `(${binding}) ${JSON.stringify(firstResult)}`);
+    assert.equal(firstResult.code, "budget_reserve_insufficient");
+
+    // load(4) + firstPage(1) + reserve(4): one stage further along.
+    const looser = ioWithLimit(9);
+    await rawDb.prepare("UPDATE rds2_tasks SET state = 'queued', available_at = ? WHERE task_id = ?")
+      .bind(NOW, pageTask).run();
+    const secondResult = await continueBuild({
+      io: looser, taskId: pageTask, owner: "builder", now: NOW, reducer: algorithmReducer
+    });
+    assert.equal(secondResult.outcome, "retry", `(${binding}) ${JSON.stringify(secondResult)}`);
+    assert.equal(secondResult.code, "budget_reserve_insufficient");
+
+    // The gate must actually be at the stage boundary, not just at the entry:
+    // the larger budget got one statement further before it stopped.
+    const usedTight = tight.budget.snapshot().used;
+    const usedLooser = looser.budget.snapshot().used;
+    assert.equal(usedLooser, usedTight + 1,
+      `(${binding}) the larger budget must consume exactly one more statement (${usedTight} vs ${usedLooser})`);
+
+    // A class-A wait: no real failure is counted and nothing was written.
+    const task = await rawDb.prepare("SELECT state, failure_count FROM rds2_tasks WHERE task_id = ?")
+      .bind(pageTask).first();
+    assert.equal(task.state, "pending", `(${binding}) the task simply goes back to the queue`);
+    assert.equal(Number(task.failure_count), 0,
+      `(${binding}) running out of room is not a real failure`);
+    const stage = await rawDb.prepare("SELECT stage FROM rds2_projection_builds WHERE build_id = ?")
+      .bind(build.build_id).first("stage");
+    assert.equal(stage, "scanning", `(${binding}) the build is untouched`);
+    assert.equal(await countRows(rawDb, { userId: USER_A, generation: build.staging_generation }), 0,
+      `(${binding}) no page was staged`);
+  });
+});
+
 test("F2 a lease conflict during the commit is never counted as a real failure", async () => {
   await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
     await seedEventsThroughAccept(makeIo, rawDb, 2);

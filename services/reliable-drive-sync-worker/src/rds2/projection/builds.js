@@ -8,6 +8,7 @@ import { claimForProcessing, deferTask, completeTask, getTask, parkNeedsAttentio
 import { commitActivation, buildDelta, assertRowChangesBounded, MAX_COMMIT_STATEMENTS, MAX_DELTA_BYTES } from "./commit.js";
 import { canonicalJson } from "../../../../../shared/rds2-protocol.mjs";
 import { closeOutFailure } from "../errors/close-out.js";
+import { canAffordStage } from "../io/budget.js";
 import { deriveTaskId } from "../events/repository.js";
 import { hashText } from "../identity/hashing.js";
 
@@ -27,6 +28,28 @@ export function validatePageSize(pageSize) {
 
 function stepResult(outcome, taskId, code) {
   return { outcome, taskId, code };
+}
+
+// Worst-case sub-requests per build-page stage. A stage is entered only when
+// its cost plus the close-out reserve still fits (io/budget.js); checking the
+// balance once at the entry reserves nothing, because a later stage would
+// spend it. `stagedReads` is reserved for F1's bounded staging reads and is
+// enforced by the read helper itself.
+const STAGE_COST = Object.freeze({
+  load: 4,          // claim + task + build row + projection head
+  firstPage: 1,     // MIN(event_seq) on the first page only
+  pageRead: 1,
+  stagedReads: 4,
+  commit: 1
+});
+
+// Not enough room to do the work AND book a failure: hand the task back as a
+// normal wait (class A), never counted as a real failure.
+async function releaseForBudget({ db, lease, now, taskId }) {
+  const deferred = await deferTask({ db, lease, now, availableAt: now });
+  return deferred.rowsWritten
+    ? stepResult("retry", taskId, "budget_reserve_insufficient")
+    : stepResult("noop", taskId, "lease_lost");
 }
 
 // A lost lease is NOT success: only the authoritative database state — build
@@ -150,6 +173,12 @@ async function buildPageTaskId(scope, buildId, pageNumber) {
 }
 
 export async function continueBuild({ io, taskId, owner, now, reducer, pageSize = BUILD_PAGE_SIZE }) {
+  // Nothing is claimed yet: if even the load does not fit alongside the
+  // close-out reserve, take no lease and write nothing rather than starting
+  // work we could not finish or book.
+  if (!canAffordStage(io.budget, STAGE_COST.load)) {
+    return stepResult("noop", taskId, "budget_reserve_insufficient");
+  }
   const lease = await claimForProcessing({ db: io.db, taskId, owner, now });
   if (!lease) return stepResult("noop", taskId, "not_claimable");
   const scope = lease.scope;
@@ -197,6 +226,9 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
     ? JSON.parse(build.continuation_json)
     : null;
   if (!continuation) {
+    if (!canAffordStage(io.budget, STAGE_COST.firstPage)) {
+      return releaseForBudget({ db: io.db, lease, now, taskId });
+    }
     const first = await io.db.prepare(
       `SELECT MIN(event_seq) AS minSeq FROM rds2_events
        WHERE user_id = ? AND namespace = ? AND projection_name = ?`
@@ -213,6 +245,9 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
   // the build started belong to a later build, never to this one.
   const events = [];
   if (continuation.nextEventSeq <= targetEventSeq) {
+    if (!canAffordStage(io.budget, STAGE_COST.pageRead)) {
+      return releaseForBudget({ db: io.db, lease, now, taskId });
+    }
     const page = await io.db.prepare(
       `SELECT event_seq, event_id, event_key, event_type, user_id, envelope_json
        FROM rds2_events
@@ -261,6 +296,10 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
   }
   const nextEventSeq = emptyPage ? targetEventSeq + 1 : pageResult.continuation.nextEventSeq;
   const done = nextEventSeq > targetEventSeq;
+
+  if (!canAffordStage(io.budget, STAGE_COST.commit)) {
+    return releaseForBudget({ db: io.db, lease, now, taskId });
+  }
 
   try {
     // Every non-empty page — mid-build OR final — stages its rows and freezes
