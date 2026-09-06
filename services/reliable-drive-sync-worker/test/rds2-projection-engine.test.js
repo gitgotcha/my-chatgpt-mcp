@@ -496,22 +496,22 @@ test("an event accepted through the real accept path projects end to end", async
 // the frozen target and the page size is validated.
 // ---------------------------------------------------------------------------
 
-async function seedEventsThroughAccept(makeIo, rawDb, count, { topic = "t-build", idOffset = 0, allowDeferred = false, project = true } = {}) {
+async function seedEventsThroughAccept(makeIo, rawDb, count, { topic = "t-build", idOffset = 0, allowDeferred = false, project = true, userId = USER_A, username = NAME } = {}) {
   for (let index = 1; index <= count; index += 1) {
     const eventIdNumber = idOffset + index;
     const envelope = {
       schemaVersion: "1.2",
       namespace: "algorithm",
       eventType: "algorithm.learning.completed",
-      identity: { username: NAME, userId: USER_A },
+      identity: { username, userId },
       payload: {
         event: {
           schemaVersion: "1.2",
           eventId: `71000000-0000-4000-8000-${String(eventIdNumber).padStart(12, "0")}`,
           eventKey: `r2-${topic}-${eventIdNumber}`,
           eventType: "algorithm.learning.completed",
-          userId: USER_A,
-          username: NAME,
+          userId,
+          username,
           observedAt: `2026-09-06T${String(index % 24).padStart(2, "0")}:00:00.000Z`,
           source: "qa",
           topic,
@@ -524,11 +524,13 @@ async function seedEventsThroughAccept(makeIo, rawDb, count, { topic = "t-build"
       },
       requestId: `req-r2-${index}-${Math.random().toString(36).slice(2, 6)}`
     };
-    const receipt = await acceptEvent({ io: makeIo(), principal: { userId: USER_A, username: NAME }, envelope, now: NOW });
+    const receipt = await acceptEvent({ io: makeIo(), principal: { userId, username }, envelope, now: NOW });
     assert.equal(receipt.disposition, "accepted");
+    // Scoped to the seeding user: interleaved users must never hand each
+    // other's pending task to the wrong projection.
     const taskId = await rawDb.prepare(
-      "SELECT task_id FROM rds2_tasks WHERE type = 'projection' AND state = 'pending' ORDER BY created_at DESC, task_id DESC LIMIT 1"
-    ).first("task_id");
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection' AND user_id = ? AND state = 'pending' ORDER BY created_at DESC, task_id DESC LIMIT 1"
+    ).bind(userId).first("task_id");
     if (!project) continue;
     await dispatchOne({ io: makeIo(), taskId, owner: "d", now: NOW });
     const result = await projectOne({ io: makeIo(), taskId, owner: "c", now: NOW, reducer: algorithmReducer });
@@ -540,20 +542,41 @@ async function seedEventsThroughAccept(makeIo, rawDb, count, { topic = "t-build"
   }
 }
 
-async function drainBuildPages(makeIo, rawDb, { rounds = 8, pageSize } = {}) {
+// Explicit-cap build driver. Every business call gets its OWN invocation io —
+// the helper never resets a budget inside a call — and exhausting the cap
+// without an activation FAILS instead of quietly returning a half-built
+// projection (a partially consumed reducer needs far more than 8 pages).
+async function drainBuildPages(makeIo, rawDb, { rounds = 40, pageSize, reducer = algorithmReducer } = {}) {
+  const outcomes = [];
   let last = null;
-  for (let round = 0; round < rounds; round += 1) {
+  for (let round = 1; round <= rounds; round += 1) {
     const nextTask = await rawDb.prepare(
-      "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' LIMIT 1"
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' ORDER BY created_at, task_id LIMIT 1"
     ).first("task_id");
     if (!nextTask) break;
     await dispatchOne({ io: makeIo(), taskId: nextTask, owner: "dispatch", now: NOW });
     last = await continueBuild({
-      io: makeIo(), taskId: nextTask, owner: "builder", now: NOW,
-      reducer: algorithmReducer, ...(pageSize === undefined ? {} : { pageSize })
+      io: makeIo(), taskId: nextTask, owner: "builder", now: NOW, reducer,
+      ...(pageSize === undefined ? {} : { pageSize })
     });
+    outcomes.push({ taskId: nextTask, outcome: last.outcome, code: last.code });
+    if (last.outcome === "completed") return last;
   }
-  return last;
+  assert.fail(`the build must activate within ${rounds} page invocations, got ${JSON.stringify(outcomes)}`);
+}
+
+// Drives exactly one build page and returns its result, for scenarios that
+// must observe the projection between two pages.
+async function runOneBuildPage(makeIo, rawDb, { pageSize, reducer = algorithmReducer, owner = "builder" } = {}) {
+  const nextTask = await rawDb.prepare(
+    "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' ORDER BY created_at, task_id LIMIT 1"
+  ).first("task_id");
+  assert.ok(nextTask, "a build page task must be pending");
+  await dispatchOne({ io: makeIo(), taskId: nextTask, owner: "dispatch", now: NOW });
+  return continueBuild({
+    io: makeIo(), taskId: nextTask, owner, now: NOW, reducer,
+    ...(pageSize === undefined ? {} : { pageSize })
+  });
 }
 
 test("R2 six events build with the default page size counts every event", async () => {
@@ -613,6 +636,144 @@ test("R2 the build page size is validated and capped at 50", async () => {
       (error) => error.code === "invalid_page_size",
       `(${binding}) a page size above 50 must be rejected`
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G2-R2 (验收调整): the event-count boundaries at the DEFAULT page size, the
+// cross-user sequence hole, events appended between pages, and a reducer that
+// claims to have consumed more than the page it was handed.
+// ---------------------------------------------------------------------------
+
+const SCOPE_A = { userId: USER_A, namespace: "algorithm", projectionName: "learning" };
+
+for (const eventCount of [0, 1, 5, 6, 49, 50, 51]) {
+  test(`R2 a ${eventCount}-event build with the default page size counts every event`, async () => {
+    await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+      if (eventCount === 0) {
+        // A legal empty head: no events, nothing projected, nothing building.
+        await seedScope(rawDb, { userId: USER_A, eventKeys: [] });
+      } else {
+        await seedEventsThroughAccept(makeIo, rawDb, eventCount);
+      }
+      const before = await loadProjectionHead(io.db, SCOPE_A);
+      await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: before.revision, now: NOW });
+      // page size is deliberately omitted: the real default must be exercised.
+      const last = await drainBuildPages(makeIo, rawDb);
+      assert.equal(last.outcome, "completed", `(${binding}) the build activates`);
+      const after = await loadProjectionHead(io.db, SCOPE_A);
+      assert.equal(after.lastEventSeq, eventCount, `(${binding}) the cursor lands exactly on the frozen target`);
+      assert.equal(after.revision, before.revision + 1, `(${binding}) the revision advances exactly once`);
+      const pending = await rawDb.prepare(
+        "SELECT COUNT(*) AS n FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending'"
+      ).first("n");
+      assert.equal(pending, 0, `(${binding}) no unfinished paging task is left behind`);
+      if (eventCount === 0) return;
+      const topic = JSON.parse(await rawDb.prepare(
+        `SELECT value_json FROM rds2_projection_rows
+          WHERE user_id = ? AND generation = ? AND row_kind = 'topic' AND row_key = 't-build'`
+      ).bind(USER_A, after.activeGeneration).first("value_json"));
+      assert.equal(topic.attempts, eventCount, `(${binding}) every event is counted exactly once`);
+      assert.equal(after.summary.counts.attempts, eventCount, `(${binding}) the summary agrees with the rows`);
+    });
+  });
+}
+
+test("R2 a build of one user ignores the other user's interleaved sequence numbers", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    // event_seq is global, so A owns 1,3,5 and B owns 2,4,6: A's sequence
+    // RANGE is five wide while A actually owns three events.
+    for (let index = 1; index <= 3; index += 1) {
+      await seedEventsThroughAccept(makeIo, rawDb, 1, { userId: USER_A, topic: "t-a", idOffset: index });
+      await seedEventsThroughAccept(makeIo, rawDb, 1, { userId: USER_B, topic: "t-b", idOffset: 100 + index });
+    }
+    const before = await loadProjectionHead(io.db, SCOPE_A);
+    await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: before.revision, now: NOW });
+    const last = await drainBuildPages(makeIo, rawDb);
+    assert.equal(last.outcome, "completed", `(${binding}) A's build activates`);
+    const after = await loadProjectionHead(io.db, SCOPE_A);
+    assert.equal(after.lastEventSeq, 5, `(${binding}) A's cursor is A's own last event, not the global count`);
+    const topicA = JSON.parse(await rawDb.prepare(
+      `SELECT value_json FROM rds2_projection_rows
+        WHERE user_id = ? AND generation = ? AND row_kind = 'topic' AND row_key = 't-a'`
+    ).bind(USER_A, after.activeGeneration).first("value_json"));
+    assert.equal(topicA.attempts, 3, `(${binding}) the global sequence gap must not inflate A's count`);
+    // B's data never leaks into A's build.
+    const leaked = await rawDb.prepare(
+      `SELECT COUNT(*) AS n FROM rds2_projection_rows
+        WHERE user_id = ? AND generation = ? AND row_key = 't-b'`
+    ).bind(USER_A, after.activeGeneration).first("n");
+    assert.equal(leaked, 0, `(${binding}) the build must not read the other user's events`);
+    const headB = await loadProjectionHead(io.db, { userId: USER_B, namespace: "algorithm", projectionName: "learning" });
+    assert.equal(headB.lastEventSeq, 6, `(${binding}) B's projection is untouched`);
+  });
+});
+
+test("R2 events appended between build pages are counted neither early nor lost", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    await seedEventsThroughAccept(makeIo, rawDb, 8);
+    const before = await loadProjectionHead(io.db, SCOPE_A);
+    await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: before.revision, now: NOW });
+    const firstPage = await runOneBuildPage(makeIo, rawDb);
+    assert.equal(firstPage.outcome, "continued", `(${binding}) eight events span more than one page at the default size`);
+    // Appended between two pages — after the target was frozen.
+    await seedEventsThroughAccept(makeIo, rawDb, 1, { topic: "t-late", idOffset: 200, allowDeferred: true });
+    const last = await drainBuildPages(makeIo, rawDb);
+    assert.equal(last.outcome, "completed", `(${binding}) the build activates`);
+    const built = await loadProjectionHead(io.db, SCOPE_A);
+    assert.equal(built.lastEventSeq, 8, `(${binding}) activation stops at the frozen target`);
+    const lateDuringBuild = await rawDb.prepare(
+      `SELECT value_json FROM rds2_projection_rows
+        WHERE user_id = ? AND generation = ? AND row_kind = 'topic' AND row_key = 't-late'`
+    ).bind(USER_A, built.activeGeneration).first("value_json");
+    assert.equal(lateDuringBuild, null, `(${binding}) the appended event is not counted into the frozen build`);
+
+    // ... and it is not lost either: it projects after the activation.
+    const lateSeq = await rawDb.prepare(
+      "SELECT event_seq FROM rds2_events WHERE user_id = ? ORDER BY event_seq DESC LIMIT 1"
+    ).bind(USER_A).first("event_seq");
+    const lateTask = await rawDb.prepare(
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection' AND user_id = ? AND event_seq = ?"
+    ).bind(USER_A, Number(lateSeq)).first("task_id");
+    await dispatchOne({ io: makeIo(), taskId: lateTask, owner: "d", now: NOW });
+    const projected = await projectOne({ io: makeIo(), taskId: lateTask, owner: "c", now: NOW, reducer: algorithmReducer });
+    assert.equal(projected.outcome, "completed", `(${binding}) the appended event is processed after activation`);
+    const after = await loadProjectionHead(io.db, SCOPE_A);
+    assert.equal(after.lastEventSeq, 9, `(${binding}) the cursor picks the appended event up`);
+    const lateNow = JSON.parse(await rawDb.prepare(
+      `SELECT value_json FROM rds2_projection_rows
+        WHERE user_id = ? AND generation = ? AND row_kind = 'topic' AND row_key = 't-late'`
+    ).bind(USER_A, after.activeGeneration).first("value_json"));
+    assert.equal(lateNow.attempts, 1, `(${binding}) the appended event counts exactly once`);
+  });
+});
+
+test("R2 a reducer that claims to have consumed past the page it was handed is refused", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    await seedEventsThroughAccept(makeIo, rawDb, 6);
+    const before = await loadProjectionHead(io.db, SCOPE_A);
+    await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: before.revision, now: NOW });
+    // The page offers events 1..2; the reducer claims to have consumed four.
+    const overreaching = {
+      ...algorithmReducer,
+      buildPage: (args) => {
+        const result = algorithmReducer.buildPage(args);
+        return {
+          ...result,
+          continuation: { ...result.continuation, nextEventSeq: args.continuation.nextAfterPage + 2 }
+        };
+      }
+    };
+    const result = await runOneBuildPage(makeIo, rawDb, { pageSize: 2, reducer: overreaching });
+    assert.equal(result.outcome, "needs_attention",
+      `(${binding}) a cursor past the fetched page is a reducer contract violation, got ${JSON.stringify(result)}`);
+    assert.equal(result.code, "build_no_progress");
+    const after = await loadProjectionHead(io.db, SCOPE_A);
+    assert.equal(after.revision, before.revision, `(${binding}) nothing activates on a broken cursor`);
+    const task = await rawDb.prepare(
+      "SELECT state FROM rds2_tasks WHERE type = 'projection_build' ORDER BY created_at LIMIT 1"
+    ).first("state");
+    assert.equal(task, "needs_attention", `(${binding}) the page parks instead of skipping events`);
   });
 });
 
