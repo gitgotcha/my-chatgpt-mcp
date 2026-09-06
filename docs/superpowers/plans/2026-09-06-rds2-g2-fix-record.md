@@ -7,9 +7,10 @@
 
 ## 0. 结论
 
-7 项全部修复并提交，另修 2 项测试覆盖纠正（C3、C4）。每项均按
+7 项全部修复并提交，另修 3 项测试覆盖纠正（C3、C4、C5）。每项均按
 「失败样本 → 红灯 → 修订 → 双 binding 绿 → SHA」闭环，编号保留。
-回归：worker 全量测试在 Node 22.22.2 与 Node 26.7.0 上均为 **532/532 通过**。
+回归（`npm test` 口径）：Node 22.22.2 与 Node 26.7.0 上均为 **worker 532/532、bridge 47/47 通过**。
+（worker 目录下 `node --test` 自动发现多 1 例，合计 533，同为全绿。）
 
 ## 1. 提交清单
 
@@ -24,6 +25,7 @@
 | G2-R7 | `6db8e64` | g2-r7 fail closed when Drive cannot prove a lookup is complete | `archive/drive-client.js`、`archive/archiver.js`、`test/rds2-archive.test.js` |
 | C4 | `c02b2a4` | g2-c4 probe predecessors with a bounded indexed existence query | `projection/engine.js`、`test/rds2-projection-engine.test.js` |
 | C3 | `0d5e07e` | g2-c3 the replay comparison asserts the cursor too | `test/rds2-archive.test.js` |
+| C5 | `68a5737` | g2-c5 pin per-invocation budget isolation for Drive lookups | `test/rds2-archive.test.js` |
 
 ## 2. 逐项记录
 
@@ -82,8 +84,9 @@
 2. **默认 pageSize + reducer 部分消费**：R2「six events build with the default page size」与 R5 多页/单页用例均使用默认 50，暴露「读取 50 / 消费 5」的错配。
 3. **重放对账**：不再只断言行数——逐行 value 比较 + summary + revision + 活动 generation；`0d5e07e` 再补 cursor（`last_event_seq` = 冻结 target）与 revision 断言。
 4. **事件表前序积压**：新增「50 vs 400 事件积压下读取行数完全一致」与「未追平时返回 `deferred_predecessor`」两例；`projectOne` 的 `COUNT(*)` 范围统计改为 `PREDECESSOR_PROBE_SQL`（`SELECT 1 … LIMIT 1`），并用 `EXPLAIN QUERY PLAN` 断言走 `rds2_events_scope_seq_idx`（两个 binding 实测均为 `SEARCH … USING COVERING INDEX`，无 `SCAN`）。
-5. **每 invocation 独立 io**：既有隔离约束保持未动（未新增跨调用共享预算）。
-6. **实际新增测试数**：本轮修订（基线 `218ff8f`）新增 **31 个 `test()` 注册**，worker 全量 **532**。审核文档记的 48 例是 G2 提交口径（T05–T08 共 45 例 + 链路验收 3 例），两者相加即 `d19d8af..HEAD` 的 79 例；独立分支断言未计入总量。
+5. **每 invocation 独立 io**（审核 §2.5，本轮补齐为可执行断言）：`C5 a spent invocation budget stops Drive calls and only a new invocation gets a fresh one`。预算耗尽的 invocation 调 `findExact` 抛 `budget_exhausted`，且 `lists`/`uploads` 计数为 0（调用发生前即被拦下）；另起一个 invocation 从自己的预算开始，只计入它自己的那一次调用。
+   - 红灯取法：本项是既有契约，回退 R7 前（预 R7 的 `findExact` 同样使用 `io.fetch`）无法打红，故采用**性质破坏**——把 `createInvocationIo` 的预算改成模块级共享，模拟「预算泄漏到下一次 invocation」；此时第二次 invocation 继承已耗尽的预算，`findExact` 抛 `budget_exhausted`，`lists` 仍为 0，`not ok 1`。还原每 invocation 独立预算后双 binding 绿。
+6. **实际新增测试数**：本轮修订（基线 `218ff8f`）新增 **32 个 `test()` 注册**，worker 全量 **532**（`npm test` glob 口径）。审核文档记的 48 例是 G2 提交口径（T05–T08 共 45 例 + 链路验收 3 例），两者相加即 `d19d8af..HEAD` 的 79 例；独立分支断言未计入总量。
 7. **范围**：仅 G2 相关文件与必要迁移（0006 新增 `build_requires_building_flag`、游标防倒退触发及所需列）；G1 已修的身份、hash 与预算保护未回退。
 
 ## 4. 审核 §4 探针表逐行覆盖映射
@@ -104,10 +107,14 @@
 
 | 运行时 | worker | bridge |
 |---|---|---|
-| Node 22.22.2（managed） | 531 / 531 通过 | 47 / 47 通过 |
-| Node 26.7.0（system） | 531 / 531 通过 | 47 / 47 通过 |
+| Node 22.22.2（managed） | 532 / 532 通过 | 47 / 47 通过 |
+| Node 26.7.0（system） | 532 / 532 通过 | 47 / 47 通过 |
 
-在 worker 目录内以 `node --test` 自动发现运行时为 532/532（多出的 1 例是子目录内被显式 glob 漏掉的用例），同样全绿。
+命令：`node --test services/reliable-drive-sync-worker/test/*.js` 与
+`node --test tools/reliable-drive-sync-mcp/test/*.mjs`（即根 `package.json` 的
+`test:worker` / `test:bridge`）。C5 提交后复跑，两个运行时、两个套件均无失败。
+
+在 worker 目录内以 `node --test` 自动发现运行时为 533/533（多出的 1 例是子目录内被显式 glob 漏掉的用例），同样全绿。
 
 双 binding：`withD1` 让每条 D1 用例在 SQLite 模拟器与 Miniflare/workerd D1 上各跑一遍，全部通过。
 
@@ -116,3 +123,4 @@
 1. **「整除导致的空尾页」在当前 continuation 协议下不可达**：`nextEventSeq > target` 即判定完成，下一页任务只在未完成时创建，因此 `pages=0` 的路径只有「零事件构建」能触达。已用单页、多页、乱序包、缺页、跨 scope、畸形包覆盖，未构造人为空尾页——如需该路径的显式用例，请指明期望语义。
 2. **未跟踪的临时探针** `.rds2-probe-r3.mjs`、`.rds2-probe-c4.mjs`（本轮核对 EXPLAIN/重放行为所用，未提交）。是否删除请指示。
 3. 审核文档 §4 探针表的 9 行现象已在 §4 映射表中逐行对应到具体测试；如需独立的可执行复现脚本（而非测试内断言），请指明。
+4. **C5 的红灯采用「性质破坏」而非回退取法**（详见 §3 第 5 条）：该用例钉住的是既有契约，回退 R7 无法使其失败，故改成让预算跨 invocation 共享来验证它非同义反复。若复审要求红灯一律来自「回退实现」，请指明，我改用等价回退方案重取。
