@@ -13,6 +13,7 @@ import {
   updateTopic,
   latestWins,
   problemIdOf,
+  topicProblemRowKey,
   ALGORITHM_ROW_KINDS
 } from "../src/rds2/projection/algorithm.js";
 import { rebuildAlgorithmProfile } from "../src/algorithm-profile-model.js";
@@ -161,13 +162,14 @@ test("a learning event projects exactly the four bounded row kinds", async () =>
     assert.equal(problem.latest.outcome, "consulted");
     const topicProblem = rows.results.find((row) => row.row_kind === "topic_problem");
     assert.equal(topicProblem.member_key, "two-sum");
-    assert.equal(topicProblem.row_key, "Hot100:Two Sum");
+    assert.equal(topicProblem.row_key, topicProblemRowKey("two-sum", "Hot100:Two Sum"));
     const head = await rawDb.prepare(
       "SELECT summary_json FROM rds2_projections WHERE user_id = ?"
     ).bind(USER).first("summary_json");
     const summary = JSON.parse(head);
-    assert.deepEqual(Object.keys(summary).sort(), ["counts", "currentTopic", "headEventId", "identity"],
-      `(${binding}) the summary keeps only identity, headEventId, currentTopic and counts`);
+    assert.deepEqual(Object.keys(summary).sort(),
+      ["counts", "currentTopic", "headEventId", "identity", "lastReceivedEventId", "latest"],
+      `(${binding}) the summary keeps identity, the elected head, receipt order and counts`);
     assert.equal(summary.currentTopic, "two-sum");
     assert.equal(summary.counts.neutral, 1);
     assert.ok(!summary.evidence, `(${binding}) the summary never embeds an evidence array`);
@@ -231,7 +233,10 @@ test("a daily plan stores its row without changing the learning counts", async (
       "SELECT summary_json FROM rds2_projections WHERE user_id = ?"
     ).bind(USER).first("summary_json"));
     assert.deepEqual(after.counts, before.counts, `(${binding}) a daily plan never adds learning counts`);
-    assert.equal(after.headEventId, "55555555-5555-4555-8555-555555555555");
+    assert.equal(after.headEventId, "44444444-4444-4444-8444-444444444444",
+      `(${binding}) a daily plan never replaces the learning head`);
+    assert.equal(after.lastReceivedEventId, "55555555-5555-4555-8555-555555555555",
+      `(${binding}) receipt order lives in its own field`);
   });
 });
 
@@ -411,5 +416,163 @@ test("the paged rebuild fold matches the V1 oracle on a small fixture", async ()
       assert.equal(row.lastOutcome, mastery.lastOutcome, `(${binding}) latest outcome matches the oracle for ${topic}`);
       assert.equal(row.lastObservedAt, mastery.lastObservedAt);
     }
+    const builtSummary = await headSummary(rawDb);
+    assert.equal(builtSummary.headEventId, oracle.headEventId,
+      `(${binding}) the built head matches the V1 oracle`);
+    assert.equal(builtSummary.currentTopic, oracle.currentTopic,
+      `(${binding}) the built current topic matches the V1 oracle`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G2-R6 regression: the learning summary follows V1's (observedAt, eventId)
+// comparator — never the last event received — and the topic<->problem
+// relation is keyed by BOTH the topic and the problem.
+// ---------------------------------------------------------------------------
+
+async function headSummary(rawDb, userId = USER) {
+  const raw = await rawDb.prepare(
+    "SELECT summary_json FROM rds2_projections WHERE user_id = ?"
+  ).bind(userId).first("summary_json");
+  return raw === null || raw === undefined ? null : JSON.parse(raw);
+}
+
+test("R6 a late older event counts but never rewinds the summary head", async () => {
+  await runAlgorithmTest(async ({ binding, rawDb, makeIo }) => {
+    await acceptAndProject(makeIo, rawDb, learningEvent({
+      eventId: "70000000-0000-4000-8000-000000000001",
+      eventKey: `${USER}:alg:hash:2026-09-06T10:00:00.000Z`,
+      topic: "hash", observedAt: "2026-09-06T10:00:00.000Z", outcome: "correct"
+    }));
+    await acceptAndProject(makeIo, rawDb, learningEvent({
+      eventId: "70000000-0000-4000-8000-000000000002",
+      eventKey: `${USER}:alg:array:2026-09-05T10:00:00.000Z`,
+      topic: "array", observedAt: "2026-09-05T10:00:00.000Z", outcome: "incorrect"
+    }));
+    const summary = await headSummary(rawDb);
+    assert.equal(summary.currentTopic, "hash", `(${binding}) V1 keeps the newer head topic`);
+    assert.equal(summary.headEventId, "70000000-0000-4000-8000-000000000001",
+      `(${binding}) the head event id is the newer one`);
+    assert.equal(summary.counts.attempts, 2, `(${binding}) the late event still counts`);
+    assert.equal(summary.counts.negative, 1);
+    // V1 parity is checked against the V1 oracle itself, not just counters.
+    const oracle = rebuildAlgorithmProfile([
+      { schemaVersion: "1.2", eventId: "70000000-0000-4000-8000-000000000001", eventKey: "k-hash",
+        eventType: "algorithm.learning.completed", observedAt: "2026-09-06T10:00:00.000Z",
+        topic: "hash", outcome: "correct", problem: { title: "Two Sum", source: "Hot100" } },
+      { schemaVersion: "1.2", eventId: "70000000-0000-4000-8000-000000000002", eventKey: "k-array",
+        eventType: "algorithm.learning.completed", observedAt: "2026-09-05T10:00:00.000Z",
+        topic: "array", outcome: "incorrect", problem: { title: "Two Sum", source: "Hot100" } }
+    ]);
+    assert.equal(summary.headEventId, oracle.headEventId, `(${binding}) head matches the V1 oracle`);
+    assert.equal(summary.currentTopic, oracle.currentTopic);
+  });
+});
+
+test("R6 events at the same instant are decided by eventId, not by arrival", async () => {
+  await runAlgorithmTest(async ({ binding, rawDb, makeIo }) => {
+    const at = "2026-09-06T12:00:00.000Z";
+    // The higher event id arrives FIRST; V1 still elects it.
+    await acceptAndProject(makeIo, rawDb, learningEvent({
+      eventId: "71000000-0000-4000-8000-000000000009",
+      eventKey: `${USER}:alg:hash:same-instant-high`,
+      topic: "hash", observedAt: at, outcome: "correct"
+    }));
+    await acceptAndProject(makeIo, rawDb, learningEvent({
+      eventId: "71000000-0000-4000-8000-000000000001",
+      eventKey: `${USER}:alg:array:same-instant-low`,
+      topic: "array", observedAt: at, outcome: "incorrect"
+    }));
+    const summary = await headSummary(rawDb);
+    assert.equal(summary.headEventId, "71000000-0000-4000-8000-000000000009",
+      `(${binding}) the eventId tiebreak decides, not the arrival order`);
+    assert.equal(summary.currentTopic, "hash");
+  });
+});
+
+test("R6 the same problem under two topics keeps both relations", async () => {
+  await runAlgorithmTest(async ({ binding, rawDb, makeIo }) => {
+    await acceptAndProject(makeIo, rawDb, learningEvent({
+      eventId: "72000000-0000-4000-8000-000000000001",
+      eventKey: `${USER}:alg:hash:two-sum:1`, topic: "hash"
+    }));
+    await acceptAndProject(makeIo, rawDb, learningEvent({
+      eventId: "72000000-0000-4000-8000-000000000002",
+      eventKey: `${USER}:alg:array:two-sum:2`, topic: "array"
+    }));
+    const relations = await rawDb.prepare(
+      `SELECT row_key, member_key FROM rds2_projection_rows
+       WHERE user_id = ? AND row_kind = 'topic_problem'`
+    ).bind(USER).all();
+    assert.equal(relations.results.length, 2,
+      `(${binding}) one problem seen under two topics is two relations`);
+    assert.deepEqual(relations.results.map((row) => row.member_key).sort(), ["array", "hash"]);
+    const keys = relations.results.map((row) => row.row_key).sort();
+    assert.equal(keys[0], JSON.stringify(["array", "Hot100:Two Sum"]),
+      `(${binding}) the relation key carries the topic AND the problem`);
+    assert.equal(keys[1], JSON.stringify(["hash", "Hot100:Two Sum"]));
+  });
+});
+
+test("R6 a daily plan never moves the learning head", async () => {
+  await runAlgorithmTest(async ({ binding, rawDb, makeIo }) => {
+    await acceptAndProject(makeIo, rawDb, learningEvent());
+    const before = await headSummary(rawDb);
+    await acceptAndProject(makeIo, rawDb, dailyPlanEvent("req-plan-r6", "plan-2026-09-07"));
+    const after = await headSummary(rawDb);
+    assert.equal(after.headEventId, "44444444-4444-4444-8444-444444444444",
+      `(${binding}) a plan event must not replace the learning head`);
+    assert.equal(after.currentTopic, "two-sum");
+    assert.deepEqual(after.counts, before.counts);
+    assert.equal(after.lastReceivedEventId, "55555555-5555-4555-8555-555555555555",
+      `(${binding}) receipt order is a separate field, never the learning head`);
+  });
+});
+
+test("R6 a plan-only scope keeps an empty learning summary", async () => {
+  await runAlgorithmTest(async ({ binding, rawDb, makeIo }) => {
+    await acceptAndProject(makeIo, rawDb, dailyPlanEvent("req-plan-only", "plan-2026-09-08"));
+    const summary = await headSummary(rawDb);
+    assert.equal(summary, null, `(${binding}) no learning event means no learning summary`);
+  });
+});
+
+test("R6 the paged build elects the same head as the incremental path", async () => {
+  await runAlgorithmTest(async ({ binding, rawDb, makeIo }) => {
+    await acceptAndProject(makeIo, rawDb, learningEvent({
+      eventId: "73000000-0000-4000-8000-000000000001",
+      eventKey: `${USER}:alg:hash:2026-09-06T10:00:00.000Z`,
+      topic: "hash", observedAt: "2026-09-06T10:00:00.000Z", outcome: "correct"
+    }));
+    await acceptAndProject(makeIo, rawDb, learningEvent({
+      eventId: "73000000-0000-4000-8000-000000000002",
+      eventKey: `${USER}:alg:array:2026-09-05T10:00:00.000Z`,
+      topic: "array", observedAt: "2026-09-05T10:00:00.000Z", outcome: "incorrect"
+    }));
+    const currentHead = await rawDb.prepare(
+      "SELECT revision FROM rds2_projections WHERE user_id = ?"
+    ).bind(USER).first("revision");
+    await ensureBuild({
+      db: rawDb, scope: { userId: USER, namespace: "algorithm", projectionName: "learning" },
+      baseRevision: Number(currentHead), now: NOW
+    });
+    let completed = false;
+    for (let guard = 0; guard < 8 && !completed; guard += 1) {
+      const nextTask = await rawDb.prepare(
+        "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' LIMIT 1"
+      ).first("task_id");
+      if (!nextTask) break;
+      await dispatchOne({ io: makeIo(), taskId: nextTask, owner: "dispatch", now: NOW });
+      const result = await continueBuild({
+        io: makeIo(), taskId: nextTask, owner: "builder", now: NOW, reducer: algorithmReducer
+      });
+      completed = result.outcome === "completed";
+    }
+    assert.equal(completed, true, `(${binding}) the build activated`);
+    const summary = await headSummary(rawDb);
+    assert.equal(summary.headEventId, "73000000-0000-4000-8000-000000000001",
+      `(${binding}) the build fold uses V1's comparator, not page order`);
+    assert.equal(summary.currentTopic, "hash");
+    assert.equal(summary.counts.attempts, 2);
   });
 });

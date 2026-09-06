@@ -32,6 +32,44 @@ export function compareCandidates(left, right) {
   return at || String(left.eventId ?? "").localeCompare(String(right.eventId ?? ""));
 }
 
+// V1 parity: the topic<->problem relation is identified by BOTH the topic and
+// the problem. The same problem practised under two topics is two relations,
+// so the row key carries both — writes and point lookups MUST use this single
+// derivation (canonical array encoding, stable and reversible).
+export function topicProblemRowKey(topic, problemId) {
+  return canonicalJson([topic ?? "", problemId ?? ""]);
+}
+
+// The learning summary elects its head by V1's comparator — (observedAt, then
+// eventId) — never by arrival order. `latest` is that sort key; `headEventId`
+// and `currentTopic` are derived from it, and `lastReceivedEventId` records
+// receipt order as a SEPARATE diagnostic field.
+function latestKeyOf(summary) {
+  if (!summary) return null;
+  if (summary.latest) return summary.latest;
+  // A summary written before the sort key existed: keep its head but never
+  // let it outrank an event we can actually compare.
+  return summary.headEventId
+    ? { observedAt: null, eventId: summary.headEventId, topic: summary.currentTopic ?? null }
+    : null;
+}
+
+function electedSummary({ previous, event, topic, outcome }) {
+  const candidate = { observedAt: event.observedAt, eventId: event.eventId, topic };
+  const winner = latestWins(latestKeyOf(previous), candidate);
+  const identity = winner === candidate || !previous?.identity
+    ? { userId: event.userId ?? null, username: event.username ?? null }
+    : previous.identity;
+  return {
+    identity,
+    headEventId: winner.eventId,
+    currentTopic: winner.topic,
+    latest: winner,
+    lastReceivedEventId: event.eventId,
+    counts: updateTopic(previous?.counts ?? null, { outcome })
+  };
+}
+
 export function latestWins(current, candidate) {
   if (!current) return candidate;
   return compareCandidates(candidate, current) > 0 ? candidate : current;
@@ -67,7 +105,7 @@ export const algorithmReducer = {
     const reads = [{ as: "topic", rowKind: "topic", rowKey: topic }];
     if (problemId) {
       reads.push({ as: "problem", rowKind: "problem", rowKey: problemId });
-      reads.push({ as: "topicProblem", rowKind: "topic_problem", rowKey: problemId, memberKey: topic });
+      reads.push({ as: "topicProblem", rowKind: "topic_problem", rowKey: topicProblemRowKey(topic, problemId), memberKey: topic });
     }
     return reads;
   },
@@ -82,7 +120,8 @@ export const algorithmReducer = {
         throw error;
       }
       // A daily plan is stored as an immutable row; it never changes the
-      // learning counters.
+      // learning counters and never moves the learning head — receipt order
+      // is recorded in its own field.
       return {
         rowChanges: [{
           rowKind: "daily_plan",
@@ -95,7 +134,7 @@ export const algorithmReducer = {
           }
         }],
         summary: head.summary
-          ? { ...head.summary, headEventId: event.eventId }
+          ? { ...head.summary, lastReceivedEventId: event.eventId }
           : null
       };
     }
@@ -151,20 +190,22 @@ export const algorithmReducer = {
       });
       if (!rows.topicProblem) {
         rowChanges.push({
-          rowKind: "topic_problem", rowKey: problemId, memberKey: topic, sortKey: topic, value: {}
+          rowKind: "topic_problem", rowKey: topicProblemRowKey(topic, problemId), memberKey: topic, sortKey: topic, value: {}
         });
       }
     }
 
-    const previousCounts = head.summary?.counts ?? null;
     return {
       rowChanges,
-      summary: {
-        identity: { userId: event.userId, username: event.username },
-        headEventId: event.eventId,
-        currentTopic: topic,
-        counts: updateTopic(previousCounts, { outcome })
-      }
+      summary: electedSummary({
+        previous: head.summary,
+        event: {
+          eventId: event.eventId, observedAt: learning.observedAt,
+          userId: event.userId, username: event.username
+        },
+        topic,
+        outcome
+      })
     };
   },
 
@@ -173,11 +214,11 @@ export const algorithmReducer = {
   buildPage({ events, continuation }) {
     const accumulators = continuation.topics ? continuation : {
       topics: {}, problems: {}, counts: { attempts: 0, negative: 0, positive: 0, neutral: 0 },
-      stagedCount: 0, nextEventSeq: continuation.nextEventSeq, page: continuation.page ?? 1
+      stagedCount: 0, nextEventSeq: continuation.nextEventSeq, page: continuation.page ?? 1,
+      latest: null, headIdentity: null, lastReceivedEventId: null
     };
     const rowChanges = [];
     let processed = 0;
-    let summaryOfLast = null;
     for (const event of events) {
       const learning = learningOf(event);
       if (learning) {
@@ -228,15 +269,17 @@ export const algorithmReducer = {
           rowChanges.push({
             rowKind: "problem", rowKey: problemId, sortKey: topic, value: accumulators.problems[problemId]
           }, {
-            rowKind: "topic_problem", rowKey: problemId, memberKey: topic, sortKey: topic, value: {}
+            rowKind: "topic_problem", rowKey: topicProblemRowKey(topic, problemId), memberKey: topic, sortKey: topic, value: {}
           });
         }
-        summaryOfLast = {
-          identity: { userId: event.userId, username: event.username },
-          headEventId: event.eventId,
-          currentTopic: topic,
-          counts: accumulators.counts
-        };
+        // The fold elects the head with V1's comparator, exactly like the
+        // incremental path: page order is arrival order, never seniority.
+        const candidate = { observedAt: learning.observedAt, eventId: event.eventId, topic };
+        const winner = latestWins(accumulators.latest ?? null, candidate);
+        accumulators.latest = winner;
+        if (winner === candidate) {
+          accumulators.headIdentity = { userId: event.userId ?? null, username: event.username ?? null };
+        }
       } else {
         const plan = planOf(event);
         if (plan) {
@@ -248,9 +291,11 @@ export const algorithmReducer = {
               generatedAt: plan.generatedAt, items: plan.items
             }
           });
-          summaryOfLast = null;
+          // A plan row contributes no learning head; an already accumulated
+          // summary survives it.
         }
       }
+      accumulators.lastReceivedEventId = event.eventId;
       processed += 1;
       // The commit bound is 20 row changes; leave the rest for the next page.
       if (rowChanges.length > 20 - 4) break;
@@ -264,9 +309,21 @@ export const algorithmReducer = {
     const nextEventSeq = consumed.length
       ? consumed[consumed.length - 1].eventSeq + 1
       : continuation.nextEventSeq;
+    // The head is elected over everything consumed so far, so a page ending
+    // on a daily plan can never wipe the built summary.
+    const summary = accumulators.latest
+      ? {
+          identity: accumulators.headIdentity ?? { userId: null, username: null },
+          headEventId: accumulators.latest.eventId,
+          currentTopic: accumulators.latest.topic,
+          latest: accumulators.latest,
+          lastReceivedEventId: accumulators.lastReceivedEventId,
+          counts: accumulators.counts
+        }
+      : null;
     return {
       rowChanges,
-      summary: summaryOfLast,
+      summary,
       continuation: {
         ...accumulators,
         nextEventSeq,
