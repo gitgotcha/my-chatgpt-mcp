@@ -23,6 +23,9 @@ invocation 预算断言，审核文档入库，临时探针已定点清理。
 
 ## 1. 提交清单
 
+下表**严格按 git 历史由旧到新排列**（可用 `git log --oneline` 逐行核对）；
+`218ff8f` 为基线（本轮之前的最后一个提交），未列入表内。
+
 | 编号 | SHA | 提交标题 | 变更 |
 |---|---|---|---|
 | G2-R1 | `d1a37fa` | g2-r1 recovery pass dispatches due pending tasks | `tasks/recovery.js`、`tasks/repository.js`、`test/rds2-g2-chain.test.js`、`test/rds2-tasks.test.js` |
@@ -34,16 +37,22 @@ invocation 预算断言，审核文档入库，临时探针已定点清理。
 | G2-R7 | `6db8e64` | g2-r7 fail closed when Drive cannot prove a lookup is complete | `archive/drive-client.js`、`archive/archiver.js`、`test/rds2-archive.test.js` |
 | C4 | `c02b2a4` | g2-c4 probe predecessors with a bounded indexed existence query | `projection/engine.js`、`test/rds2-projection-engine.test.js` |
 | C3 | `0d5e07e` | g2-c3 the replay comparison asserts the cursor too | `test/rds2-archive.test.js` |
+| DOC | `9c076cb` | g2 fix record for R1-R7 and the coverage corrections | `docs/…/2026-09-06-rds2-g2-fix-record.md` |
+| DOC | `ff79cb6` | map every probe row of the G2 review to its covering test | `docs/…/2026-09-06-rds2-g2-fix-record.md` |
 | C5 | `68a5737` | g2-c5 pin per-invocation budget isolation for Drive lookups | `test/rds2-archive.test.js` |
-| C5b | `1b931bc` | g2-c5 a new client over the same exhausted io changes nothing | `test/rds2-archive.test.js` |
+| DOC | `a260895` | record g2-c5 and re-run the dual-version regression | `docs/…/2026-09-06-rds2-g2-fix-record.md` |
 | R5b | `0852801` | g2-r5 replace the empty-terminator case and cover the zero-event build | `test/rds2-archive.test.js` |
 | R2b | `4f69982` | g2-r2 reject a reducer cursor that passes the page it was given | **`projection/builds.js`（实现变更）** |
 | R2c | `8e0179a` | g2-r2 cover the event-count boundaries, the cross-user hole and appended events | `test/rds2-projection-engine.test.js` |
 | R7b | `ab3e059` | g2-r7 two same-name objects park the task through archiveOne | `test/rds2-archive.test.js` |
 | R4b | `dc9b379` | g2-r4 a build owner that loses the lease before the guard commits | `test/rds2-projection-engine.test.js` |
-| DOC | `1793e65` | docs(rds2): commit the G2 review document with an acceptance addendum | `docs/…/2026-09-06-rds2-g2-codex-review.md` |
+| C5b | `1b931bc` | g2-c5 a new client over the same exhausted io changes nothing | `test/rds2-archive.test.js` |
+| DOC | `1793e65` | commit the G2 review document with an acceptance addendum | `docs/…/2026-09-06-rds2-g2-codex-review.md` |
+| DOC | `60bc5f9` | record the follow-up round — mappings, SHAs, dual-version regression | `docs/…/2026-09-06-rds2-g2-fix-record.md` |
 | R2d/R4c/R3b | `fedb44a` | g2 close the remaining R2/R3/R4 supplementary cases | `test/rds2-projection-engine.test.js` |
+| DOC | `57b7f40` | record the supplementary cases and the 552-case regression | `docs/…/2026-09-06-rds2-g2-fix-record.md` |
 | R3c | `f3a859d` | g2-r3 make the duplicate-message case reach already_applied | `test/rds2-projection-engine.test.js` |
+| DOC | `1c1edcb` | record the mutation audit and the final dual-version regression | `docs/…/2026-09-06-rds2-g2-fix-record.md` |
 
 ## 2. 逐项记录
 
@@ -111,7 +120,7 @@ invocation 预算断言，审核文档入库，临时探针已定点清理。
 6. **实际新增测试数**：基线 `218ff8f` 的 worker 全量为 **500**，本轮修订后为 **552**，实际新增 **52 个用例**（其中 7 个来自 R2 事件数参数化循环、3 个来自页上限参数化循环）。审核文档记的 48 例是 G2 提交口径（T05–T08 共 45 例 + 链路验收 3 例），两者相加为 **48 + 52 = 100**；此前 79/80 的写法均基于更早的计数，已作废。独立分支断言未计入总量。
 7. **审核文档逐条补测清单的对账结论**：R1/R5/R6/R7 的补测清单已逐条覆盖；R2/R3/R4 除下列「不可达/不适用」项外也已覆盖：
    - R2「32 条语句上限」：构建路径单次批最多 29 条（20 行变更 + 守卫 + 2 页包 + 4 激活 + 完成 + 删守卫），**无法从构建路径触达**该上限，故不构造人为用例；上限仍在 `builds.js` 中校验（`commit_batch_too_large`），增量路径的越界拒绝由既有用例覆盖。
-   - R4「已完成重放」：由 `R5 a single-page build freezes exactly one package and replays in any order` 与 `R5 offline replay needs every build package…` 覆盖（重放已完成的构建产物）。
+   - R4「已完成重放」：由 `R5 a single-page build freezes exactly one package and replays in any order` 与 `R5 offline replay needs every build package and reproduces the live projection` 覆盖（重放已完成的构建产物）。
 7. **范围**：仅 G2 相关文件与必要迁移（0006 新增 `build_requires_building_flag`、游标防倒退触发及所需列）；G1 已修的身份、hash 与预算保护未回退。
 
 ## 4. 审核 §4 探针表逐行覆盖映射
@@ -123,7 +132,7 @@ invocation 预算断言，审核文档入库，临时探针已定点清理。
 | 构建 target=2、随后新增第 3 个事件 → 计数 3、cursor 只到 2 | 只消费冻结 target 内事件，cursor 到 target | `R2 a build never reads past its frozen target` |
 | 构建覆盖后的原任务再消费 → 重复计数、cursor 倒退 | 直接收敛，不重算、不倒退 | `R3 a stale projection task converges without re-applying its event`；`R3 the head cursor regression is aborted by the database` |
 | 4 事件 / page size 2 的离线恢复 → D1 有 7 行、replay 0 行、summary=null | 重放等于实时投影（含 summary），页包齐全 | `R5 offline replay needs every build package and reproduces the live projection`；`R5 a multi-page build freezes every page and the activation references them`；`R5 the last non-empty page reaching the frozen target activates in place`（4 事件 / pageSize 2，manifest `pages=2`、无第三页任务、重放对账）；`R5 a zero-event build activates with an empty manifest and still replays`（rds2-archive） |
-| 旧 owner 被抢租约后激活 → 返回 completed，实际 building=1 | 由 DB 权威状态判定，丢租约不谎报 | **`R4 an owner that loses the lease before the guard commits cannot report success`（构建激活路径专用，rds2-projection-engine）**；另附 `R4 a page task whose build is already settled converges itself`、`a stale owner's completion writes zero rows and is not acknowledged`（rds2-archive，已结束构建/归档侧，不能替代本行） |
+| 旧 owner 被抢租约后激活 → 返回 completed，实际 building=1 | 由 DB 权威状态判定，丢租约不谎报 | **`R4 an owner that loses the lease before the activation guard commits cannot report success`（构建激活路径专用，rds2-projection-engine）**；另附 `R4 a page task whose build is already settled converges itself`、`a stale owner's completion writes zero rows and is not acknowledged`（rds2-archive，已结束构建/归档侧，不能替代本行） |
 | 构建启动前 base 变化 → 陈旧 base build 留存、后续只 defer | 原子中止并释放 building，下一趟重新决策 | `R4 ensureBuild refuses a stale base revision atomically`；`R4 a build whose base moved aborts diagnostically and releases the scope` |
 | 同题跨专题、迟到旧事件 → 第二关系丢失、全局 latest 倒退 | 两条关系都在，latest 按比较器不退 | `R6 the same problem under two topics keeps both relations`；`R6 a late older event counts but never rewinds the summary head`（rds2-algorithm） |
 | Drive 分页：fake 带 nextPageToken 仍返回 [] | fail closed，upload 调用数 0 | `R7 an empty page that carries nextPageToken is refused, never 'not found'`；`R7 an incomplete search never uploads and never marks an artifact delivered`；`R7 two same-name objects park the whole archive task as ambiguous_artifact`（rds2-archive） |
