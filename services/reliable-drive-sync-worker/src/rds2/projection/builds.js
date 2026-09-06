@@ -7,6 +7,7 @@
 import { claimForProcessing, deferTask, completeTask, getTask, parkNeedsAttention } from "../tasks/repository.js";
 import { commitActivation, buildDelta, assertRowChangesBounded, MAX_COMMIT_STATEMENTS, MAX_DELTA_BYTES } from "./commit.js";
 import { canonicalJson } from "../../../../../shared/rds2-protocol.mjs";
+import { closeOutFailure } from "../errors/close-out.js";
 import { deriveTaskId } from "../events/repository.js";
 import { hashText } from "../identity/hashing.js";
 
@@ -433,16 +434,20 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
     return stepResult("completed", taskId, "build_activated");
   } catch (error) {
     if (error?.code === "changes_too_large" || error?.code === "commit_batch_too_large") throw error;
-    const deferred = await deferTask({ db: io.db, lease, now, availableAt: now });
-    if (!deferred.rowsWritten) {
-      // The lease was taken over — only the AUTHORITATIVE state may declare
-      // the build complete (R4 verifies task, build stage, head and cursor).
-      const converged = await verifyBuildActivated({ db: io.db, scope, build });
-      return converged
-        ? stepResult("completed", taskId, "build_activated")
-        : stepResult("noop", taskId, "lease_lost");
-    }
-    return stepResult("retry", taskId, "deferred_commit_failed");
+    // G2-F2: a storage fault is no longer blanket-deferred at availableAt=now.
+    // The error is translated to its specific marker once, then closed out by
+    // class: a lease/CAS conflict re-checks the authoritative state (never
+    // claiming success without it), a transient fault counts and backs off,
+    // and a deterministic contract error parks with a stable reason instead of
+    // retrying forever.
+    return closeOutFailure({
+      io,
+      lease,
+      now,
+      taskId,
+      error,
+      verifyAuthoritative: () => verifyBuildActivated({ db: io.db, scope, build })
+    });
   }
 }
 

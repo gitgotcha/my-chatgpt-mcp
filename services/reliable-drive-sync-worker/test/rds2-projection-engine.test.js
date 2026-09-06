@@ -1346,3 +1346,111 @@ test("a backlogged predecessor defers the newer event instead of skipping it", a
       `(${binding}) the newer event waits for its predecessor`);
   });
 });
+
+test("F2 repeated real storage failures count, back off and park at the threshold", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    await seedEventsThroughAccept(makeIo, rawDb, 2);
+    const before = await loadProjectionHead(io.db, SCOPE_A);
+    await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: before.revision, now: NOW });
+    const pageTask = await rawDb.prepare(
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' LIMIT 1"
+    ).first("task_id");
+    assert.ok(pageTask, `(${binding}) the build must have queued its first page`);
+
+    const observed = [];
+    let clock = NOW;
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const row = await rawDb.prepare(
+        "SELECT available_at FROM rds2_tasks WHERE task_id = ?"
+      ).bind(pageTask).first();
+      // Advance only to the moment the task is actually due: the backoff is
+      // what we are measuring, so we must not hand-wave it away.
+      if (row?.available_at && row.available_at > clock) clock = row.available_at;
+      await rawDb.prepare(
+        "UPDATE rds2_tasks SET state = 'queued', available_at = ? WHERE task_id = ?"
+      ).bind(clock, pageTask).run();
+
+      const result = await continueBuild({
+        io: failingBatchIo(makeIo()),
+        taskId: pageTask,
+        owner: "builder",
+        now: clock,
+        reducer: algorithmReducer
+      });
+      const after = await rawDb.prepare(
+        "SELECT state, failure_count, available_at FROM rds2_tasks WHERE task_id = ?"
+      ).bind(pageTask).first();
+      observed.push({
+        attempt,
+        outcome: result.outcome,
+        code: result.code,
+        state: after.state,
+        failureCount: Number(after.failure_count),
+        backoffSeconds: (Date.parse(after.available_at) - Date.parse(clock)) / 1000
+      });
+    }
+
+    const detail = `(${binding}) ${JSON.stringify(observed)}`;
+    // The pre-F2 behaviour was: every attempt deferred at availableAt = now,
+    // failure_count stayed 0 and the task never parked.
+    assert.deepEqual(
+      observed.map((entry) => entry.failureCount),
+      [1, 2, 3, 4, 5],
+      `a real failure must be counted every time. ${detail}`
+    );
+    assert.deepEqual(
+      observed.map((entry) => entry.backoffSeconds),
+      [30, 60, 120, 240, 480],
+      `the backoff schedule must apply. ${detail}`
+    );
+    assert.deepEqual(
+      observed.slice(0, 4).map((entry) => entry.outcome),
+      ["retry", "retry", "retry", "retry"],
+      `a transient fault retries instead of parking on the first failure. ${detail}`
+    );
+    assert.equal(observed[4].outcome, "needs_attention",
+      `the fifth consecutive failure parks the task for a human. ${detail}`);
+    assert.equal(observed[4].state, "needs_attention", detail);
+    for (const entry of observed.slice(0, 4)) {
+      assert.equal(entry.state, "pending", `${JSON.stringify(entry)} ${detail}`);
+    }
+  });
+});
+
+test("F2 a lease conflict during the commit is never counted as a real failure", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    await seedEventsThroughAccept(makeIo, rawDb, 2);
+    const before = await loadProjectionHead(io.db, SCOPE_A);
+    await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: before.revision, now: NOW });
+    const pageTask = await rawDb.prepare(
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' LIMIT 1"
+    ).first("task_id");
+
+    // The measured shape of rds2_guard_task aborting (SQLite binding).
+    const guardError = new Error("stale_task_write");
+    guardError.code = "ERR_SQLITE_ERROR";
+    guardError.errcode = 1811;
+    await rawDb.prepare(
+      "UPDATE rds2_tasks SET state = 'queued', available_at = ? WHERE task_id = ?"
+    ).bind(NOW, pageTask).run();
+    const stealingIo = (() => {
+      const inner = makeIo();
+      return { ...inner, db: { ...inner.db, batch: async () => { throw guardError; } } };
+    })();
+
+    const result = await continueBuild({
+      io: stealingIo, taskId: pageTask, owner: "builder", now: NOW, reducer: algorithmReducer
+    });
+    const after = await rawDb.prepare(
+      "SELECT state, failure_count FROM rds2_tasks WHERE task_id = ?"
+    ).bind(pageTask).first();
+    assert.equal(result.outcome, "noop",
+      `(${binding}) a lost lease is not success and not a failure, got ${JSON.stringify(result)}`);
+    assert.equal(result.code, "lease_lost");
+    assert.equal(Number(after.failure_count), 0,
+      `(${binding}) a recognised race must not raise the real failure count`);
+    // The task still holds a processing lease, so the state is untouched here;
+    // what matters is that neither a backoff nor a count was written.
+    assert.equal(Number(after.failure_count), 0);
+  });
+});
