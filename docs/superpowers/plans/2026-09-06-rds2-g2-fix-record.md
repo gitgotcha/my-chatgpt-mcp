@@ -17,7 +17,9 @@ invocation 预算断言，审核文档入库，临时探针已定点清理。
 **本轮有一项实现变更**：R2 新测试暴露「reducer 消费游标只校验冻结目标上界、
 未校验本次读取页」的缺口，已修（`4f69982`，可单独回退）。详见 §6.3。
 
-回归（`npm test` 口径）：Node 22.22.2 与 Node 26.7.0 上均为 **worker 546/546、bridge 47/47 通过**。
+回归（`npm test` 口径）：Node 22.22.2 与 Node 26.7.0 上均为 **worker 552/552、bridge 47/47 通过**。
+
+审核文档 §1–§4 的补测清单已逐条对账：R1/R5/R6/R7 全部覆盖；R2/R3/R4 的全部可达路径均已覆盖，仅「32 条语句上限」在构建路径不可达（见 §3 第 7 条）。
 
 ## 1. 提交清单
 
@@ -40,6 +42,7 @@ invocation 预算断言，审核文档入库，临时探针已定点清理。
 | R7b | `ab3e059` | g2-r7 two same-name objects park the task through archiveOne | `test/rds2-archive.test.js` |
 | R4b | `dc9b379` | g2-r4 a build owner that loses the lease before the guard commits | `test/rds2-projection-engine.test.js` |
 | DOC | `1793e65` | docs(rds2): commit the G2 review document with an acceptance addendum | `docs/…/2026-09-06-rds2-g2-codex-review.md` |
+| R2d/R4c/R3b | `fedb44a` | g2 close the remaining R2/R3/R4 supplementary cases | `test/rds2-projection-engine.test.js` |
 
 ## 2. 逐项记录
 
@@ -104,7 +107,10 @@ invocation 预算断言，审核文档入库，临时探针已定点清理。
    - 两者仍**不构成 T14 完整入口预算证明**，只证明预算挂在 invocation 上、不能被调用方置换。
    - 红灯取法：本项是既有契约，回退 R7 前（预 R7 的 `findExact` 同样使用 `io.fetch`）无法打红，故采用**变异测试**——把 `createInvocationIo` 的预算改成模块级共享，模拟「预算泄漏到下一次 invocation」；此时第二次 invocation 继承已耗尽的预算，`findExact` 抛 `budget_exhausted`，`lists` 仍为 0，`not ok 1`。还原每 invocation 独立预算后双 binding 绿。
    - 性质：这是**变异测试证据，不是历史缺陷的回退红灯**；按要求已如实标注，未改写历史提交。
-6. **实际新增测试数**：基线 `218ff8f` 的 worker 全量为 **500**，本轮修订后为 **546**，实际新增 **46 个用例**（其中 7 个来自 R2 事件数参数化循环）。审核文档记的 48 例是 G2 提交口径（T05–T08 共 45 例 + 链路验收 3 例），两者相加为 **48 + 46 = 94**；此前 79/80 的写法均基于更早的计数，已作废。独立分支断言未计入总量。
+6. **实际新增测试数**：基线 `218ff8f` 的 worker 全量为 **500**，本轮修订后为 **552**，实际新增 **52 个用例**（其中 7 个来自 R2 事件数参数化循环、3 个来自页上限参数化循环）。审核文档记的 48 例是 G2 提交口径（T05–T08 共 45 例 + 链路验收 3 例），两者相加为 **48 + 52 = 100**；此前 79/80 的写法均基于更早的计数，已作废。独立分支断言未计入总量。
+7. **审核文档逐条补测清单的对账结论**：R1/R5/R6/R7 的补测清单已逐条覆盖；R2/R3/R4 除下列「不可达/不适用」项外也已覆盖：
+   - R2「32 条语句上限」：构建路径单次批最多 29 条（20 行变更 + 守卫 + 2 页包 + 4 激活 + 完成 + 删守卫），**无法从构建路径触达**该上限，故不构造人为用例；上限仍在 `builds.js` 中校验（`commit_batch_too_large`），增量路径的越界拒绝由既有用例覆盖。
+   - R4「已完成重放」：由 `R5 a single-page build freezes exactly one package and replays in any order` 与 `R5 offline replay needs every build package…` 覆盖（重放已完成的构建产物）。
 7. **范围**：仅 G2 相关文件与必要迁移（0006 新增 `build_requires_building_flag`、游标防倒退触发及所需列）；G1 已修的身份、hash 与预算保护未回退。
 
 ## 4. 审核 §4 探针表逐行覆盖映射
@@ -125,8 +131,8 @@ invocation 预算断言，审核文档入库，临时探针已定点清理。
 
 | 运行时 | worker | bridge |
 |---|---|---|
-| Node 22.22.2（managed） | 546 / 546 通过 | 47 / 47 通过 |
-| Node 26.7.0（system） | 546 / 546 通过 | 47 / 47 通过 |
+| Node 22.22.2（managed） | 552 / 552 通过 | 47 / 47 通过 |
+| Node 26.7.0（system） | 552 / 552 通过 | 47 / 47 通过 |
 
 命令：`node --test services/reliable-drive-sync-worker/test/*.js` 与
 `node --test tools/reliable-drive-sync-mcp/test/*.mjs`（即根 `package.json` 的
@@ -145,6 +151,7 @@ invocation 预算断言，审核文档入库，临时探针已定点清理。
 | 5. 九行探针表映射纠正 | 新增构建激活路径专用丢租约测试；R4 行已标注「已结束构建/归档侧不可替代」 | `dc9b379` |
 | 6. 审核文档入库 + 数字纠正 | 原文结论与复现证据原样保留，追加 §5 验收调整说明 | `1793e65` |
 | 7. C5 标注 + 同 invocation 断言 | 已标注为变异测试证据；补「同一 invocation 换新客户端不改预算」 | `1b931bc` |
+| 追加：审核文档逐条补测对账 | R2 中间页上限（20 行 / 64KiB / 256KiB）、R4 同 scope 双 build、R4 存储失败、R3 重复消息 | `fedb44a` |
 
 ### 6.1 红灯与证据性质
 
@@ -152,6 +159,7 @@ invocation 预算断言，审核文档入库，临时探针已定点清理。
 |---|---|---|
 | R2 reducer 越过本次读取页 | 新测试直接暴露实现缺口（无需变异） | 修复前 `continued`，期望 `needs_attention/build_no_progress`；修复后绿 |
 | R4 构建激活前丢租约 | 变异：把权威完成判定改回「丢租约也报 `build_activated`」 | 变异下首条断言失败（`not ok 1`）；还原后双 binding 绿 |
+| R4 存储失败不当永久暂缓 | 变异：把提交失败的兜底一律改为 park `needs_attention` | 变异下 `needs_attention`（期望 `retry/deferred_commit_failed`）；还原后绿 |
 | C5 每 invocation 独立预算 | 变异：预算改模块级共享 | `not ok 1`（`budget_exhausted`）；还原后绿 |
 | R5 / R7 / R2 边界与场景 | 既有正确行为，允许首次即绿 | 均双 binding 绿 |
 
