@@ -97,7 +97,10 @@ export async function markQueued({ db, taskId, owner, epoch, now }) {
 // expiry, so an owner whose lease expired or was taken over writes zero rows.
 export async function completeTask({ db, lease, now }) {
   const result = await db.prepare(
-    `UPDATE rds2_tasks SET state = 'completed', lease_owner = NULL, lease_until = NULL, updated_at = ?
+    // Success clears the consecutive-failure counter here too: this is the
+    // authoritative completion path, and an admin replay is not a substitute.
+    `UPDATE rds2_tasks SET state = 'completed', lease_owner = NULL, lease_until = NULL,
+       failure_count = 0, updated_at = ?
      WHERE task_id = ? AND state = 'processing'
        AND lease_owner = ? AND lease_epoch = ? AND lease_until > ?`
   ).bind(now, lease.taskId, lease.owner, lease.epoch, now).run();

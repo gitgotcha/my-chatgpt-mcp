@@ -4,6 +4,7 @@
 // guarded batch. Out-of-order events, concurrent build activity and lost
 // races are deferred — never applied out of turn, never counted as failures.
 import { claimForProcessing, deferTask, completeTask, getTask } from "../tasks/repository.js";
+import { closeOutFailure } from "../errors/close-out.js";
 import { loadProjectionHead, ensureBuild, fetchEventBySeq } from "./builds.js";
 import { commitProjection } from "./commit.js";
 
@@ -99,13 +100,21 @@ export async function projectOne({ io, taskId, owner, now, reducer, lease = null
     // A reducer that exceeds the bounded commit limits is a programming
     // error: it must never be truncated and never silently deferred.
     if (error?.code === "changes_too_large" || error?.code === "commit_batch_too_large") throw error;
-    // Guard rejections (a racing commit won) and storage failures roll the
-    // whole batch back; the task defers with a clean failure count.
-    const deferred = await deferTask({ db: io.db, lease: activeLease, now, availableAt: now });
-    if (!deferred.rowsWritten) {
-      const task = await getTask(io.db, taskId);
-      if (task?.state === "completed") return stepResult("completed", taskId, null);
-    }
-    return stepResult("retry", taskId, "deferred_commit_failed");
+    // G2-F2: classified exactly like the build path. A racing commit is not a
+    // real failure (and must not be reported as success without checking the
+    // authoritative state); a transient fault counts and backs off; a
+    // deterministic contract error parks instead of deferring forever.
+    return closeOutFailure({
+      io,
+      lease: activeLease,
+      now,
+      taskId,
+      error,
+      verifiedCode: null,
+      verifyAuthoritative: async () => {
+        const task = await getTask(io.db, taskId);
+        return task?.state === "completed";
+      }
+    });
   }
 }

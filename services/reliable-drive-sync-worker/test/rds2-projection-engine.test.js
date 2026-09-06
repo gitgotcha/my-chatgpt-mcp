@@ -272,8 +272,12 @@ test("a failing write inside the commit batch rolls the whole projection back", 
           const corrupted = [...records];
           // The head update (second-to-last statement) is forced to fail.
           corrupted[records.length - 3] = rawDb.prepare(
-            `INSERT INTO rds2_tasks (task_id, type, user_id, namespace, projection_name, event_seq, state, available_at, created_at, updated_at)
-             VALUES ('fault', 'bogus-type', 'u', 'n', 'p', 1, 'pending', '${NOW}', '${NOW}', '${NOW}')`
+            // A transient storage fault, deliberately NOT a constraint
+            // violation: the point of this case is an infra-level write
+            // failure. (A CHECK violation is deterministic and, since G2-F2,
+            // parks instead of retrying — see the classification in
+            // src/rds2/errors/storage-error.js.)
+            `INSERT INTO rds2_no_such_table (x) VALUES (1)`
           );
           return rawDb.batch(corrupted);
         }
@@ -298,7 +302,11 @@ test("a failing write inside the commit batch rolls the whole projection back", 
     const task = await rawDb.prepare("SELECT state, failure_count FROM rds2_tasks WHERE task_id = ?")
       .bind(`task-11-${eventSeqs[0]}`).first();
     assert.equal(task.state, "pending", `(${binding}) the task is back to pending`);
-    assert.equal(task.failure_count, 0, `(${binding}) an infra failure is not a business failure`);
+    // G2-F2: this assertion used to be 0, which was the bug — a real storage
+    // failure was never counted, so it could retry forever with no backoff and
+    // never park. One failure is still retryable; it is simply counted now.
+    assert.equal(task.failure_count, 1,
+      `(${binding}) a real storage failure is counted and backs off, but does not park yet`);
   });
 });
 
@@ -1414,6 +1422,91 @@ test("F2 repeated real storage failures count, back off and park at the threshol
     for (const entry of observed.slice(0, 4)) {
       assert.equal(entry.state, "pending", `${JSON.stringify(entry)} ${detail}`);
     }
+  });
+});
+
+test("F2 a later success clears the consecutive-failure counter inside the same batch", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    await seedEventsThroughAccept(makeIo, rawDb, 2);
+    const before = await loadProjectionHead(io.db, SCOPE_A);
+    await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: before.revision, now: NOW });
+    const pageTask = await rawDb.prepare(
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' LIMIT 1"
+    ).first("task_id");
+
+    await rawDb.prepare("UPDATE rds2_tasks SET state = 'queued', available_at = ? WHERE task_id = ?")
+      .bind(NOW, pageTask).run();
+    const failed = await continueBuild({
+      io: failingBatchIo(makeIo()), taskId: pageTask, owner: "builder", now: NOW, reducer: algorithmReducer
+    });
+    assert.equal(failed.outcome, "retry", `(${binding}) ${JSON.stringify(failed)}`);
+    const counted = await rawDb.prepare("SELECT failure_count FROM rds2_tasks WHERE task_id = ?")
+      .bind(pageTask).first("failure_count");
+    assert.equal(Number(counted), 1, `(${binding}) the first failure is counted`);
+
+    // Now let the very same task succeed.
+    const row = await rawDb.prepare("SELECT available_at FROM rds2_tasks WHERE task_id = ?")
+      .bind(pageTask).first();
+    const due = row.available_at > NOW ? row.available_at : NOW;
+    await rawDb.prepare("UPDATE rds2_tasks SET state = 'queued', available_at = ? WHERE task_id = ?")
+      .bind(due, pageTask).run();
+    const succeeded = await continueBuild({
+      io: makeIo(), taskId: pageTask, owner: "builder", now: due, reducer: algorithmReducer
+    });
+    assert.equal(succeeded.outcome, "completed", `(${binding}) ${JSON.stringify(succeeded)}`);
+
+    const after = await rawDb.prepare(
+      "SELECT state, failure_count FROM rds2_tasks WHERE task_id = ?"
+    ).bind(pageTask).first();
+    assert.equal(after.state, "completed");
+    assert.equal(Number(after.failure_count), 0,
+      `(${binding}) success must clear the counter itself, not wait for an admin replay`);
+  });
+});
+
+// The reducer drives the failure: with an empty read plan the ONLY batch is
+// the commit, so the fault lands exactly where a real commit fault would.
+// (Intercepting "write batches" by SQL does not work: bind() returns a new
+// statement object, so a SQL-keyed map misses it.)
+const readlessReducer = { ...algorithmReducer, reads: () => [] };
+
+test("F2 an incremental projection that keeps failing counts and parks like the build path", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    // project: false leaves the task pending so we can drive it ourselves.
+    await seedEventsThroughAccept(makeIo, rawDb, 1, { topic: "t-inc", project: false });
+    const taskId = await rawDb.prepare(
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection' AND user_id = ? AND state = 'pending' ORDER BY created_at DESC, task_id DESC LIMIT 1"
+    ).bind(USER_A).first("task_id");
+    assert.ok(taskId, `(${binding}) the event must have queued a projection task`);
+
+    const observed = [];
+    let clock = NOW;
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const row = await rawDb.prepare("SELECT available_at FROM rds2_tasks WHERE task_id = ?")
+        .bind(taskId).first();
+      if (row?.available_at && row.available_at > clock) clock = row.available_at;
+      await rawDb.prepare("UPDATE rds2_tasks SET state = 'queued', available_at = ? WHERE task_id = ?")
+        .bind(clock, taskId).run();
+      const result = await projectOne({
+        io: failingBatchIo(makeIo()), taskId, owner: "projector", now: clock, reducer: readlessReducer
+      });
+      const after = await rawDb.prepare(
+        "SELECT state, failure_count FROM rds2_tasks WHERE task_id = ?"
+      ).bind(taskId).first();
+      observed.push({
+        attempt,
+        outcome: result.outcome,
+        state: after.state,
+        failureCount: Number(after.failure_count)
+      });
+    }
+
+    const detail = `(${binding}) ${JSON.stringify(observed)}`;
+    assert.deepEqual(observed.map((entry) => entry.failureCount), [1, 2, 3, 4, 5],
+      `a real failure must be counted on the incremental path too. ${detail}`);
+    assert.equal(observed[4].outcome, "needs_attention",
+      `the fifth consecutive failure parks the task. ${detail}`);
+    assert.equal(observed[4].state, "needs_attention", detail);
   });
 });
 

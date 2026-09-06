@@ -111,7 +111,12 @@ export async function commitProjection({ io, lease, baseRevision, activeGenerati
        VALUES (?, 'archive_delta', ?, ?, ?, NULL, ?, 'pending', ?, ?, ?)`
     ).bind(archiveTaskId, scope.userId, scope.namespace, scope.projectionName, artifactId, now, now, now),
     io.db.prepare(
-      `UPDATE rds2_tasks SET state = 'completed', lease_owner = NULL, lease_until = NULL, updated_at = ?
+      // A successful close-out clears the consecutive-failure counter. This
+      // happens INSIDE the success batch, not through an admin replay: a task
+      // must never carry another task's success, nor a stale count into its
+      // next run (G2-F2).
+      `UPDATE rds2_tasks SET state = 'completed', lease_owner = NULL, lease_until = NULL,
+         failure_count = 0, updated_at = ?
        WHERE task_id = ? AND state = 'processing'
          AND lease_owner = ? AND lease_epoch = ? AND lease_until > ?`
     ).bind(now, lease.taskId, lease.owner, lease.epoch, now),
@@ -194,7 +199,12 @@ export async function commitActivation({ io, lease, build, baseRevision, changes
        VALUES (?, 'archive_delta', ?, ?, ?, NULL, ?, 'pending', ?, ?, ?)`
     ).bind(archiveTaskId, scope.userId, scope.namespace, scope.projectionName, artifactId, now, now, now),
     io.db.prepare(
-      `UPDATE rds2_tasks SET state = 'completed', lease_owner = NULL, lease_until = NULL, updated_at = ?
+      // A successful close-out clears the consecutive-failure counter. This
+      // happens INSIDE the success batch, not through an admin replay: a task
+      // must never carry another task's success, nor a stale count into its
+      // next run (G2-F2).
+      `UPDATE rds2_tasks SET state = 'completed', lease_owner = NULL, lease_until = NULL,
+         failure_count = 0, updated_at = ?
        WHERE task_id = ? AND state = 'processing'
          AND lease_owner = ? AND lease_epoch = ? AND lease_until > ?`
     ).bind(now, lease.taskId, lease.owner, lease.epoch, now),

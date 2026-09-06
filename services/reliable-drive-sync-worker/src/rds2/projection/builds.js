@@ -418,7 +418,10 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
     }
     statements.push(
       io.db.prepare(
-        `UPDATE rds2_tasks SET state = 'completed', lease_owner = NULL, lease_until = NULL, updated_at = ?
+        // Success clears the consecutive-failure counter inside the same
+        // batch; an admin replay is not a substitute (G2-F2).
+        `UPDATE rds2_tasks SET state = 'completed', lease_owner = NULL, lease_until = NULL,
+           failure_count = 0, updated_at = ?
          WHERE task_id = ? AND state = 'processing'
            AND lease_owner = ? AND lease_epoch = ? AND lease_until > ?`
       ).bind(now, lease.taskId, lease.owner, lease.epoch, now),
