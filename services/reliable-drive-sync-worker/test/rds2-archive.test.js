@@ -809,3 +809,41 @@ test("R7 an incomplete search never uploads and never marks an artifact delivere
     assert.notEqual(task, "completed", `(${binding}) the task must not converge on success`);
   });
 });
+
+// ---------------------------------------------------------------------------
+// G2 coverage fix: one invocation shares ONE budget. A spent budget must stop
+// further outbound calls — swapping in a fresh io/client inside the same call
+// is not a way around it. A genuinely separate invocation gets its own budget.
+// ---------------------------------------------------------------------------
+
+test("C5 a spent invocation budget stops Drive calls and only a new invocation gets a fresh one", async () => {
+  await runArchiveTest(async ({ binding, rawDb }) => {
+    const drive = fakeDriveFetch();
+    const makeIo = (limit) => createInvocationIo({
+      db: rawDb,
+      queues: { RDS2_PROJECTION_QUEUE: { send: async () => {} }, RDS2_ARCHIVE_QUEUE: { send: async () => {} } },
+      fetchImpl: drive.fetchImpl, limit
+    });
+    await seedArtifact(rawDb, {
+      objectName: "artifact-budget.json", frozenJson: '{"budget":true}', taskId: "arch-c5"
+    });
+    const spentIo = makeIo(1);
+    await spentIo.db.prepare("SELECT 1").first();
+    const spentClient = createArchiveClient({
+      env: {}, io: spentIo, folderId: FOLDER_ID, tokenProvider: async () => "t"
+    });
+    await assert.rejects(
+      () => spentClient.findExact("artifact-budget.json"),
+      (error) => error.code === "budget_exhausted",
+      `(${binding}) the spent budget must stop the Drive call`
+    );
+    assert.equal(drive.state.lists, 0, `(${binding}) no outbound call was made`);
+    assert.equal(drive.state.uploads, 0);
+    const freshClient = createArchiveClient({
+      env: {}, io: makeIo(16), folderId: FOLDER_ID, tokenProvider: async () => "t"
+    });
+    assert.deepEqual(await freshClient.findExact("artifact-budget.json"), [],
+      `(${binding}) a separate invocation starts from a fresh budget`);
+    assert.equal(drive.state.lists, 1, `(${binding}) and counts its own call`);
+  });
+});
