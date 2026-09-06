@@ -10,6 +10,7 @@ import { projectOne } from "../src/rds2/projection/engine.js";
 import { algorithmReducer } from "../src/rds2/projection/algorithm.js";
 import { createArchiveClient } from "../src/rds2/archive/drive-client.js";
 import { archiveOne, replayProjection } from "../src/rds2/archive/archiver.js";
+import { continueBuild, ensureBuild } from "../src/rds2/projection/builds.js";
 import { hashText } from "../src/rds2/identity/hashing.js";
 
 const MIGRATION_SQL = readFileSync(fileURLToPath(
@@ -388,3 +389,294 @@ function canonical(value) {
 function normalized(value) {
   return JSON.stringify(JSON.parse(value));
 }
+
+// ---------------------------------------------------------------------------
+// G2-R5 regression: every build page freezes a bounded build package with its
+// own archive task, the activation delta carries the build manifest plus the
+// final summary, and offline replay reconstructs the active generation
+// completely — including summary — refusing missing or foreign packages.
+// ---------------------------------------------------------------------------
+
+async function acceptEvents(makeIo, rawDb, count = 8, topic = "r5-topic") {
+  for (let index = 1; index <= count; index += 1) {
+    const envelope = {
+      schemaVersion: "1.2",
+      namespace: "algorithm",
+      eventType: "algorithm.learning.completed",
+      identity: { username: NAME, userId: USER },
+      payload: {
+        event: {
+          schemaVersion: "1.2",
+          eventId: `72000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+          eventKey: `r5-k-${index}`,
+          eventType: "algorithm.learning.completed",
+          userId: USER,
+          username: NAME,
+          observedAt: `2026-09-06T${String(index % 24).padStart(2, "0")}:00:00.000Z`,
+          source: "qa",
+          topic,
+          problem: { title: "P", source: "S", url: "" },
+          outcome: index % 2 === 0 ? "correct" : "consulted",
+          evidence: "e",
+          tags: [],
+          confidence: "medium"
+        }
+      },
+      requestId: `req-r5-${index}`
+    };
+    await acceptEvent({ io: makeIo(), principal: { userId: USER, username: NAME }, envelope, now: NOW });
+    const taskId = await rawDb.prepare(
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection' AND state = 'pending' ORDER BY created_at DESC, task_id DESC LIMIT 1"
+    ).first("task_id");
+    await dispatchOne({ io: makeIo(), taskId, owner: "dispatch", now: NOW });
+    await projectOne({ io: makeIo(), taskId, owner: "consumer", now: NOW, reducer: algorithmReducer });
+  }
+}
+
+test("R5 a multi-page build freezes every page and the activation references them", async () => {
+  await runArchiveTest(async ({ binding, rawDb }) => {
+    const drive = fakeDriveFetch();
+    const makeIo = (limit = 24) => createInvocationIo({
+      db: rawDb,
+      queues: { RDS2_PROJECTION_QUEUE: { send: async () => {} }, RDS2_ARCHIVE_QUEUE: { send: async () => {} } },
+      fetchImpl: drive.fetchImpl, limit
+    });
+    await acceptEvents(makeIo, rawDb, 8);
+    const buildBase = await rawDb.prepare(
+      "SELECT revision FROM rds2_projections WHERE user_id = ?"
+    ).bind(USER).first("revision");
+    await ensureBuild({
+      db: rawDb, scope: { userId: USER, namespace: "algorithm", projectionName: "learning" },
+      baseRevision: Number(buildBase), now: NOW
+    });
+    let completed = false;
+    for (let guard = 0; guard < 6 && !completed; guard += 1) {
+      const nextTask = await rawDb.prepare(
+        "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' LIMIT 1"
+      ).first("task_id");
+      if (!nextTask) break;
+      await dispatchOne({ io: makeIo(), taskId: nextTask, owner: "dispatch", now: NOW });
+      const result = await continueBuild({
+        io: makeIo(), taskId: nextTask, owner: "builder", now: NOW, reducer: algorithmReducer
+      });
+      completed = result.outcome === "completed";
+    }
+    assert.equal(completed, true, `(${binding}) the build activated`);
+    const packages = await rawDb.prepare(
+      `SELECT object_name, frozen_json, artifact_hash FROM rds2_archive_deliveries WHERE object_type = 'build_package'`
+    ).all();
+    assert.equal(packages.results.length, 2, `(${binding}) both pages froze a build package`);
+    for (const pkg of packages.results) {
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(pkg.frozen_json));
+      const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+      assert.equal(pkg.artifact_hash, hex, `(${binding}) the package hash covers its bytes`);
+    }
+    const deltas = await rawDb.prepare(
+      `SELECT frozen_json FROM rds2_archive_deliveries WHERE object_type = 'projection_delta'`
+    ).all();
+    const activation = deltas.results
+      .map((row) => JSON.parse(row.frozen_json))
+      .find((delta) => delta.build);
+    assert.ok(activation, `(${binding}) the activation delta carries the manifest`);
+    assert.equal(activation.build.generation, 1, `(${binding}) the activation names the generation`);
+    assert.equal(activation.build.pages, 2, `(${binding}) the activation lists its pages`);
+    assert.ok(activation.summary, `(${binding}) the activation carries the final summary`);
+    const head = await rawDb.prepare("SELECT summary_json FROM rds2_projections WHERE user_id = ?").bind(USER).first("summary_json");
+    assert.equal(JSON.parse(head).counts.attempts, 8, `(${binding}) the built summary counts all events`);
+  });
+});
+
+test("R5 offline replay needs every build package and reproduces the live projection", async () => {
+  await runArchiveTest(async ({ binding, rawDb }) => {
+    const drive = fakeDriveFetch();
+    const makeIo = (limit = 24) => createInvocationIo({
+      db: rawDb,
+      queues: { RDS2_PROJECTION_QUEUE: { send: async () => {} }, RDS2_ARCHIVE_QUEUE: { send: async () => {} } },
+      fetchImpl: drive.fetchImpl, limit
+    });
+    await acceptEvents(makeIo, rawDb, 8);
+    const buildBase = await rawDb.prepare(
+      "SELECT revision FROM rds2_projections WHERE user_id = ?"
+    ).bind(USER).first("revision");
+    await ensureBuild({
+      db: rawDb, scope: { userId: USER, namespace: "algorithm", projectionName: "learning" },
+      baseRevision: Number(buildBase), now: NOW
+    });
+    let completed = false;
+    for (let guard = 0; guard < 6 && !completed; guard += 1) {
+      const nextTask = await rawDb.prepare(
+        "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' LIMIT 1"
+      ).first("task_id");
+      if (!nextTask) break;
+      await dispatchOne({ io: makeIo(), taskId: nextTask, owner: "dispatch", now: NOW });
+      const result = await continueBuild({
+        io: makeIo(), taskId: nextTask, owner: "builder", now: NOW, reducer: algorithmReducer
+      });
+      completed = result.outcome === "completed";
+    }
+    const deliveries = await rawDb.prepare(
+      "SELECT object_type, object_name, frozen_json, artifact_hash FROM rds2_archive_deliveries WHERE user_id = ?"
+    ).bind(USER).all();
+    const artifacts = deliveries.results.map((row) => ({
+      objectType: row.object_type, objectName: row.object_name,
+      frozenJson: row.frozen_json, hash: row.artifact_hash
+    }));
+    const replay = await replayProjection(artifacts);
+    // Eight normal commits (revisions 1..8) plus the build activation (9).
+    assert.equal(replay.revision, 9);
+    const liveRows = await rawDb.prepare(
+      "SELECT row_kind, row_key, value_json FROM rds2_projection_rows WHERE user_id = ? AND generation = 1"
+    ).bind(USER).all();
+    assert.equal(Object.keys(replay.rows).length, liveRows.results.length,
+      `(${binding}) replay covers every live row`);
+    for (const row of liveRows.results) {
+      assert.equal(replay.rows[`${row.row_kind}:${row.row_key}`], row.value_json,
+        `(${binding}) replayed row ${row.row_key} matches`);
+    }
+    const head = await rawDb.prepare("SELECT summary_json FROM rds2_projections WHERE user_id = ?").bind(USER).first("summary_json");
+    assert.equal(replay.summary, head, `(${binding}) replay reproduces the summary`);
+
+    // A missing build package must be refused, not silently partial.
+    const missingOne = artifacts.filter((artifact) => !(artifact.objectType === "build_package"
+      && JSON.parse(artifact.frozenJson).page === 1));
+    await assert.rejects(
+      () => replayProjection(missingOne),
+      (error) => error.code === "replay_missing_page",
+      `(${binding}) a missing page must be refused`
+    );
+    // A package from a foreign scope must be refused as well: the attacker
+    // re-signs the hash correctly, so the SCOPE check is what refuses it.
+    const foreign = [];
+    for (const artifact of artifacts) {
+      if (artifact.objectType !== "build_package" || JSON.parse(artifact.frozenJson).page !== 2) {
+        foreign.push(artifact);
+        continue;
+      }
+      const data = JSON.parse(artifact.frozenJson);
+      data.scope = { userId: "99999999-9999-4999-8999-999999999999", namespace: "algorithm", projectionName: "learning" };
+      const tamperedJson = JSON.stringify(data);
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(tamperedJson));
+      const resignedHash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+      foreign.push({ ...artifact, frozenJson: tamperedJson, hash: resignedHash });
+    }
+    await assert.rejects(
+      () => replayProjection(foreign),
+      (error) => error.code === "replay_scope_mismatch",
+      `(${binding}) foreign-scope packages must be refused`
+    );
+  });
+});
+
+test("R5 a single-page build freezes exactly one package and replays in any order", async () => {
+  await runArchiveTest(async ({ binding, rawDb }) => {
+    const drive = fakeDriveFetch();
+    const makeIo = (limit = 24) => createInvocationIo({
+      db: rawDb,
+      queues: { RDS2_PROJECTION_QUEUE: { send: async () => {} }, RDS2_ARCHIVE_QUEUE: { send: async () => {} } },
+      fetchImpl: drive.fetchImpl, limit
+    });
+    // Three events fit in the default page, so the build is one page wide.
+    await acceptEvents(makeIo, rawDb, 3);
+    const buildBase = await rawDb.prepare(
+      "SELECT revision FROM rds2_projections WHERE user_id = ?"
+    ).bind(USER).first("revision");
+    await ensureBuild({
+      db: rawDb, scope: { userId: USER, namespace: "algorithm", projectionName: "learning" },
+      baseRevision: Number(buildBase), now: NOW
+    });
+    let completed = false;
+    for (let guard = 0; guard < 6 && !completed; guard += 1) {
+      const nextTask = await rawDb.prepare(
+        "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' LIMIT 1"
+      ).first("task_id");
+      if (!nextTask) break;
+      await dispatchOne({ io: makeIo(), taskId: nextTask, owner: "dispatch", now: NOW });
+      const result = await continueBuild({
+        io: makeIo(), taskId: nextTask, owner: "builder", now: NOW, reducer: algorithmReducer
+      });
+      completed = result.outcome === "completed";
+    }
+    assert.equal(completed, true, `(${binding}) the single-page build activated`);
+    const packages = await rawDb.prepare(
+      "SELECT frozen_json FROM rds2_archive_deliveries WHERE object_type = 'build_package'"
+    ).all();
+    assert.equal(packages.results.length, 1, `(${binding}) a one-page build freezes exactly one package`);
+    const activation = (await rawDb.prepare(
+      "SELECT frozen_json FROM rds2_archive_deliveries WHERE object_type = 'projection_delta'"
+    ).all()).results.map((row) => JSON.parse(row.frozen_json)).find((delta) => delta.build);
+    assert.equal(activation.build.pages, 1, `(${binding}) the manifest lists one page`);
+    assert.ok(activation.summary, `(${binding}) the single-page activation keeps the summary`);
+
+    const deliveries = await rawDb.prepare(
+      "SELECT object_type, object_name, frozen_json, artifact_hash FROM rds2_archive_deliveries WHERE user_id = ?"
+    ).bind(USER).all();
+    const artifacts = deliveries.results.map((row) => ({
+      objectType: row.object_type, objectName: row.object_name,
+      frozenJson: row.frozen_json, hash: row.artifact_hash
+    }));
+    const forward = await replayProjection(artifacts);
+    const shuffled = await replayProjection([...artifacts].reverse());
+    assert.deepEqual(shuffled.rows, forward.rows,
+      `(${binding}) package order never changes the rebuilt generation`);
+    assert.equal(shuffled.summary, forward.summary, `(${binding}) package order never changes the summary`);
+    const liveRows = await rawDb.prepare(
+      "SELECT row_kind, row_key, value_json FROM rds2_projection_rows WHERE user_id = ? AND generation = 1"
+    ).bind(USER).all();
+    assert.equal(Object.keys(forward.rows).length, liveRows.results.length,
+      `(${binding}) a single page still rebuilds every live row`);
+  });
+});
+
+// A pure replay test: no database, so the generation switch is checked
+// directly against hand-frozen artifacts.
+test("R5 replay switches generation and drops rows the superseded generation owned", async () => {
+  const scope = { userId: USER, namespace: "algorithm", projectionName: "learning" };
+  const freeze = async (data) => {
+    const frozenJson = JSON.stringify(data);
+    return { objectType: data.kind, objectName: `${data.kind}-${data.revision ?? data.page}.json`, frozenJson, hash: await hashText(frozenJson) };
+  };
+  const staleDelta = await freeze({
+    storageVersion: 2, kind: "projection_delta", scope,
+    baseRevision: 0, revision: 1, eventSeq: 1, summary: null, build: null,
+    changes: [{ rowKind: "topic", rowKey: "old-topic", value: { name: "old-topic" } }]
+  });
+  const activation = await freeze({
+    storageVersion: 2, kind: "projection_delta", scope,
+    baseRevision: 1, revision: 2, eventSeq: 4,
+    summary: { counts: { attempts: 4 } },
+    build: { buildId: "build-1", generation: 1, pages: 2, firstEventSeq: 1, lastEventSeq: 4 },
+    changes: []
+  });
+  const packageOne = await freeze({
+    storageVersion: 2, kind: "build_package", scope,
+    buildId: "build-1", generation: 1, page: 1, firstEventSeq: 1, lastEventSeq: 2, summary: null,
+    rowChanges: [{ rowKind: "topic", rowKey: "new-a", value: { name: "new-a" } }]
+  });
+  const packageTwo = await freeze({
+    storageVersion: 2, kind: "build_package", scope,
+    buildId: "build-1", generation: 1, page: 2, firstEventSeq: 3, lastEventSeq: 4,
+    summary: { counts: { attempts: 4 } },
+    rowChanges: [{ rowKind: "topic", rowKey: "new-b", value: { name: "new-b" } }]
+  });
+  const replay = await replayProjection([staleDelta, activation, packageTwo, packageOne]);
+  assert.equal(replay.revision, 2);
+  assert.deepEqual(Object.keys(replay.rows).sort(), ["topic:new-a", "topic:new-b"],
+    "replay keeps only the active generation's rows");
+  assert.ok(!("topic:old-topic" in replay.rows), "superseded generation rows must not leak");
+  assert.equal(JSON.parse(replay.summary).counts.attempts, 4, "the summary survives the activation");
+
+  // A package carrying a foreign generation is not the manifest's page.
+  const wrongGeneration = await freeze({ ...JSON.parse(packageOne.frozenJson), generation: 2 });
+  await assert.rejects(
+    () => replayProjection([staleDelta, activation, wrongGeneration, packageTwo]),
+    (error) => error.code === "replay_missing_page",
+    "a package from another generation must be refused"
+  );
+  // A malformed artifact is never "not found".
+  const malformed = { objectType: "build_package", objectName: "bad.json", frozenJson: "{not json", hash: await hashText("{not json") };
+  await assert.rejects(
+    () => replayProjection([staleDelta, activation, malformed, packageOne, packageTwo]),
+    (error) => error.code === "replay_artifact_invalid",
+    "an unparseable artifact is a hard failure"
+  );
+});

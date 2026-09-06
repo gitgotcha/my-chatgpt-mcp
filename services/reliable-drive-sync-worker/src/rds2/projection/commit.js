@@ -28,16 +28,21 @@ export function assertRowChangesBounded(rowChanges) {
   }
 }
 
-export function buildDelta({ scope, baseRevision, revision, eventSeq, rowChanges }) {
-  return {
+export function buildDelta({ scope, baseRevision, revision, eventSeq, rowChanges, summary, build }) {
+  const delta = {
     storageVersion: 2,
     kind: "projection_delta",
     scope: { ...scope },
     baseRevision,
     revision,
     eventSeq,
-    changes: rowChanges
+    changes: rowChanges,
+    // The summary after this commit and, for build activations, the build
+    // manifest (buildId/generation/pages) make offline replay complete.
+    summary: summary === undefined ? null : summary,
+    build: build ?? null
   };
+  return delta;
 }
 
 async function deltaArtifact({ io, scope, revision, eventSeq, delta }) {
@@ -61,7 +66,8 @@ export async function commitProjection({ io, lease, baseRevision, activeGenerati
   const revision = baseRevision + 1;
   const delta = buildDelta({
     scope: lease.scope, baseRevision, revision,
-    eventSeq: changes.eventSeq, rowChanges: changes.rowChanges
+    eventSeq: changes.eventSeq, rowChanges: changes.rowChanges,
+    summary: changes.summary
   });
   const { frozenJson, artifactHash, artifactId } = await deltaArtifact({
     io, scope: lease.scope, revision, eventSeq: changes.eventSeq, delta
@@ -122,13 +128,23 @@ export async function commitProjection({ io, lease, baseRevision, activeGenerati
 
 // The activation commit for a finished build: switch the active generation,
 // advance the cursor to the build target and complete the leased task, all
-// guarded by the unchanged base revision.
+// guarded by the unchanged base revision. The activation delta carries the
+// build manifest (buildId/generation/pages/firstEventSeq) and the final
+// summary so offline replay can rebuild the whole generation from archives.
 export async function commitActivation({ io, lease, build, baseRevision, changes, now }) {
   assertRowChangesBounded(changes.rowChanges);
   const revision = baseRevision + 1;
   const delta = buildDelta({
     scope: lease.scope, baseRevision, revision,
-    eventSeq: build.target_event_seq, rowChanges: changes.rowChanges
+    eventSeq: build.target_event_seq, rowChanges: changes.rowChanges,
+    summary: changes.summary,
+    build: {
+      buildId: build.build_id,
+      generation: build.staging_generation,
+      pages: changes.pages,
+      firstEventSeq: changes.firstEventSeq,
+      lastEventSeq: build.target_event_seq
+    }
   });
   const { frozenJson, artifactHash, artifactId } = await deltaArtifact({
     io, scope: lease.scope, revision, eventSeq: build.target_event_seq, delta

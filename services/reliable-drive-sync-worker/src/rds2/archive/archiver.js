@@ -6,6 +6,7 @@
 import { claimForProcessing, completeTask, failTask, parkNeedsAttention } from "../tasks/repository.js";
 import { hashText } from "../identity/hashing.js";
 import { deriveTaskId } from "../events/repository.js";
+import { canonicalJson } from "../../../../../shared/rds2-protocol.mjs";
 
 function stepResult(outcome, taskId, code) {
   return { outcome, taskId, code };
@@ -101,10 +102,13 @@ export async function archiveOne({ io, taskId, owner, now, client, lease = null 
   }
 }
 
-// Offline replay: rebuild a projection generation from archived artifacts
-// alone. Every artifact's bytes are hash-verified, deltas must chain
-// contiguously from baseRevision 0, and a missing page is a hard error.
+// Offline replay: rebuild a projection from archived artifacts alone.
+// Every artifact's bytes are hash-verified; the kind/storageVersion/scope are
+// validated; deltas must chain contiguously from baseRevision 0; an
+// activation delta's build manifest demands every build package of that
+// generation, so a missing page is a hard error instead of partial data.
 export async function replayProjection(artifacts) {
+  const parsed = [];
   for (const artifact of artifacts) {
     const actual = await hashText(artifact.frozenJson);
     if (actual !== artifact.hash) {
@@ -113,20 +117,73 @@ export async function replayProjection(artifacts) {
       error.artifact = artifact.objectName;
       throw error;
     }
+    let data;
+    try {
+      data = JSON.parse(artifact.frozenJson);
+    } catch {
+      const error = new Error("replay_artifact_invalid");
+      error.code = "replay_artifact_invalid";
+      error.artifact = artifact.objectName;
+      throw error;
+    }
+    parsed.push({ ...artifact, data });
   }
-  const deltas = artifacts
-    .filter((artifact) => artifact.objectType === "projection_delta")
-    .map((artifact) => ({ artifact, delta: JSON.parse(artifact.frozenJson) }))
-    .sort((left, right) => left.delta.revision - right.delta.revision);
+  let scopeKey = null;
+  for (const item of parsed) {
+    // Event artifacts are identity context, not replay input: only deltas
+    // and build packages carry the storage contract.
+    if (item.objectType !== "projection_delta" && item.objectType !== "build_package") continue;
+    if (item.data.storageVersion !== 2) {
+      const error = new Error("replay_artifact_invalid");
+      error.code = "replay_artifact_invalid";
+      error.artifact = item.objectName;
+      throw error;
+    }
+    const expectedKind = item.objectType === "projection_delta" ? "projection_delta"
+      : item.objectType === "build_package" ? "build_package"
+      : item.objectType === "event" ? null : undefined;
+    if (expectedKind === undefined || (expectedKind !== null && item.data.kind !== expectedKind)) {
+      const error = new Error("replay_artifact_invalid");
+      error.code = "replay_artifact_invalid";
+      error.artifact = item.objectName;
+      throw error;
+    }
+    if (item.data.scope) {
+      const key = JSON.stringify(item.data.scope);
+      if (scopeKey === null) scopeKey = key;
+      else if (key !== scopeKey) {
+        const error = new Error("replay_scope_mismatch");
+        error.code = "replay_scope_mismatch";
+        error.artifact = item.objectName;
+        throw error;
+      }
+    }
+  }
+  const deltas = parsed
+    .filter((item) => item.objectType === "projection_delta")
+    .map((item) => item.data)
+    .sort((left, right) => left.revision - right.revision);
   if (!deltas.length) {
     const error = new Error("replay_missing_page");
     error.code = "replay_missing_page";
     throw error;
   }
-  const rows = {};
+  const packagesByBuild = new Map();
+  for (const item of parsed) {
+    if (item.objectType !== "build_package") continue;
+    if (!packagesByBuild.has(item.data.buildId)) packagesByBuild.set(item.data.buildId, []);
+    packagesByBuild.get(item.data.buildId).push(item.data);
+  }
+  const generations = new Map();
+  const rowsOf = (generation) => {
+    if (!generations.has(generation)) generations.set(generation, new Map());
+    return generations.get(generation);
+  };
+  let activeGeneration = 0;
   let expectedRevision = 0;
   let revision = 0;
-  for (const { delta } of deltas) {
+  let summary = null;
+  for (const delta of deltas) {
     if (delta.baseRevision !== expectedRevision) {
       const error = new Error("replay_missing_page");
       error.code = "replay_missing_page";
@@ -134,15 +191,52 @@ export async function replayProjection(artifacts) {
       error.foundBaseRevision = delta.baseRevision;
       throw error;
     }
-    for (const change of delta.changes) {
-      rows[`${change.rowKind}:${change.rowKey}`] = change.value;
+    if (delta.build) {
+      const manifest = delta.build;
+      const packages = (packagesByBuild.get(manifest.buildId) ?? [])
+        .sort((left, right) => left.page - right.page);
+      if (packages.length !== manifest.pages) {
+        const error = new Error("replay_missing_page");
+        error.code = "replay_missing_page";
+        error.buildId = manifest.buildId;
+        throw error;
+      }
+      for (let index = 0; index < packages.length; index += 1) {
+        if (packages[index].page !== index + 1) {
+          const error = new Error("replay_missing_page");
+          error.code = "replay_missing_page";
+          error.buildId = manifest.buildId;
+          throw error;
+        }
+        if (packages[index].generation !== manifest.generation) {
+          const error = new Error("replay_missing_page");
+          error.code = "replay_missing_page";
+          error.buildId = manifest.buildId;
+          throw error;
+        }
+        const rows = rowsOf(manifest.generation);
+        for (const change of packages[index].rowChanges) {
+          rows.set(change.rowKind + ":" + change.rowKey, change.value);
+        }
+      }
+      activeGeneration = manifest.generation;
+    } else {
+      const rows = rowsOf(activeGeneration);
+      for (const change of delta.changes) {
+        rows.set(change.rowKind + ":" + change.rowKey, change.value);
+      }
     }
+    if (delta.summary !== undefined && delta.summary !== null) summary = delta.summary;
     expectedRevision = delta.revision;
     revision = delta.revision;
   }
+  const finalRows = {};
+  for (const [key, value] of generations.get(activeGeneration) ?? []) {
+    finalRows[key] = canonicalJson(value);
+  }
   return {
     revision,
-    rows: Object.fromEntries(Object.entries(rows)
-      .map(([key, value]) => [key, JSON.stringify(value)]))
+    summary: summary === null ? null : canonicalJson(summary),
+    rows: finalRows
   };
 }

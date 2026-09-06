@@ -5,7 +5,7 @@
 // readable the whole time, and replayed pages cannot double-contribute
 // because staging rows are keyed and upserted.
 import { claimForProcessing, deferTask, completeTask, getTask, parkNeedsAttention } from "../tasks/repository.js";
-import { commitActivation, assertRowChangesBounded, MAX_COMMIT_STATEMENTS } from "./commit.js";
+import { commitActivation, buildDelta, assertRowChangesBounded, MAX_COMMIT_STATEMENTS, MAX_DELTA_BYTES } from "./commit.js";
 import { canonicalJson } from "../../../../../shared/rds2-protocol.mjs";
 import { deriveTaskId } from "../events/repository.js";
 import { hashText } from "../identity/hashing.js";
@@ -200,7 +200,7 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
       `SELECT MIN(event_seq) AS minSeq FROM rds2_events
        WHERE user_id = ? AND namespace = ? AND projection_name = ?`
     ).bind(scope.userId, scope.namespace, scope.projectionName).first("minSeq");
-    continuation = { nextEventSeq: first === null ? targetEventSeq + 1 : Number(first), stagedCount: 0, page: 1 };
+    continuation = { nextEventSeq: first === null ? targetEventSeq + 1 : Number(first), stagedCount: 0, page: 1, firstEventSeq: first === null ? null : Number(first), summary: null };
   }
   if (!Number.isInteger(continuation.nextEventSeq) || continuation.nextEventSeq < 1) {
     const error = new Error("build_continuation_invalid");
@@ -256,71 +256,174 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
   const done = nextEventSeq > targetEventSeq;
 
   try {
-    if (!done) {
-      // Mid-build page: stage rows, save the continuation, schedule the next
-      // page and complete this task — all atomic, cursor untouched. The same
-      // bounded-commit checks apply as for a final activation.
+    // Every non-empty page — mid-build OR final — stages its rows and freezes
+    // an auditable build package with its own archive task. The activation
+    // itself only switches the generation and carries the manifest plus the
+    // final summary, so offline replay can rebuild from packages alone.
+    if (!emptyPage) {
       assertRowChangesBounded(pageResult.rowChanges);
-      const guardId = await deriveTaskId(scope, `guard-${lease.taskId}-${lease.epoch}`, "guard");
-      const nextTaskId = await buildPageTaskId(scope, build.build_id, continuation.page + 1);
-      const statements = [
+    }
+    const guardId = await deriveTaskId(scope, `guard-${lease.taskId}-${lease.epoch}`, "guard");
+    const packageData = emptyPage ? null : {
+      storageVersion: 2,
+      kind: "build_package",
+      scope: { ...scope },
+      buildId: build.build_id,
+      generation: build.staging_generation,
+      page: continuation.page,
+      firstEventSeq: continuation.firstEventSeq,
+      lastEventSeq: events[events.length - 1].eventSeq,
+      summary: pageResult.summary ?? continuation.summary ?? null,
+      rowChanges: pageResult.rowChanges
+    };
+    let packageJson = null;
+    let packageHash = null;
+    let packageArtifactId = null;
+    let packageArchiveTaskId = null;
+    if (packageData) {
+      packageJson = canonicalJson(packageData);
+      if (new TextEncoder().encode(packageJson).length > MAX_DELTA_BYTES) {
+        const error = new Error("changes_too_large");
+        error.code = "changes_too_large";
+        throw error;
+      }
+      packageHash = await hashText(packageJson);
+      packageArtifactId = await deriveTaskId(
+        scope, `${build.build_id}-pkg-${continuation.page}`, "artifact-build-package"
+      );
+      packageArchiveTaskId = await deriveTaskId(
+        scope, `${build.build_id}-pkg-${continuation.page}`, "archive-build-package"
+      );
+    }
+    // The running summary persists in the continuation: an empty terminator
+    // page can never wipe it.
+    const savedContinuation = {
+      ...(pageResult ? pageResult.continuation : {}),
+      nextEventSeq,
+      page: emptyPage ? continuation.page : continuation.page + 1,
+      firstEventSeq: continuation.firstEventSeq,
+      summary: (pageResult ? pageResult.summary : null) ?? continuation.summary ?? null
+    };
+    const statements = [
+      io.db.prepare(
+        `INSERT INTO rds2_commit_guards (guard_id, task_id, owner, expected_epoch, now_utc, expected_revision, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).bind(guardId, lease.taskId, lease.owner, lease.epoch, now, head.revision, now),
+      ...(emptyPage ? [] : pageResult.rowChanges.map((change) => io.db.prepare(
+        `INSERT INTO rds2_projection_rows (user_id, namespace, projection_name, generation, row_kind, row_key,
+           member_key, sort_key, value_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (user_id, namespace, projection_name, generation, row_kind, row_key)
+         DO UPDATE SET member_key = excluded.member_key, sort_key = excluded.sort_key,
+           value_json = excluded.value_json, updated_at = excluded.updated_at`
+      ).bind(
+        scope.userId, scope.namespace, scope.projectionName, build.staging_generation,
+        change.rowKind, change.rowKey, change.memberKey ?? null, change.sortKey ?? null,
+        canonicalJson(change.value), now
+      ))),
+      ...(packageData ? [
         io.db.prepare(
-          `INSERT INTO rds2_commit_guards (guard_id, task_id, owner, expected_epoch, now_utc, expected_revision, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
-        ).bind(guardId, lease.taskId, lease.owner, lease.epoch, now, head.revision, now),
-        ...pageResult.rowChanges.map((change) => io.db.prepare(
-          `INSERT INTO rds2_projection_rows (user_id, namespace, projection_name, generation, row_kind, row_key,
-             member_key, sort_key, value_json, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT (user_id, namespace, projection_name, generation, row_kind, row_key)
-           DO UPDATE SET member_key = excluded.member_key, sort_key = excluded.sort_key,
-             value_json = excluded.value_json, updated_at = excluded.updated_at`
-        ).bind(
-          scope.userId, scope.namespace, scope.projectionName, build.staging_generation,
-          change.rowKind, change.rowKey, change.memberKey ?? null, change.sortKey ?? null,
-          canonicalJson(change.value), now
-        )),
+          `INSERT INTO rds2_archive_deliveries (artifact_id, user_id, namespace, projection_name, object_type,
+             object_name, frozen_json, artifact_hash, created_at)
+           VALUES (?, ?, ?, ?, 'build_package', ?, ?, ?, ?)`
+        ).bind(packageArtifactId, scope.userId, scope.namespace, scope.projectionName,
+          `${packageArtifactId}.json`, packageJson, packageHash, now),
+        io.db.prepare(
+          `INSERT INTO rds2_tasks (task_id, type, user_id, namespace, projection_name, event_seq, artifact_id,
+             state, available_at, created_at, updated_at)
+           VALUES (?, 'archive_delta', ?, ?, ?, NULL, ?, 'pending', ?, ?, ?)`
+        ).bind(packageArchiveTaskId, scope.userId, scope.namespace, scope.projectionName,
+          packageArtifactId, now, now, now)
+      ] : [])
+    ];
+    if (done) {
+      // The activation delta itself carries the build manifest and the final
+      // summary; its changes are empty because every page's rows are already
+      // frozen in build packages.
+      const activationDelta = buildDelta({
+        scope,
+        baseRevision: head.revision,
+        revision: head.revision + 1,
+        eventSeq: targetEventSeq,
+        rowChanges: [],
+        summary: savedContinuation.summary ?? head.summary,
+        build: {
+          buildId: build.build_id,
+          generation: build.staging_generation,
+          pages: emptyPage ? continuation.page - 1 : continuation.page,
+          firstEventSeq: continuation.firstEventSeq,
+          lastEventSeq: targetEventSeq
+        }
+      });
+      const activationJson = canonicalJson(activationDelta);
+      if (new TextEncoder().encode(activationJson).length > MAX_DELTA_BYTES) {
+        const error = new Error("changes_too_large");
+        error.code = "changes_too_large";
+        throw error;
+      }
+      const activationHash = await hashText(activationJson);
+      const activationArtifactId = await deriveTaskId(
+        scope, `delta-${head.revision + 1}-${targetEventSeq}`, "artifact-delta"
+      );
+      const activationArchiveTaskId = await deriveTaskId(
+        scope, `delta-${head.revision + 1}-${targetEventSeq}`, "archive-delta"
+      );
+      statements.push(
+        io.db.prepare(
+          `UPDATE rds2_projection_builds SET stage = 'completed', continuation_json = NULL, updated_at = ?
+           WHERE build_id = ? AND stage IN ('scanning', 'activating')`
+        ).bind(now, build.build_id),
+        io.db.prepare(
+          `UPDATE rds2_projections SET revision = ?, last_event_seq = ?, active_generation = ?,
+             building = 0, summary_json = ?, updated_at = ?
+           WHERE user_id = ? AND namespace = ? AND projection_name = ?
+             AND revision = ? AND building = 1`
+        ).bind(head.revision + 1, targetEventSeq, build.staging_generation,
+          canonicalJson(savedContinuation.summary ?? head.summary), now,
+          scope.userId, scope.namespace, scope.projectionName, head.revision),
+        io.db.prepare(
+          `INSERT INTO rds2_archive_deliveries (artifact_id, user_id, namespace, projection_name, object_type,
+             object_name, frozen_json, artifact_hash, created_at)
+           VALUES (?, ?, ?, ?, 'projection_delta', ?, ?, ?, ?)`
+        ).bind(activationArtifactId, scope.userId, scope.namespace, scope.projectionName,
+          `${activationArtifactId}.json`, activationJson, activationHash, now),
+        io.db.prepare(
+          `INSERT INTO rds2_tasks (task_id, type, user_id, namespace, projection_name, event_seq, artifact_id,
+             state, available_at, created_at, updated_at)
+           VALUES (?, 'archive_delta', ?, ?, ?, NULL, ?, 'pending', ?, ?, ?)`
+        ).bind(activationArchiveTaskId, scope.userId, scope.namespace, scope.projectionName,
+          activationArtifactId, now, now, now)
+      );
+    } else {
+      statements.push(
         io.db.prepare(
           `UPDATE rds2_projection_builds SET continuation_json = ?, updated_at = ?
            WHERE build_id = ? AND stage = 'scanning'`
-        ).bind(canonicalJson({
-          ...pageResult.continuation,
-          nextEventSeq,
-          page: continuation.page + 1
-        }), now, build.build_id),
+        ).bind(canonicalJson(savedContinuation), now, build.build_id),
         io.db.prepare(
           `INSERT INTO rds2_tasks (task_id, type, user_id, namespace, projection_name, event_seq, artifact_id,
              state, available_at, payload_json, created_at, updated_at)
            VALUES (?, 'projection_build', ?, ?, ?, NULL, NULL, 'pending', ?, json_set('{}', '$.buildId', json_quote(?)), ?, ?)
            ON CONFLICT (task_id) DO NOTHING`
-        ).bind(nextTaskId, scope.userId, scope.namespace, scope.projectionName, now, build.build_id, now, now),
-        io.db.prepare(
-          `UPDATE rds2_tasks SET state = 'completed', lease_owner = NULL, lease_until = NULL, updated_at = ?
-           WHERE task_id = ? AND state = 'processing'
-             AND lease_owner = ? AND lease_epoch = ? AND lease_until > ?`
-        ).bind(now, lease.taskId, lease.owner, lease.epoch, now),
-        io.db.prepare("DELETE FROM rds2_commit_guards WHERE guard_id = ?").bind(guardId)
-      ];
-      if (statements.length > MAX_COMMIT_STATEMENTS) {
-        const error = new Error("commit_batch_too_large");
-        error.code = "commit_batch_too_large";
-        throw error;
-      }
-      await io.db.batch(statements);
-      return stepResult("continued", taskId, "build_page_staged");
+        ).bind(await buildPageTaskId(scope, build.build_id, savedContinuation.page), scope.userId, scope.namespace,
+          scope.projectionName, now, build.build_id, now, now)
+      );
     }
-
-    // Final page (or an empty terminator page): the activation switches the
-    // generation atomically.
-    await commitActivation({
-      io, lease, build, baseRevision: head.revision,
-      changes: {
-        rowChanges: emptyPage ? [] : pageResult.rowChanges,
-        summary: (emptyPage ? null : pageResult.summary) ?? head.summary,
-        eventSeq: targetEventSeq
-      },
-      now
-    });
+    statements.push(
+      io.db.prepare(
+        `UPDATE rds2_tasks SET state = 'completed', lease_owner = NULL, lease_until = NULL, updated_at = ?
+         WHERE task_id = ? AND state = 'processing'
+           AND lease_owner = ? AND lease_epoch = ? AND lease_until > ?`
+      ).bind(now, lease.taskId, lease.owner, lease.epoch, now),
+      io.db.prepare("DELETE FROM rds2_commit_guards WHERE guard_id = ?").bind(guardId)
+    );
+    if (statements.length > MAX_COMMIT_STATEMENTS) {
+      const error = new Error("commit_batch_too_large");
+      error.code = "commit_batch_too_large";
+      throw error;
+    }
+    await io.db.batch(statements);
+    if (!done) return stepResult("continued", taskId, "build_page_staged");
     return stepResult("completed", taskId, "build_activated");
   } catch (error) {
     if (error?.code === "changes_too_large" || error?.code === "commit_batch_too_large") throw error;
@@ -337,4 +440,3 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
   }
 }
 
-export { hashText };
