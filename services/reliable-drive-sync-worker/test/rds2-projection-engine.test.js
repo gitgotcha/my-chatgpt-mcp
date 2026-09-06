@@ -985,11 +985,19 @@ test("R3 a duplicate queue message for an already applied event converges", asyn
     ).bind(USER_A, before.activeGeneration).first("value_json");
 
     // The queue delivers the very same message again — out of order, after the
-    // task already completed.
+    // task already completed. Re-queued explicitly so the consumer really
+    // reaches the "already applied" decision instead of merely failing to
+    // claim a completed task.
+    await rawDb.prepare(
+      `UPDATE rds2_tasks SET state = 'pending', lease_owner = NULL, lease_until = NULL,
+         lease_epoch = lease_epoch + 1, available_at = ?, updated_at = ? WHERE task_id = ?`
+    ).bind(NOW, NOW, firstTask).run();
     await dispatchOne({ io: makeIo(), taskId: firstTask, owner: "d", now: NOW });
     const duplicate = await projectOne({ io: makeIo(), taskId: firstTask, owner: "c", now: NOW, reducer: algorithmReducer });
-    assert.equal(duplicate.outcome, "noop",
-      `(${binding}) a duplicate message must not re-apply, got ${JSON.stringify(duplicate)}`);
+    assert.equal(duplicate.outcome, "completed",
+      `(${binding}) a duplicate message converges to a completed task, got ${JSON.stringify(duplicate)}`);
+    assert.equal(duplicate.code, "already_applied",
+      `(${binding}) without re-applying the event, got ${JSON.stringify(duplicate)}`);
     const after = await loadProjectionHead(io.db, SCOPE_A);
     assert.equal(after.revision, before.revision, `(${binding}) the revision is unchanged`);
     assert.equal(await countDeltas(rawDb, USER_A), deltasBefore, `(${binding}) no extra delta is archived`);
