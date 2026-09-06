@@ -89,9 +89,10 @@ export async function commitProjection({ io, lease, baseRevision, activeGenerati
     )),
     io.db.prepare(
       `UPDATE rds2_projections SET revision = ?, last_event_seq = ?, summary_json = ?, updated_at = ?
-       WHERE user_id = ? AND namespace = ? AND projection_name = ? AND revision = ?`
+       WHERE user_id = ? AND namespace = ? AND projection_name = ?
+         AND revision = ? AND last_event_seq < ?`
     ).bind(revision, changes.eventSeq, changes.summary === null ? null : canonicalJson(changes.summary), now,
-      scope.userId, scope.namespace, scope.projectionName, baseRevision),
+      scope.userId, scope.namespace, scope.projectionName, baseRevision, changes.eventSeq),
     io.db.prepare(
       `INSERT INTO rds2_archive_deliveries (artifact_id, user_id, namespace, projection_name, object_type,
          object_name, frozen_json, artifact_hash, created_at)

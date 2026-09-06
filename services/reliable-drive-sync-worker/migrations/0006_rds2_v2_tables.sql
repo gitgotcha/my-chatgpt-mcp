@@ -161,6 +161,15 @@ CREATE TABLE rds2_commit_guards (
   created_at TEXT NOT NULL
 );
 
+-- The event cursor is monotonic: no commit may move last_event_seq backwards,
+-- whatever the caller believes about the head (G2-R3).
+CREATE TRIGGER rds2_cursor_monotonic
+BEFORE UPDATE ON rds2_projections
+WHEN NEW.last_event_seq < OLD.last_event_seq
+BEGIN
+  SELECT RAISE(ABORT, 'cursor_regression');
+END;
+
 -- Transaction guards. A guard row may only be inserted while the referenced
 -- task is processing under the claiming owner/epoch with an unexpired lease.
 -- The whole batch aborts otherwise, so stale writes can never persist.

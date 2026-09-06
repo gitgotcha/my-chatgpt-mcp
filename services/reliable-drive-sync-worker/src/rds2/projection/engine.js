@@ -3,7 +3,7 @@
 // commits rows, head, frozen delta, archive task and task completion in one
 // guarded batch. Out-of-order events, concurrent build activity and lost
 // races are deferred — never applied out of turn, never counted as failures.
-import { claimForProcessing, deferTask, getTask } from "../tasks/repository.js";
+import { claimForProcessing, deferTask, completeTask, getTask } from "../tasks/repository.js";
 import { loadProjectionHead, ensureBuild, fetchEventBySeq } from "./builds.js";
 import { commitProjection } from "./commit.js";
 
@@ -17,6 +17,15 @@ export async function projectOne({ io, taskId, owner, now, reducer, lease = null
   const scope = activeLease.scope;
 
   const head = await loadProjectionHead(io.db, scope);
+  // Already-applied event: converge the stale task without touching the
+  // reducer, the revision or the archive — exactly-once business effect with
+  // at-least-once task messages.
+  if (activeLease.eventSeq <= head.lastEventSeq) {
+    const done = await completeTask({ db: io.db, lease: activeLease, now });
+    return done.rowsWritten
+      ? stepResult("completed", taskId, "already_applied")
+      : stepResult("noop", taskId, "lease_lost");
+  }
   if (head.building === 1) {
     // New events queue up while a rebuild is running; the activation switches
     // the generation and only then may ordinary commits resume.

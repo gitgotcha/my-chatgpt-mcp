@@ -496,7 +496,7 @@ test("an event accepted through the real accept path projects end to end", async
 // the frozen target and the page size is validated.
 // ---------------------------------------------------------------------------
 
-async function seedEventsThroughAccept(makeIo, rawDb, count, { topic = "t-build", idOffset = 0, allowDeferred = false } = {}) {
+async function seedEventsThroughAccept(makeIo, rawDb, count, { topic = "t-build", idOffset = 0, allowDeferred = false, project = true } = {}) {
   for (let index = 1; index <= count; index += 1) {
     const eventIdNumber = idOffset + index;
     const envelope = {
@@ -529,6 +529,7 @@ async function seedEventsThroughAccept(makeIo, rawDb, count, { topic = "t-build"
     const taskId = await rawDb.prepare(
       "SELECT task_id FROM rds2_tasks WHERE type = 'projection' AND state = 'pending' ORDER BY created_at DESC, task_id DESC LIMIT 1"
     ).first("task_id");
+    if (!project) continue;
     await dispatchOne({ io: makeIo(), taskId, owner: "d", now: NOW });
     const result = await projectOne({ io: makeIo(), taskId, owner: "c", now: NOW, reducer: algorithmReducer });
     if (allowDeferred) {
@@ -611,6 +612,68 @@ test("R2 the build page size is validated and capped at 50", async () => {
       () => continueBuild({ io: makeIo(), taskId: nextTask, owner: "builder", now: NOW, reducer: algorithmReducer, pageSize: 51 }),
       (error) => error.code === "invalid_page_size",
       `(${binding}) a page size above 50 must be rejected`
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G2-R3 regression: events already inside the authoritative cursor converge
+// their stale tasks without re-applying, and the head cursor can never move
+// backwards — enforced by the database, not only by pre-checks.
+// ---------------------------------------------------------------------------
+
+test("R3 a stale projection task converges without re-applying its event", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo, sent }) => {
+    // Both events stay pending: the build covers them and advances the cursor.
+    await seedEventsThroughAccept(makeIo, rawDb, 2, { project: false });
+    const headBefore = await loadProjectionHead(io.db, { userId: USER_A, namespace: "algorithm", projectionName: "learning" });
+    const taskIds = await rawDb.prepare(
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection' ORDER BY task_id"
+    ).all();
+    await ensureBuild({
+      db: rawDb, scope: { userId: USER_A, namespace: "algorithm", projectionName: "learning" },
+      baseRevision: headBefore.revision, now: NOW
+    });
+    const last = await drainBuildPages(makeIo, rawDb);
+    assert.equal(last.outcome, "completed");
+    const attemptsBefore = JSON.parse(await rawDb.prepare(
+      `SELECT value_json FROM rds2_projection_rows WHERE user_id = ? AND generation = 1 AND row_kind = 'topic' AND row_key = 't-build'`
+    ).bind(USER_A).first("value_json")).attempts;
+    assert.equal(attemptsBefore, 2);
+    const deltasBefore = await rawDb.prepare(
+      "SELECT COUNT(*) AS n FROM rds2_archive_deliveries WHERE object_type = 'projection_delta'"
+    ).first("n");
+    const revisionAfterBuild = (await loadProjectionHead(io.db, { userId: USER_A, namespace: "algorithm", projectionName: "learning" })).revision;
+
+    // The covered (still pending) projection tasks get dispatched afterwards.
+    for (const row of taskIds.results) {
+      await dispatchOne({ io: makeIo(), taskId: row.task_id, owner: "d", now: NOW });
+      const result = await projectOne({ io: makeIo(), taskId: row.task_id, owner: "c", now: NOW, reducer: algorithmReducer });
+      assert.equal(result.outcome, "completed", `(${binding}) the stale task converges`);
+      assert.equal(result.code, "already_applied");
+    }
+    const headAfter = await loadProjectionHead(io.db, { userId: USER_A, namespace: "algorithm", projectionName: "learning" });
+    assert.equal(headAfter.lastEventSeq, headBefore.lastEventSeq + 2, `(${binding}) the cursor stays at the build target`);
+    assert.equal(headAfter.revision, revisionAfterBuild, `(${binding}) no extra revision`);
+    const attemptsAfter = JSON.parse(await rawDb.prepare(
+      `SELECT value_json FROM rds2_projection_rows WHERE user_id = ? AND generation = 1 AND row_kind = 'topic' AND row_key = 't-build'`
+    ).bind(USER_A).first("value_json")).attempts;
+    assert.equal(attemptsAfter, attemptsBefore, `(${binding}) no double counting`);
+    const deltasAfter = await rawDb.prepare(
+      "SELECT COUNT(*) AS n FROM rds2_archive_deliveries WHERE object_type = 'projection_delta'"
+    ).first("n");
+    assert.equal(Number(deltasAfter), Number(deltasBefore), `(${binding}) no duplicate delta`);
+  });
+});
+test("R3 the head cursor regression is aborted by the database", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo, sent }) => {
+    await seedEventsThroughAccept(makeIo, rawDb, 2);
+    await assert.rejects(
+      () => rawDb.prepare(
+        `UPDATE rds2_projections SET last_event_seq = 1 WHERE user_id = ?`
+      ).bind(USER_A).run(),
+      /cursor_regression/,
+      `(${binding}) last_event_seq must never move backwards`
     );
   });
 });
