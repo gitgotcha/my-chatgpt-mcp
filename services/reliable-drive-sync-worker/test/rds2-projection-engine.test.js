@@ -6,8 +6,9 @@ import { withD1, applySchema } from "./support/rds2-d1.js";
 import { createInvocationIo } from "../src/rds2/io/invocation-io.js";
 import { acceptEvent } from "../src/rds2/events/accept.js";
 import { projectOne } from "../src/rds2/projection/engine.js";
-import { continueBuild, loadProjectionHead } from "../src/rds2/projection/builds.js";
+import { continueBuild, loadProjectionHead, ensureBuild } from "../src/rds2/projection/builds.js";
 import { commitProjection } from "../src/rds2/projection/commit.js";
+import { algorithmReducer } from "../src/rds2/projection/algorithm.js";
 import { deferTask } from "../src/rds2/tasks/repository.js";
 import { dispatchOne } from "../src/rds2/tasks/dispatcher.js";
 
@@ -486,5 +487,130 @@ test("an event accepted through the real accept path projects end to end", async
     assert.equal(head.revision, 1);
     const summary = JSON.parse(head.summary_json);
     assert.deepEqual(summary.identity, { userId: USER_A, username: NAME });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G2-R2 regression: a build page's "read less than a full page" is NOT "done";
+// the reducer may consume fewer events than fetched. Page reads are bounded by
+// the frozen target and the page size is validated.
+// ---------------------------------------------------------------------------
+
+async function seedEventsThroughAccept(makeIo, rawDb, count, { topic = "t-build", idOffset = 0, allowDeferred = false } = {}) {
+  for (let index = 1; index <= count; index += 1) {
+    const eventIdNumber = idOffset + index;
+    const envelope = {
+      schemaVersion: "1.2",
+      namespace: "algorithm",
+      eventType: "algorithm.learning.completed",
+      identity: { username: NAME, userId: USER_A },
+      payload: {
+        event: {
+          schemaVersion: "1.2",
+          eventId: `71000000-0000-4000-8000-${String(eventIdNumber).padStart(12, "0")}`,
+          eventKey: `r2-${topic}-${eventIdNumber}`,
+          eventType: "algorithm.learning.completed",
+          userId: USER_A,
+          username: NAME,
+          observedAt: `2026-09-06T${String(index % 24).padStart(2, "0")}:00:00.000Z`,
+          source: "qa",
+          topic,
+          problem: { title: "P", source: "S", url: "" },
+          outcome: "consulted",
+          evidence: "e",
+          tags: [],
+          confidence: "medium"
+        }
+      },
+      requestId: `req-r2-${index}-${Math.random().toString(36).slice(2, 6)}`
+    };
+    const receipt = await acceptEvent({ io: makeIo(), principal: { userId: USER_A, username: NAME }, envelope, now: NOW });
+    assert.equal(receipt.disposition, "accepted");
+    const taskId = await rawDb.prepare(
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection' AND state = 'pending' ORDER BY created_at DESC, task_id DESC LIMIT 1"
+    ).first("task_id");
+    await dispatchOne({ io: makeIo(), taskId, owner: "d", now: NOW });
+    const result = await projectOne({ io: makeIo(), taskId, owner: "c", now: NOW, reducer: algorithmReducer });
+    if (allowDeferred) {
+      assert.ok(["completed", "retry"].includes(result.outcome), JSON.stringify(result));
+    } else {
+      assert.equal(result.outcome, "completed");
+    }
+  }
+}
+
+async function drainBuildPages(makeIo, rawDb, { rounds = 8, pageSize } = {}) {
+  let last = null;
+  for (let round = 0; round < rounds; round += 1) {
+    const nextTask = await rawDb.prepare(
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' LIMIT 1"
+    ).first("task_id");
+    if (!nextTask) break;
+    await dispatchOne({ io: makeIo(), taskId: nextTask, owner: "dispatch", now: NOW });
+    last = await continueBuild({
+      io: makeIo(), taskId: nextTask, owner: "builder", now: NOW,
+      reducer: algorithmReducer, ...(pageSize === undefined ? {} : { pageSize })
+    });
+  }
+  return last;
+}
+
+test("R2 six events build with the default page size counts every event", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo, sent }) => {
+    await seedEventsThroughAccept(makeIo, rawDb, 6);
+    const head = await loadProjectionHead(io.db, { userId: USER_A, namespace: "algorithm", projectionName: "learning" });
+    await ensureBuild({
+      db: rawDb, scope: { userId: USER_A, namespace: "algorithm", projectionName: "learning" },
+      baseRevision: head.revision, now: NOW
+    });
+    const last = await drainBuildPages(makeIo, rawDb);
+    assert.equal(last.outcome, "completed", `(${binding}) the build activates`);
+    const topic = JSON.parse(await rawDb.prepare(
+      `SELECT value_json FROM rds2_projection_rows WHERE user_id = ? AND generation = 1 AND row_kind = 'topic' AND row_key = 't-build'`
+    ).bind(USER_A).first("value_json"));
+    assert.equal(topic.attempts, 6, `(${binding}) all six events count, got ${topic.attempts}`);
+    assert.equal(head.lastEventSeq, 6);
+  });
+});
+
+test("R2 a build never reads past its frozen target", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo, sent }) => {
+    await seedEventsThroughAccept(makeIo, rawDb, 2);
+    const head = await loadProjectionHead(io.db, { userId: USER_A, namespace: "algorithm", projectionName: "learning" });
+    await ensureBuild({
+      db: rawDb, scope: { userId: USER_A, namespace: "algorithm", projectionName: "learning" },
+      baseRevision: head.revision, now: NOW
+    });
+    // A third event arrives after the build froze its target.
+    // The late event defers while the build is running (building = 1).
+    await seedEventsThroughAccept(makeIo, rawDb, 1, { topic: "t-late", idOffset: 100, allowDeferred: true });
+    const last = await drainBuildPages(makeIo, rawDb);
+    assert.equal(last.outcome, "completed", `(${binding}) the build activates`);
+    const staged = await rawDb.prepare(
+      `SELECT value_json FROM rds2_projection_rows WHERE user_id = ? AND generation = 1 AND row_kind = 'topic' AND row_key = 't-late'`
+    ).bind(USER_A).first("value_json");
+    assert.equal(staged, null, `(${binding}) the late event must not be computed into the frozen build`);
+    const built = await loadProjectionHead(io.db, { userId: USER_A, namespace: "algorithm", projectionName: "learning" });
+    assert.equal(built.lastEventSeq, head.lastEventSeq, `(${binding}) activation advances exactly to the frozen target`);
+  });
+});
+
+test("R2 the build page size is validated and capped at 50", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo, sent }) => {
+    await seedEventsThroughAccept(makeIo, rawDb, 2);
+    const head = await loadProjectionHead(io.db, { userId: USER_A, namespace: "algorithm", projectionName: "learning" });
+    await ensureBuild({
+      db: rawDb, scope: { userId: USER_A, namespace: "algorithm", projectionName: "learning" },
+      baseRevision: head.revision, now: NOW
+    });
+    const nextTask = await rawDb.prepare(
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' LIMIT 1"
+    ).first("task_id");
+    await dispatchOne({ io: makeIo(), taskId: nextTask, owner: "dispatch", now: NOW });
+    await assert.rejects(
+      () => continueBuild({ io: makeIo(), taskId: nextTask, owner: "builder", now: NOW, reducer: algorithmReducer, pageSize: 51 }),
+      (error) => error.code === "invalid_page_size",
+      `(${binding}) a page size above 50 must be rejected`
+    );
   });
 });
