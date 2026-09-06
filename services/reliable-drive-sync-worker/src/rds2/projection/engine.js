@@ -7,6 +7,15 @@ import { claimForProcessing, deferTask, completeTask, getTask } from "../tasks/r
 import { loadProjectionHead, ensureBuild, fetchEventBySeq } from "./builds.js";
 import { commitProjection } from "./commit.js";
 
+// "Is there an unprocessed predecessor for this event?" — a yes/no question,
+// so the answer is a bounded existence probe (LIMIT 1) that walks the
+// covering (user_id, namespace, projection_name, event_seq) index. A COUNT
+// over the whole range would make the cost grow with the backlog. Exported so
+// the contract test plans exactly the statement the engine runs.
+export const PREDECESSOR_PROBE_SQL = `SELECT 1 AS found FROM rds2_events
+     WHERE user_id = ? AND namespace = ? AND projection_name = ?
+       AND event_seq > ? AND event_seq < ? LIMIT 1`;
+
 function stepResult(outcome, taskId, code) {
   return { outcome, taskId, code };
 }
@@ -39,12 +48,12 @@ export async function projectOne({ io, taskId, owner, now, reducer, lease = null
     return stepResult("retry", taskId, "event_not_found");
   }
   // Never apply an event while a smaller unprocessed one exists in scope.
-  const gap = await io.db.prepare(
-    `SELECT COUNT(*) AS n FROM rds2_events
-     WHERE user_id = ? AND namespace = ? AND projection_name = ?
-       AND event_seq > ? AND event_seq < ?`
-  ).bind(scope.userId, scope.namespace, scope.projectionName, head.lastEventSeq, activeLease.eventSeq).first("n");
-  if (Number(gap) > 0) {
+  // The answer is yes/no, so this is a bounded existence probe — LIMIT 1 over
+  // the covering (user, namespace, projection, event_seq) index — never a
+  // COUNT over the whole backlog range.
+  const predecessor = await io.db.prepare(PREDECESSOR_PROBE_SQL).bind(scope.userId, scope.namespace, scope.projectionName, head.lastEventSeq, activeLease.eventSeq)
+    .first("found");
+  if (predecessor !== null) {
     await deferTask({ db: io.db, lease: activeLease, now, availableAt: now });
     return stepResult("retry", taskId, "deferred_predecessor");
   }

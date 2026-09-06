@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { withD1, applySchema } from "./support/rds2-d1.js";
 import { createInvocationIo } from "../src/rds2/io/invocation-io.js";
 import { acceptEvent } from "../src/rds2/events/accept.js";
-import { projectOne } from "../src/rds2/projection/engine.js";
+import { projectOne, PREDECESSOR_PROBE_SQL } from "../src/rds2/projection/engine.js";
 import { continueBuild, loadProjectionHead, ensureBuild } from "../src/rds2/projection/builds.js";
 import { commitProjection } from "../src/rds2/projection/commit.js";
 import { algorithmReducer } from "../src/rds2/projection/algorithm.js";
@@ -756,5 +756,199 @@ test("R4 a page task whose build is already settled converges itself", async () 
     assert.equal(result.code, "build_already_settled");
     const task = await rawDb.prepare("SELECT state FROM rds2_tasks WHERE task_id = ?").bind("build-dup").first("state");
     assert.equal(task, "completed", `(${binding}) the duplicate task must not stay processing`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G2 coverage fix: the "is there an unprocessed predecessor?" question is
+// answered by a bounded indexed existence probe over the EVENT TABLE, not by
+// counting a range, and the cost must not grow with the backlog.
+// ---------------------------------------------------------------------------
+
+// The engine's real statement — the test plans what the engine runs.
+
+// Seeds `count` real event-table rows (D1 caps bound variables at 100, so the
+// tuples go in batches) and returns the highest event_seq written.
+async function seedEventBacklog(rawDb, userId, count) {
+  let highest = 0;
+  const batchSize = 9;
+  for (let offset = 0; offset < count; offset += batchSize) {
+    const size = Math.min(batchSize, count - offset);
+    const tuples = Array.from({ length: size }, () =>
+      `(?, 'algorithm', 'learning', ?, ?, 'algorithm.learning.completed', 'seed', ?, 'seed-hash', ?)`).join(",");
+    const params = [];
+    for (let index = 0; index < size; index += 1) {
+      const ordinal = offset + index + 1;
+      params.push(
+        userId,
+        `73000000-0000-4000-8000-${String(ordinal).padStart(12, "0")}`,
+        `${userId}:backlog:${ordinal}`,
+        JSON.stringify({
+          schemaVersion: "1.2",
+          payload: {
+            event: {
+              schemaVersion: "1.2",
+              eventType: "algorithm.learning.completed",
+              eventKey: `${userId}:backlog:${ordinal}`,
+              userId,
+              username: NAME,
+              topic: "backlog",
+              outcome: "consulted",
+              observedAt: NOW
+            }
+          }
+        }),
+        NOW
+      );
+    }
+    const result = await rawDb.prepare(
+      `INSERT INTO rds2_events (user_id, namespace, projection_name, event_id, event_key, event_type,
+         created_by_request, envelope_json, content_hash, created_at) VALUES ${tuples}`
+    ).bind(...params).run();
+    highest = Number(result.meta.last_row_id);
+  }
+  return highest;
+}
+
+function backlogEnvelope(userId, ordinal) {
+  return {
+    schemaVersion: "1.2",
+    namespace: "algorithm",
+    eventType: "algorithm.learning.completed",
+    identity: { username: NAME, userId },
+    payload: {
+      event: {
+        schemaVersion: "1.2",
+        eventId: `74000000-0000-4000-8000-${String(ordinal).padStart(12, "0")}`,
+        eventKey: `${userId}:next:${ordinal}`,
+        eventType: "algorithm.learning.completed",
+        userId,
+        username: NAME,
+        observedAt: NOW,
+        source: "qa",
+        topic: "backlog",
+        problem: { title: "P", source: "S", url: "" },
+        outcome: "consulted",
+        evidence: "e",
+        tags: [],
+        confidence: "medium"
+      }
+    },
+    requestId: `req-backlog-${ordinal}`
+  };
+}
+
+// A db wrapper that only counts what the statements actually PULLED.
+function rowCountingDb(rawDb, stats) {
+  const track = (sqlText, result) => {
+    if (/^\s*(SELECT|WITH)/i.test(sqlText)) {
+      stats.rows += Number(result?.meta?.rows_read ?? result?.results?.length ?? 0);
+    }
+    return result;
+  };
+  return {
+    prepare: (sql) => {
+      const stmt = rawDb.prepare(sql);
+      const make = (bound) => {
+        const native = bound && bound.length ? stmt.bind(...bound) : stmt;
+        return {
+          __native: native,
+          bind: (...values) => make(values),
+          first: async (...args) => {
+            const all = track(sql, await native.all());
+            const row = all.results[0] ?? null;
+            if (row === null || args.length === 0) return row;
+            return row[args[0]] ?? null;
+          },
+          all: async () => track(sql, await native.all()),
+          run: async () => track(sql, await native.run())
+        };
+      };
+      return make([]);
+    },
+    batch: async (statements) => {
+      const results = await rawDb.batch(statements.map((statement) => statement.__native));
+      statements.forEach((statement, index) => track(statement.__sql ?? "", results[index]));
+      return results;
+    }
+  };
+}
+
+test("the predecessor probe is an indexed bounded existence query", async () => {
+  await runProjectionTest(async ({ binding, rawDb }) => {
+    const plan = await rawDb.prepare(`EXPLAIN QUERY PLAN ${PREDECESSOR_PROBE_SQL}`)
+      .bind(USER_A, "algorithm", "learning", 0, 10).all();
+    const detail = plan.results.map((row) => String(row.detail)).join(" | ");
+    assert.match(detail, /rds2_events_scope_seq_idx/,
+      `(${binding}) the probe must use the (user, namespace, projection, seq) index, got ${detail}`);
+    assert.doesNotMatch(detail, /\bSCAN\b/,
+      `(${binding}) the probe must never scan the event table, got ${detail}`);
+  });
+});
+
+test("an event-table backlog costs no more rows than a short history", async () => {
+  await runProjectionTest(async ({ binding, rawDb, makeIo }) => {
+    const measured = [];
+    for (const backlog of [50, 400]) {
+      const user = `44444444-0000-4000-8000-${String(backlog).padStart(12, "0")}`;
+      const highest = await seedEventBacklog(rawDb, user, backlog);
+      await rawDb.prepare(
+        `INSERT INTO rds2_projections (user_id, namespace, projection_name, revision, last_event_seq,
+           active_generation, building, summary_json, updated_at)
+         VALUES (?, 'algorithm', 'learning', 0, ?, 0, 0, NULL, ?)`
+      ).bind(user, highest, NOW).run();
+      const stats = { rows: 0 };
+      const countingIo = createInvocationIo({
+        db: rowCountingDb(rawDb, stats),
+        queues: {
+          RDS2_PROJECTION_QUEUE: { send: async () => {} },
+          RDS2_ARCHIVE_QUEUE: { send: async () => {} }
+        },
+        fetchImpl: async () => new Response("{}", { status: 200 }),
+        limit: PROJECTION_LIMIT
+      });
+      await acceptEvent({
+        io: makeIo(), principal: { userId: user, username: NAME },
+        envelope: backlogEnvelope(user, backlog + 1), now: NOW
+      });
+      const taskId = await rawDb.prepare(
+        `SELECT task_id FROM rds2_tasks WHERE type = 'projection' AND state = 'pending'
+           AND user_id = ? ORDER BY created_at DESC, task_id DESC LIMIT 1`
+      ).bind(user).first("task_id");
+      await dispatchOne({ io: makeIo(), taskId, owner: "d", now: NOW });
+      const result = await projectOne({ io: countingIo, taskId, owner: "c", now: NOW, reducer: algorithmReducer });
+      assert.equal(result.outcome, "completed", `(${binding}) ${JSON.stringify(result)}`);
+      measured.push({ backlog, rows: stats.rows });
+    }
+    const [small, large] = measured;
+    assert.equal(large.rows, small.rows,
+      `(${binding}) a ${large.backlog}-event backlog must not read more rows than ${small.backlog}`);
+    assert.ok(small.rows <= 16, `(${binding}) a single event stays bounded, got ${small.rows}`);
+  });
+});
+
+test("a backlogged predecessor defers the newer event instead of skipping it", async () => {
+  await runProjectionTest(async ({ binding, rawDb, makeIo }) => {
+    const user = "55555555-0000-4000-8000-000000000001";
+    await seedEventBacklog(rawDb, user, 20);
+    // The head has NOT caught up: every seeded event is still unprocessed.
+    await rawDb.prepare(
+      `INSERT INTO rds2_projections (user_id, namespace, projection_name, revision, last_event_seq,
+         active_generation, building, summary_json, updated_at)
+       VALUES (?, 'algorithm', 'learning', 0, 0, 0, 0, NULL, ?)`
+    ).bind(user, NOW).run();
+    await acceptEvent({
+      io: makeIo(), principal: { userId: user, username: NAME },
+      envelope: backlogEnvelope(user, 999), now: NOW
+    });
+    const taskId = await rawDb.prepare(
+      `SELECT task_id FROM rds2_tasks WHERE type = 'projection' AND state = 'pending'
+         AND user_id = ? ORDER BY created_at DESC, task_id DESC LIMIT 1`
+    ).bind(user).first("task_id");
+    await dispatchOne({ io: makeIo(), taskId, owner: "d", now: NOW });
+    const result = await projectOne({ io: makeIo(), taskId, owner: "c", now: NOW, reducer: algorithmReducer });
+    assert.equal(result.outcome, "retry", `(${binding}) ${JSON.stringify(result)}`);
+    assert.equal(result.code, "deferred_predecessor",
+      `(${binding}) the newer event waits for its predecessor`);
   });
 });
