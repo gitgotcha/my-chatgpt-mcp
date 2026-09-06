@@ -244,8 +244,14 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
       scope, events, head,
       continuation: { ...continuation, nextAfterPage: events[events.length - 1].eventSeq + 1 }
     });
+    // The cursor is validated against BOTH bounds: the frozen target and the
+    // page this call actually handed to the reducer. A reducer may consume
+    // fewer events than the page offered, but it may never claim to have
+    // consumed events it was never given — that would silently skip them.
+    const lastFetchedSeq = events[events.length - 1].eventSeq;
     const nextSeq = pageResult.continuation?.nextEventSeq;
-    if (!Number.isInteger(nextSeq) || nextSeq <= continuation.nextEventSeq || nextSeq > targetEventSeq + 1) {
+    if (!Number.isInteger(nextSeq) || nextSeq <= continuation.nextEventSeq
+      || nextSeq > lastFetchedSeq + 1 || nextSeq > targetEventSeq + 1) {
       // No forward progress or a cursor beyond the fetched range is a
       // deterministic reducer contract violation — never a silent loop.
       await parkNeedsAttention({ db: io.db, lease, now, code: "build_no_progress" });
