@@ -534,6 +534,13 @@ test("R5 offline replay needs every build package and reproduces the live projec
       assert.equal(replay.rows[`${row.row_kind}:${row.row_key}`], row.value_json,
         `(${binding}) replayed row ${row.row_key} matches`);
     }
+    const headRow = await rawDb.prepare(
+      "SELECT revision, last_event_seq FROM rds2_projections WHERE user_id = ?"
+    ).bind(USER).first();
+    assert.equal(Number(headRow.last_event_seq), 8,
+      `(${binding}) the cursor advanced to the frozen build target`);
+    assert.equal(replay.revision, Number(headRow.revision),
+      `(${binding}) replay ends on the live revision`);
     const head = await rawDb.prepare("SELECT summary_json FROM rds2_projections WHERE user_id = ?").bind(USER).first("summary_json");
     assert.equal(replay.summary, head, `(${binding}) replay reproduces the summary`);
 
