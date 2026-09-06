@@ -1029,5 +1029,16 @@ test("C5 a spent invocation budget stops Drive calls and only a new invocation g
     assert.deepEqual(await freshClient.findExact("artifact-budget.json"), [],
       `(${binding}) a separate invocation starts from a fresh budget`);
     assert.equal(drive.state.lists, 1, `(${binding}) and counts its own call`);
+    // A NEW client handed the SAME exhausted io must not restore anything:
+    // swapping clients inside one invocation is not a budget reset.
+    const rewrappedClient = createArchiveClient({
+      env: {}, io: spentIo, folderId: FOLDER_ID, tokenProvider: async () => "t"
+    });
+    await assert.rejects(
+      () => rewrappedClient.findExact("artifact-budget.json"),
+      (error) => error.code === "budget_exhausted",
+      `(${binding}) a new client over the same invocation io stays exhausted`
+    );
+    assert.equal(drive.state.lists, 1, `(${binding}) and no further call went out`);
   });
 });
