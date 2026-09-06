@@ -777,6 +777,53 @@ test("R2 a reducer that claims to have consumed past the page it was handed is r
   });
 });
 
+// A reducer that emits a chosen number of rows of a chosen size, so the
+// page-level caps can be probed on an INTERMEDIATE page (not just the last).
+function cappedReducer({ rowCount, valueSize }) {
+  return {
+    ...algorithmReducer,
+    buildPage: ({ events, continuation }) => ({
+      rowChanges: Array.from({ length: rowCount }, (_, index) => ({
+        rowKind: "topic", rowKey: `cap-${index}`, value: { blob: "x".repeat(valueSize) }
+      })),
+      summary: { counts: { attempts: events.length } },
+      continuation: { nextEventSeq: continuation.nextAfterPage, stagedCount: events.length }
+    })
+  };
+}
+
+for (const [label, reducer, note] of [
+  ["more than 20 row changes", cappedReducer({ rowCount: 21, valueSize: 8 }), "row count"],
+  ["a row value beyond 64 KiB", cappedReducer({ rowCount: 1, valueSize: 64 * 1024 }), "row unit"],
+  ["a package beyond 256 KiB", cappedReducer({ rowCount: 20, valueSize: 13 * 1024 }), "package"]
+]) {
+  test(`R2 an intermediate page with ${label} is refused, never truncated`, async () => {
+    await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+      await seedEventsThroughAccept(makeIo, rawDb, 2);
+      const before = await loadProjectionHead(io.db, SCOPE_A);
+      const build = await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: before.revision, now: NOW });
+      const pageTask = await rawDb.prepare(
+        "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' LIMIT 1"
+      ).first("task_id");
+      await dispatchOne({ io: makeIo(), taskId: pageTask, owner: "dispatch", now: NOW });
+      await assert.rejects(
+        () => continueBuild({ io: makeIo(), taskId: pageTask, owner: "builder", now: NOW, reducer }),
+        (error) => error.code === "changes_too_large",
+        `(${binding}) the ${note} cap must be a hard refusal`
+      );
+      const after = await loadProjectionHead(io.db, SCOPE_A);
+      assert.equal(after.revision, before.revision, `(${binding}) nothing is committed`);
+      const staged = await rawDb.prepare(
+        "SELECT COUNT(*) AS n FROM rds2_projection_rows WHERE user_id = ? AND generation = ?"
+      ).bind(USER_A, after.activeGeneration + 1).first("n");
+      assert.equal(staged, 0, `(${binding}) an oversized page must not be partially staged`);
+      const stage = await rawDb.prepare("SELECT stage FROM rds2_projection_builds WHERE build_id = ?")
+        .bind(build.build_id).first("stage");
+      assert.equal(stage, "scanning", `(${binding}) the build survives for a corrected retry`);
+    });
+  });
+}
+
 // ---------------------------------------------------------------------------
 // G2-R3 regression: events already inside the authoritative cursor converge
 // their stale tasks without re-applying, and the head cursor can never move
@@ -920,6 +967,40 @@ test("R4 a page task whose build is already settled converges itself", async () 
   });
 });
 
+test("R3 a duplicate queue message for an already applied event converges", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    await seedEventsThroughAccept(makeIo, rawDb, 2, { project: false });
+    const taskIds = (await rawDb.prepare(
+      "SELECT task_id, event_seq FROM rds2_tasks WHERE type = 'projection' ORDER BY event_seq"
+    ).all()).results;
+    const firstTask = taskIds[0].task_id;
+    await dispatchOne({ io: makeIo(), taskId: firstTask, owner: "d", now: NOW });
+    const applied = await projectOne({ io: makeIo(), taskId: firstTask, owner: "c", now: NOW, reducer: algorithmReducer });
+    assert.equal(applied.outcome, "completed", `(${binding}) the first delivery applies`);
+    const before = await loadProjectionHead(io.db, SCOPE_A);
+    const deltasBefore = await countDeltas(rawDb, USER_A);
+    const rowBefore = await rawDb.prepare(
+      `SELECT value_json FROM rds2_projection_rows WHERE user_id = ? AND generation = ?
+        AND row_kind = 'topic' AND row_key = 't-build'`
+    ).bind(USER_A, before.activeGeneration).first("value_json");
+
+    // The queue delivers the very same message again — out of order, after the
+    // task already completed.
+    await dispatchOne({ io: makeIo(), taskId: firstTask, owner: "d", now: NOW });
+    const duplicate = await projectOne({ io: makeIo(), taskId: firstTask, owner: "c", now: NOW, reducer: algorithmReducer });
+    assert.equal(duplicate.outcome, "noop",
+      `(${binding}) a duplicate message must not re-apply, got ${JSON.stringify(duplicate)}`);
+    const after = await loadProjectionHead(io.db, SCOPE_A);
+    assert.equal(after.revision, before.revision, `(${binding}) the revision is unchanged`);
+    assert.equal(await countDeltas(rawDb, USER_A), deltasBefore, `(${binding}) no extra delta is archived`);
+    const rowAfter = await rawDb.prepare(
+      `SELECT value_json FROM rds2_projection_rows WHERE user_id = ? AND generation = ?
+        AND row_kind = 'topic' AND row_key = 't-build'`
+    ).bind(USER_A, after.activeGeneration).first("value_json");
+    assert.equal(rowAfter, rowBefore, `(${binding}) the projected value is untouched`);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // G2 acceptance correction: the probe row "old owner completes after losing
 // the lease" needs its own BUILD case. A settled-build task or an archive
@@ -1006,6 +1087,61 @@ test("R4 an owner that loses the lease before the activation guard commits canno
       `(${binding}) the new owner activates the build, got ${JSON.stringify(finished)} after ${JSON.stringify(dispatchResult)}`);
     const settled = await loadProjectionHead(io.db, SCOPE_A);
     assert.equal(settled.lastEventSeq, 2, `(${binding}) and lands on the frozen target`);
+  });
+});
+
+test("R4 two build starts on one scope leave exactly one running build", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    await seedEventsThroughAccept(makeIo, rawDb, 2, { project: false });
+    const head = await loadProjectionHead(io.db, SCOPE_A);
+    const first = await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: head.revision, now: NOW });
+    const second = await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: head.revision, now: NOW });
+    assert.equal(second.build_id, first.build_id, `(${binding}) a second start joins the running build`);
+    const builds = await rawDb.prepare("SELECT COUNT(*) AS n FROM rds2_projection_builds").first("n");
+    assert.equal(builds, 1, `(${binding}) never two running builds for one scope`);
+    const pages = await rawDb.prepare(
+      "SELECT COUNT(*) AS n FROM rds2_tasks WHERE type = 'projection_build'"
+    ).first("n");
+    assert.equal(pages, 1, `(${binding}) and only one first page task`);
+    const after = await loadProjectionHead(io.db, SCOPE_A);
+    assert.equal(after.building, 1, `(${binding}) the building flag is set once`);
+  });
+});
+
+// A transient storage error is neither a stale write nor a deterministic
+// contract error: it must go back to the queue, never to a permanent park.
+function failingBatchIo(io, message = "storage_unavailable") {
+  const inner = io.db;
+  return {
+    ...io,
+    db: {
+      prepare: (sql) => inner.prepare(sql),
+      batch: async () => { throw new Error(message); }
+    }
+  };
+}
+
+test("R4 a transient storage failure during the build commit defers instead of parking", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    await seedEventsThroughAccept(makeIo, rawDb, 2);
+    const before = await loadProjectionHead(io.db, SCOPE_A);
+    const build = await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: before.revision, now: NOW });
+    const pageTask = await rawDb.prepare(
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' LIMIT 1"
+    ).first("task_id");
+    await dispatchOne({ io: makeIo(), taskId: pageTask, owner: "dispatch", now: NOW });
+    const result = await continueBuild({
+      io: failingBatchIo(makeIo()), taskId: pageTask, owner: "builder", now: NOW, reducer: algorithmReducer
+    });
+    assert.equal(result.outcome, "retry", `(${binding}) a storage error is retryable, got ${JSON.stringify(result)}`);
+    assert.equal(result.code, "deferred_commit_failed");
+    const task = await rawDb.prepare("SELECT state FROM rds2_tasks WHERE task_id = ?").bind(pageTask).first("state");
+    assert.equal(task, "pending", `(${binding}) the page goes back to the queue, not to needs_attention`);
+    const stage = await rawDb.prepare("SELECT stage FROM rds2_projection_builds WHERE build_id = ?")
+      .bind(build.build_id).first("stage");
+    assert.equal(stage, "scanning", `(${binding}) the build is not abandoned`);
+    const after = await loadProjectionHead(io.db, SCOPE_A);
+    assert.equal(after.revision, before.revision, `(${binding}) nothing was committed`);
   });
 });
 
