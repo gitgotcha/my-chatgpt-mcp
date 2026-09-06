@@ -9,8 +9,15 @@
 
 7 项全部修复并提交，另修 3 项测试覆盖纠正（C3、C4、C5）。每项均按
 「失败样本 → 红灯 → 修订 → 双 binding 绿 → SHA」闭环，编号保留。
-回归（`npm test` 口径）：Node 22.22.2 与 Node 26.7.0 上均为 **worker 532/532、bridge 47/47 通过**。
-（worker 目录下 `node --test` 自动发现多 1 例，合计 533，同为全绿。）
+
+复审方追加的补充方案已执行完毕（见 §6）：补齐 R2 事件数边界与两组场景、
+R7 多同名归档、R5 空尾页替换语义与零事件构建、构建专用丢租约测试、C5 同
+invocation 预算断言，审核文档入库，临时探针已定点清理。
+
+**本轮有一项实现变更**：R2 新测试暴露「reducer 消费游标只校验冻结目标上界、
+未校验本次读取页」的缺口，已修（`4f69982`，可单独回退）。详见 §6.3。
+
+回归（`npm test` 口径）：Node 22.22.2 与 Node 26.7.0 上均为 **worker 546/546、bridge 47/47 通过**。
 
 ## 1. 提交清单
 
@@ -26,6 +33,13 @@
 | C4 | `c02b2a4` | g2-c4 probe predecessors with a bounded indexed existence query | `projection/engine.js`、`test/rds2-projection-engine.test.js` |
 | C3 | `0d5e07e` | g2-c3 the replay comparison asserts the cursor too | `test/rds2-archive.test.js` |
 | C5 | `68a5737` | g2-c5 pin per-invocation budget isolation for Drive lookups | `test/rds2-archive.test.js` |
+| C5b | `1b931bc` | g2-c5 a new client over the same exhausted io changes nothing | `test/rds2-archive.test.js` |
+| R5b | `0852801` | g2-r5 replace the empty-terminator case and cover the zero-event build | `test/rds2-archive.test.js` |
+| R2b | `4f69982` | g2-r2 reject a reducer cursor that passes the page it was given | **`projection/builds.js`（实现变更）** |
+| R2c | `8e0179a` | g2-r2 cover the event-count boundaries, the cross-user hole and appended events | `test/rds2-projection-engine.test.js` |
+| R7b | `ab3e059` | g2-r7 two same-name objects park the task through archiveOne | `test/rds2-archive.test.js` |
+| R4b | `dc9b379` | g2-r4 a build owner that loses the lease before the guard commits | `test/rds2-projection-engine.test.js` |
+| DOC | `1793e65` | docs(rds2): commit the G2 review document with an acceptance addendum | `docs/…/2026-09-06-rds2-g2-codex-review.md` |
 
 ## 2. 逐项记录
 
@@ -84,9 +98,13 @@
 2. **默认 pageSize + reducer 部分消费**：R2「six events build with the default page size」与 R5 多页/单页用例均使用默认 50，暴露「读取 50 / 消费 5」的错配。
 3. **重放对账**：不再只断言行数——逐行 value 比较 + summary + revision + 活动 generation；`0d5e07e` 再补 cursor（`last_event_seq` = 冻结 target）与 revision 断言。
 4. **事件表前序积压**：新增「50 vs 400 事件积压下读取行数完全一致」与「未追平时返回 `deferred_predecessor`」两例；`projectOne` 的 `COUNT(*)` 范围统计改为 `PREDECESSOR_PROBE_SQL`（`SELECT 1 … LIMIT 1`），并用 `EXPLAIN QUERY PLAN` 断言走 `rds2_events_scope_seq_idx`（两个 binding 实测均为 `SEARCH … USING COVERING INDEX`，无 `SCAN`）。
-5. **每 invocation 独立 io**（审核 §2.5，本轮补齐为可执行断言）：`C5 a spent invocation budget stops Drive calls and only a new invocation gets a fresh one`。预算耗尽的 invocation 调 `findExact` 抛 `budget_exhausted`，且 `lists`/`uploads` 计数为 0（调用发生前即被拦下）；另起一个 invocation 从自己的预算开始，只计入它自己的那一次调用。
-   - 红灯取法：本项是既有契约，回退 R7 前（预 R7 的 `findExact` 同样使用 `io.fetch`）无法打红，故采用**性质破坏**——把 `createInvocationIo` 的预算改成模块级共享，模拟「预算泄漏到下一次 invocation」；此时第二次 invocation 继承已耗尽的预算，`findExact` 抛 `budget_exhausted`，`lists` 仍为 0，`not ok 1`。还原每 invocation 独立预算后双 binding 绿。
-6. **实际新增测试数**：本轮修订（基线 `218ff8f`）新增 **32 个 `test()` 注册**，worker 全量 **532**（`npm test` glob 口径）。审核文档记的 48 例是 G2 提交口径（T05–T08 共 45 例 + 链路验收 3 例），两者相加即 `d19d8af..HEAD` 的 79 例；独立分支断言未计入总量。
+5. **每 invocation 独立 io**（审核 §2.5）：两条断言合起来覆盖边界。
+   - `C5 a spent invocation budget stops Drive calls and only a new invocation gets a fresh one`（`68a5737`）：预算耗尽的 invocation 调 `findExact` 抛 `budget_exhausted`，`lists`/`uploads` 均为 0（调用发生前即被拦下）；另起一个 invocation 从自己的预算开始，只计入它自己的那一次调用。
+   - `1b931bc` 补第二条：**同一个 invocation 内新建另一个客户端、但传入同一个已耗尽的 `io`，预算不能恢复**，外发次数仍为 0。换客户端不等于换 invocation。
+   - 两者仍**不构成 T14 完整入口预算证明**，只证明预算挂在 invocation 上、不能被调用方置换。
+   - 红灯取法：本项是既有契约，回退 R7 前（预 R7 的 `findExact` 同样使用 `io.fetch`）无法打红，故采用**变异测试**——把 `createInvocationIo` 的预算改成模块级共享，模拟「预算泄漏到下一次 invocation」；此时第二次 invocation 继承已耗尽的预算，`findExact` 抛 `budget_exhausted`，`lists` 仍为 0，`not ok 1`。还原每 invocation 独立预算后双 binding 绿。
+   - 性质：这是**变异测试证据，不是历史缺陷的回退红灯**；按要求已如实标注，未改写历史提交。
+6. **实际新增测试数**：基线 `218ff8f` 的 worker 全量为 **500**，本轮修订后为 **546**，实际新增 **46 个用例**（其中 7 个来自 R2 事件数参数化循环）。审核文档记的 48 例是 G2 提交口径（T05–T08 共 45 例 + 链路验收 3 例），两者相加为 **48 + 46 = 94**；此前 79/80 的写法均基于更早的计数，已作废。独立分支断言未计入总量。
 7. **范围**：仅 G2 相关文件与必要迁移（0006 新增 `build_requires_building_flag`、游标防倒退触发及所需列）；G1 已修的身份、hash 与预算保护未回退。
 
 ## 4. 审核 §4 探针表逐行覆盖映射
@@ -97,30 +115,61 @@
 | 默认页构建 6 事件 → 计数 5 却激活 | 计数 6 才激活 | `R2 six events build with the default page size counts every event`（rds2-projection-engine） |
 | 构建 target=2、随后新增第 3 个事件 → 计数 3、cursor 只到 2 | 只消费冻结 target 内事件，cursor 到 target | `R2 a build never reads past its frozen target` |
 | 构建覆盖后的原任务再消费 → 重复计数、cursor 倒退 | 直接收敛，不重算、不倒退 | `R3 a stale projection task converges without re-applying its event`；`R3 the head cursor regression is aborted by the database` |
-| 4 事件 / page size 2 的离线恢复 → D1 有 7 行、replay 0 行、summary=null | 重放等于实时投影（含 summary），页包齐全 | `R5 offline replay needs every build package and reproduces the live projection`；`R5 a multi-page build freezes every page and the activation references them`（rds2-archive） |
-| 旧 owner 被抢租约后激活 → 返回 completed，实际 building=1 | 由 DB 权威状态判定，丢租约不谎报 | `R4 a page task whose build is already settled converges itself`；`a stale owner's completion writes zero rows and is not acknowledged`（rds2-archive） |
+| 4 事件 / page size 2 的离线恢复 → D1 有 7 行、replay 0 行、summary=null | 重放等于实时投影（含 summary），页包齐全 | `R5 offline replay needs every build package and reproduces the live projection`；`R5 a multi-page build freezes every page and the activation references them`；`R5 the last non-empty page reaching the frozen target activates in place`（4 事件 / pageSize 2，manifest `pages=2`、无第三页任务、重放对账）；`R5 a zero-event build activates with an empty manifest and still replays`（rds2-archive） |
+| 旧 owner 被抢租约后激活 → 返回 completed，实际 building=1 | 由 DB 权威状态判定，丢租约不谎报 | **`R4 an owner that loses the lease before the guard commits cannot report success`（构建激活路径专用，rds2-projection-engine）**；另附 `R4 a page task whose build is already settled converges itself`、`a stale owner's completion writes zero rows and is not acknowledged`（rds2-archive，已结束构建/归档侧，不能替代本行） |
 | 构建启动前 base 变化 → 陈旧 base build 留存、后续只 defer | 原子中止并释放 building，下一趟重新决策 | `R4 ensureBuild refuses a stale base revision atomically`；`R4 a build whose base moved aborts diagnostically and releases the scope` |
 | 同题跨专题、迟到旧事件 → 第二关系丢失、全局 latest 倒退 | 两条关系都在，latest 按比较器不退 | `R6 the same problem under two topics keeps both relations`；`R6 a late older event counts but never rewinds the summary head`（rds2-algorithm） |
-| Drive 分页：fake 带 nextPageToken 仍返回 [] | fail closed，upload 调用数 0 | `R7 an empty page that carries nextPageToken is refused, never 'not found'`；`R7 an incomplete search never uploads and never marks an artifact delivered`（rds2-archive） |
+| Drive 分页：fake 带 nextPageToken 仍返回 [] | fail closed，upload 调用数 0 | `R7 an empty page that carries nextPageToken is refused, never 'not found'`；`R7 an incomplete search never uploads and never marks an artifact delivered`；`R7 two same-name objects park the whole archive task as ambiguous_artifact`（rds2-archive） |
 
 ## 5. 回归结果（`npm test` 等价：worker + bridge）
 
 | 运行时 | worker | bridge |
 |---|---|---|
-| Node 22.22.2（managed） | 532 / 532 通过 | 47 / 47 通过 |
-| Node 26.7.0（system） | 532 / 532 通过 | 47 / 47 通过 |
+| Node 22.22.2（managed） | 546 / 546 通过 | 47 / 47 通过 |
+| Node 26.7.0（system） | 546 / 546 通过 | 47 / 47 通过 |
 
 命令：`node --test services/reliable-drive-sync-worker/test/*.js` 与
 `node --test tools/reliable-drive-sync-mcp/test/*.mjs`（即根 `package.json` 的
-`test:worker` / `test:bridge`）。C5 提交后复跑，两个运行时、两个套件均无失败。
-
-在 worker 目录内以 `node --test` 自动发现运行时为 533/533（多出的 1 例是子目录内被显式 glob 漏掉的用例），同样全绿。
+`test:worker` / `test:bridge`）。补充方案全部提交后复跑，两个运行时、两个套件均无失败。
 
 双 binding：`withD1` 让每条 D1 用例在 SQLite 模拟器与 Miniflare/workerd D1 上各跑一遍，全部通过。
 
-## 5. 需要复审确认的点
+## 6. 补充方案执行记录（复审方追加裁定）
 
-1. **「整除导致的空尾页」在当前 continuation 协议下不可达**：`nextEventSeq > target` 即判定完成，下一页任务只在未完成时创建，因此 `pages=0` 的路径只有「零事件构建」能触达。已用单页、多页、乱序包、缺页、跨 scope、畸形包覆盖，未构造人为空尾页——如需该路径的显式用例，请指明期望语义。
-2. **未跟踪的临时探针** `.rds2-probe-r3.mjs`、`.rds2-probe-c4.mjs`（本轮核对 EXPLAIN/重放行为所用，未提交）。是否删除请指示。
-3. 审核文档 §4 探针表的 9 行现象已在 §4 映射表中逐行对应到具体测试；如需独立的可执行复现脚本（而非测试内断言），请指明。
-4. **C5 的红灯采用「性质破坏」而非回退取法**（详见 §3 第 5 条）：该用例钉住的是既有契约，回退 R7 无法使其失败，故改成让预算跨 invocation 共享来验证它非同义反复。若复审要求红灯一律来自「回退实现」，请指明，我改用等价回退方案重取。
+| 裁定项 | 执行 | SHA |
+|---|---|---|
+| 1. R2 事件数边界 0/1/5/6/49/50/51 + 默认页 + 跨用户空洞 + 构建期间追加 | 参数化 7 例 + 2 组场景；测试驱动改为明确上限（40）且超限即失败；播种支持多用户 | `8e0179a` |
+| 2. R7 多同名归档 | 经 `archiveOne` 断言 `needs_attention/ambiguous_artifact`、0 上传 0 回读、无交付时间、冻结内容与哈希不变 | `ab3e059` |
+| 3. R5 空尾页语义调整 + 零事件构建 | 4 事件/pageSize 2 就地激活（2 页包、manifest `pages=2`、无第三页任务、重放对账）；零事件构建 `pages=0` 独立覆盖 | `0852801` |
+| 4. 两个临时探针定点清理 | 确认其有效断言已进正式测试（R3/R5 与 C4）后删除，未提交、未触及其他未跟踪文件 | `1793e65`（同批） |
+| 5. 九行探针表映射纠正 | 新增构建激活路径专用丢租约测试；R4 行已标注「已结束构建/归档侧不可替代」 | `dc9b379` |
+| 6. 审核文档入库 + 数字纠正 | 原文结论与复现证据原样保留，追加 §5 验收调整说明 | `1793e65` |
+| 7. C5 标注 + 同 invocation 断言 | 已标注为变异测试证据；补「同一 invocation 换新客户端不改预算」 | `1b931bc` |
+
+### 6.1 红灯与证据性质
+
+| 用例 | 红灯取法 | 结果 |
+|---|---|---|
+| R2 reducer 越过本次读取页 | 新测试直接暴露实现缺口（无需变异） | 修复前 `continued`，期望 `needs_attention/build_no_progress`；修复后绿 |
+| R4 构建激活前丢租约 | 变异：把权威完成判定改回「丢租约也报 `build_activated`」 | 变异下首条断言失败（`not ok 1`）；还原后双 binding 绿 |
+| C5 每 invocation 独立预算 | 变异：预算改模块级共享 | `not ok 1`（`budget_exhausted`）；还原后绿 |
+| R5 / R7 / R2 边界与场景 | 既有正确行为，允许首次即绿 | 均双 binding 绿 |
+
+### 6.2 未做之事
+
+- 未构造「人为空尾页」用例（按裁定，该路径不重新开放）。
+- 未为九行探针表另写九份独立脚本（按裁定，正式测试断言等价即可）。
+- 未放宽任何断言迁就实现。
+
+### 6.3 需要复审注意：本轮唯一的额外实现变更
+
+R2 的新测试暴露了一个实现缺口，已修（`4f69982`，仅 `projection/builds.js` 一处）：
+
+- **缺口**：`continueBuild` 校验 reducer 返回的消费游标时只比较冻结目标上界（`nextSeq <= target + 1`），未比较本次实际交给 reducer 的页范围。reducer 若返回一个「越过本次读取页、但仍在冻结目标内」的游标，引擎会接受它 —— 被跨越的事件从未被读取却被认为已消费，构建照常激活，投影出现空洞。
+- **修复**：游标同时受两个上界约束（本次读取页 `lastEventSeq + 1` 与冻结目标 `+ 1`）；部分消费仍然合法（可以小于页长度），越过即 park 为 `build_no_progress`。
+- **可回退性**：该提交独立，可用 `git revert 4f69982` 单独撤回；撤回后 `R2 a reducer that claims to have consumed past the page it was handed is refused` 会转红。
+
+### 6.4 工作区状态
+
+- 分支 `feat/rds2-v2`（worktree `C:\Users\27846\my-chatgpt-mcp-v2`），`git status` 干净，无未跟踪残留。
+- 未 push、未部署、未进入 T09/T10、未操作真实数据；仍停在 G2 待复审。
