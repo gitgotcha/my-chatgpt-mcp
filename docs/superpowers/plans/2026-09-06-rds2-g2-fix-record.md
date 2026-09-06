@@ -86,12 +86,28 @@
 6. **实际新增测试数**：本轮修订（基线 `218ff8f`）新增 **31 个 `test()` 注册**，worker 全量 **532**。审核文档记的 48 例是 G2 提交口径（T05–T08 共 45 例 + 链路验收 3 例），两者相加即 `d19d8af..HEAD` 的 79 例；独立分支断言未计入总量。
 7. **范围**：仅 G2 相关文件与必要迁移（0006 新增 `build_requires_building_flag`、游标防倒退触发及所需列）；G1 已修的身份、hash 与预算保护未回退。
 
-## 4. 回归结果
+## 4. 审核 §4 探针表逐行覆盖映射
 
-| 运行时 | 结果 |
-|---|---|
-| Node 22.22.2（managed） | 532 tests / 532 pass / 0 fail |
-| Node 26.7.0（system） | 532 tests / 532 pass / 0 fail |
+| 探针现象（审核实测） | 修复后期望 | 覆盖该现象的测试（文件） |
+|---|---|---|
+| 新 pending 只调用恢复器 → 0 派发 | 到期 pending 被派发 | `R1 recovery dispatches due pending tasks after acceptance`（rds2-tasks）；`G2: a synthetic algorithm event completes the full local chain`（rds2-g2-chain） |
+| 默认页构建 6 事件 → 计数 5 却激活 | 计数 6 才激活 | `R2 six events build with the default page size counts every event`（rds2-projection-engine） |
+| 构建 target=2、随后新增第 3 个事件 → 计数 3、cursor 只到 2 | 只消费冻结 target 内事件，cursor 到 target | `R2 a build never reads past its frozen target` |
+| 构建覆盖后的原任务再消费 → 重复计数、cursor 倒退 | 直接收敛，不重算、不倒退 | `R3 a stale projection task converges without re-applying its event`；`R3 the head cursor regression is aborted by the database` |
+| 4 事件 / page size 2 的离线恢复 → D1 有 7 行、replay 0 行、summary=null | 重放等于实时投影（含 summary），页包齐全 | `R5 offline replay needs every build package and reproduces the live projection`；`R5 a multi-page build freezes every page and the activation references them`（rds2-archive） |
+| 旧 owner 被抢租约后激活 → 返回 completed，实际 building=1 | 由 DB 权威状态判定，丢租约不谎报 | `R4 a page task whose build is already settled converges itself`；`a stale owner's completion writes zero rows and is not acknowledged`（rds2-archive） |
+| 构建启动前 base 变化 → 陈旧 base build 留存、后续只 defer | 原子中止并释放 building，下一趟重新决策 | `R4 ensureBuild refuses a stale base revision atomically`；`R4 a build whose base moved aborts diagnostically and releases the scope` |
+| 同题跨专题、迟到旧事件 → 第二关系丢失、全局 latest 倒退 | 两条关系都在，latest 按比较器不退 | `R6 the same problem under two topics keeps both relations`；`R6 a late older event counts but never rewinds the summary head`（rds2-algorithm） |
+| Drive 分页：fake 带 nextPageToken 仍返回 [] | fail closed，upload 调用数 0 | `R7 an empty page that carries nextPageToken is refused, never 'not found'`；`R7 an incomplete search never uploads and never marks an artifact delivered`（rds2-archive） |
+
+## 5. 回归结果（`npm test` 等价：worker + bridge）
+
+| 运行时 | worker | bridge |
+|---|---|---|
+| Node 22.22.2（managed） | 531 / 531 通过 | 47 / 47 通过 |
+| Node 26.7.0（system） | 531 / 531 通过 | 47 / 47 通过 |
+
+在 worker 目录内以 `node --test` 自动发现运行时为 532/532（多出的 1 例是子目录内被显式 glob 漏掉的用例），同样全绿。
 
 双 binding：`withD1` 让每条 D1 用例在 SQLite 模拟器与 Miniflare/workerd D1 上各跑一遍，全部通过。
 
@@ -99,4 +115,4 @@
 
 1. **「整除导致的空尾页」在当前 continuation 协议下不可达**：`nextEventSeq > target` 即判定完成，下一页任务只在未完成时创建，因此 `pages=0` 的路径只有「零事件构建」能触达。已用单页、多页、乱序包、缺页、跨 scope、畸形包覆盖，未构造人为空尾页——如需该路径的显式用例，请指明期望语义。
 2. **未跟踪的临时探针** `.rds2-probe-r3.mjs`、`.rds2-probe-c4.mjs`（本轮核对 EXPLAIN/重放行为所用，未提交）。是否删除请指示。
-3. 审核文档 §4 探针表的 8 行现象已在对应提交中逐条覆盖；如需逐行复现脚本，请指明。
+3. 审核文档 §4 探针表的 9 行现象已在 §4 映射表中逐行对应到具体测试；如需独立的可执行复现脚本（而非测试内断言），请指明。
