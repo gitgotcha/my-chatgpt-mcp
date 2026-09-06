@@ -690,6 +690,152 @@ test("R5 replay switches generation and drops rows the superseded generation own
 });
 
 // ---------------------------------------------------------------------------
+// G2-R5 (验收调整): the "empty terminator page" requirement is replaced by the
+// in-place activation contract — when the last NON-EMPTY page consumes up to
+// the frozen target, that same call activates; no extra page task is created
+// and the summary plus the archive manifest stay complete. The zero-event
+// build is a separate path and stays covered.
+// ---------------------------------------------------------------------------
+
+const SCOPE = { userId: USER, namespace: "algorithm", projectionName: "learning" };
+
+// Explicit-cap build driver: every business call gets its own invocation io,
+// and a build that has not activated when the cap is spent FAILS the test
+// instead of silently returning a half-built projection.
+async function drainBuild({ binding, makeIo, rawDb, pageSize, maxPages = 8, reducer = algorithmReducer }) {
+  const outcomes = [];
+  for (let page = 1; page <= maxPages; page += 1) {
+    const nextTask = await rawDb.prepare(
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' ORDER BY created_at, task_id LIMIT 1"
+    ).first("task_id");
+    if (!nextTask) break;
+    await dispatchOne({ io: makeIo(), taskId: nextTask, owner: "dispatch", now: NOW });
+    const result = await continueBuild({
+      io: makeIo(), taskId: nextTask, owner: "builder", now: NOW, reducer,
+      ...(pageSize === undefined ? {} : { pageSize })
+    });
+    outcomes.push({ taskId: nextTask, outcome: result.outcome, code: result.code });
+    if (result.outcome === "completed") return outcomes;
+  }
+  assert.fail(`(${binding}) the build must activate within ${maxPages} page invocations, got ${JSON.stringify(outcomes)}`);
+}
+
+test("R5 the last non-empty page reaching the frozen target activates in place", async () => {
+  await runArchiveTest(async ({ binding, rawDb }) => {
+    const drive = fakeDriveFetch();
+    const makeIo = (limit = 24) => createInvocationIo({
+      db: rawDb,
+      queues: { RDS2_PROJECTION_QUEUE: { send: async () => {} }, RDS2_ARCHIVE_QUEUE: { send: async () => {} } },
+      fetchImpl: drive.fetchImpl, limit
+    });
+    await acceptEvents(makeIo, rawDb, 4);
+    const base = await rawDb.prepare(
+      "SELECT revision FROM rds2_projections WHERE user_id = ?"
+    ).bind(USER).first("revision");
+    await ensureBuild({ db: rawDb, scope: SCOPE, baseRevision: Number(base), now: NOW });
+
+    const outcomes = await drainBuild({ binding, makeIo, rawDb, pageSize: 2, maxPages: 6 });
+    assert.equal(outcomes.length, 2, `(${binding}) four events at page size 2 take exactly two pages`);
+
+    // Every non-empty page froze a package, and only those two exist.
+    const packages = (await rawDb.prepare(
+      "SELECT frozen_json FROM rds2_archive_deliveries WHERE object_type = 'build_package'"
+    ).all()).results.map((row) => JSON.parse(row.frozen_json));
+    assert.equal(packages.length, 2, `(${binding}) both pages froze a build package`);
+    assert.deepEqual(packages.map((pkg) => pkg.page).sort((a, b) => a - b), [1, 2],
+      `(${binding}) the packages are pages 1 and 2`);
+
+    // Exactly one activation, and its manifest is complete.
+    const activations = (await rawDb.prepare(
+      "SELECT frozen_json FROM rds2_archive_deliveries WHERE object_type = 'projection_delta'"
+    ).all()).results.map((row) => JSON.parse(row.frozen_json)).filter((delta) => delta.build);
+    assert.equal(activations.length, 1, `(${binding}) exactly one activation delta`);
+    assert.equal(activations[0].build.pages, 2, `(${binding}) the manifest lists both pages`);
+    assert.equal(activations[0].build.generation, 1, `(${binding}) the manifest names the generation`);
+    assert.equal(activations[0].build.lastEventSeq, 4, `(${binding}) the manifest ends on the frozen target`);
+
+    // No third page task: activation happens in the call that finished the work.
+    const buildTasks = await rawDb.prepare(
+      "SELECT COUNT(*) AS n FROM rds2_tasks WHERE type = 'projection_build'"
+    ).first("n");
+    assert.equal(buildTasks, 2, `(${binding}) no extra paging task is created after the final page`);
+
+    // Offline replay reproduces content, summary, cursor and revision.
+    const artifacts = (await rawDb.prepare(
+      "SELECT object_type, object_name, frozen_json, artifact_hash FROM rds2_archive_deliveries WHERE user_id = ?"
+    ).bind(USER).all()).results.map((row) => ({
+      objectType: row.object_type, objectName: row.object_name,
+      frozenJson: row.frozen_json, hash: row.artifact_hash
+    }));
+    const replay = await replayProjection(artifacts);
+    const head = await rawDb.prepare(
+      "SELECT revision, last_event_seq, summary_json FROM rds2_projections WHERE user_id = ?"
+    ).bind(USER).first();
+    assert.equal(replay.revision, Number(head.revision), `(${binding}) replay ends on the live revision`);
+    assert.equal(replay.summary, head.summary_json, `(${binding}) replay reproduces the summary`);
+    const liveRows = (await rawDb.prepare(
+      "SELECT row_kind, row_key, value_json FROM rds2_projection_rows WHERE user_id = ? AND generation = ?"
+    ).bind(USER, 1).all()).results;
+    assert.equal(Object.keys(replay.rows).length, liveRows.length, `(${binding}) replay covers every live row`);
+    for (const row of liveRows) {
+      assert.equal(replay.rows[`${row.row_kind}:${row.row_key}`], row.value_json,
+        `(${binding}) replayed row ${row.row_key} matches`);
+    }
+    assert.equal(Number(head.last_event_seq), 4, `(${binding}) the cursor is the frozen target`);
+  });
+});
+
+test("R5 a zero-event build activates with an empty manifest and still replays", async () => {
+  await runArchiveTest(async ({ binding, rawDb }) => {
+    const drive = fakeDriveFetch();
+    const makeIo = (limit = 24) => createInvocationIo({
+      db: rawDb,
+      queues: { RDS2_PROJECTION_QUEUE: { send: async () => {} }, RDS2_ARCHIVE_QUEUE: { send: async () => {} } },
+      fetchImpl: drive.fetchImpl, limit
+    });
+    // A legal, empty projection head: no events, revision 0, nothing building.
+    await rawDb.prepare(
+      `INSERT INTO rds2_projections (user_id, namespace, projection_name, revision, last_event_seq,
+         active_generation, building, summary_json, updated_at)
+       VALUES (?, 'algorithm', 'learning', 0, 0, 0, 0, NULL, ?)`
+    ).bind(USER, NOW).run();
+
+    await ensureBuild({ db: rawDb, scope: SCOPE, baseRevision: 0, now: NOW });
+    const outcomes = await drainBuild({ binding, makeIo, rawDb, maxPages: 4 });
+    assert.equal(outcomes.length, 1, `(${binding}) an empty build is one activation call`);
+
+    const packages = (await rawDb.prepare(
+      "SELECT COUNT(*) AS n FROM rds2_archive_deliveries WHERE object_type = 'build_package'"
+    ).first("n"));
+    assert.equal(packages, 0, `(${binding}) there is no non-empty page to freeze`);
+
+    const activations = (await rawDb.prepare(
+      "SELECT frozen_json FROM rds2_archive_deliveries WHERE object_type = 'projection_delta'"
+    ).all()).results.map((row) => JSON.parse(row.frozen_json)).filter((delta) => delta.build);
+    assert.equal(activations.length, 1, `(${binding}) the empty build still activates once`);
+    assert.equal(activations[0].build.pages, 0, `(${binding}) the manifest declares zero pages`);
+    assert.equal(activations[0].build.lastEventSeq, 0, `(${binding}) the frozen target is zero`);
+
+    const head = await rawDb.prepare(
+      "SELECT revision, last_event_seq, active_generation FROM rds2_projections WHERE user_id = ?"
+    ).bind(USER).first();
+    assert.equal(Number(head.revision), 1, `(${binding}) the revision advanced exactly once`);
+    assert.equal(Number(head.last_event_seq), 0, `(${binding}) the cursor stays at zero`);
+    assert.equal(Number(head.active_generation), 1, `(${binding}) the generation switched`);
+
+    const artifacts = (await rawDb.prepare(
+      "SELECT object_type, object_name, frozen_json, artifact_hash FROM rds2_archive_deliveries WHERE user_id = ?"
+    ).bind(USER).all()).results.map((row) => ({
+      objectType: row.object_type, objectName: row.object_name,
+      frozenJson: row.frozen_json, hash: row.artifact_hash
+    }));
+    const replay = await replayProjection(artifacts);
+    assert.equal(replay.revision, 1, `(${binding}) replay reaches the activated revision`);
+    assert.deepEqual(replay.rows, {}, `(${binding}) an empty build replays to no rows`);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // G2-R7 regression: an exact Drive lookup must PROVE its result is complete
 // before anybody may conclude "there is no such object" and upload.
 // ---------------------------------------------------------------------------
