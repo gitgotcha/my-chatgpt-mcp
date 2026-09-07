@@ -207,9 +207,16 @@ export async function replayProjection(artifacts) {
       error.foundBaseRevision = delta.baseRevision;
       throw error;
     }
-    // R5: the replayed cursor never rewinds. An activation delta sits at its
-    // frozen target, so a rewind means two activations claim the same range.
-    if (previousEventSeq !== null && delta.eventSeq < previousEventSeq) {
+    // R5 + F3-R1: the replayed cursor never rewinds. An ordinary incremental
+    // delta must STRICTLY advance — two deltas claiming the same eventSeq
+    // would apply one event's effect twice. An activation may sit on the
+    // SAME target as the last delta (the paged rebuild replays the identical
+    // range), so only a rewind below it is fatal.
+    const isActivation = delta.build !== null && delta.build !== undefined;
+    if (previousEventSeq !== null
+      && (isActivation
+        ? delta.eventSeq < previousEventSeq
+        : delta.eventSeq <= previousEventSeq)) {
       throw replayError("replay_revision_not_chained", null, {
         field: "eventSeq", previousEventSeq, foundEventSeq: delta.eventSeq
       });

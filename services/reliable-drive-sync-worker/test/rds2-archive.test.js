@@ -1237,11 +1237,14 @@ test("F3 replay accepts the legal empty build, reordered scopes and gapped windo
   assert.equal(ok.revision, 2, "a reordered scope object must not be refused");
 
   // Cross-user sequence gaps INSIDE a window are legal: the windows tile even
-  // though the consumed sequence numbers are not contiguous.
+  // though the consumed sequence numbers are not contiguous. The activation
+  // sits exactly on the manifest's last event (10), not on "the next integer
+  // after the last delta" — F3-R1 pins that identity.
   const withGaps = await f3Chain(F3_BASE_DELTA, F3_PACKAGE_ONE,
     { ...F3_PACKAGE_TWO, firstEventSeq: 9, lastEventSeq: 10, consumedCount: 2,
       scanFirstCursor: 3, scanCursorAfter: 11 },
-    { ...F3_ACTIVATION, build: { buildId: "b-f3", generation: 1, pages: 2, firstEventSeq: 1, lastEventSeq: 10 } });
+    { ...F3_ACTIVATION, eventSeq: 10,
+      build: { buildId: "b-f3", generation: 1, pages: 2, firstEventSeq: 1, lastEventSeq: 10 } });
   assert.equal(withGaps.revision, 2, "windows over gapped sequence numbers still tile");
 });
 
@@ -1256,4 +1259,126 @@ test("F3 replay accepts a partially consumed page", async () => {
     F3_ACTIVATION);
   assert.deepEqual(Object.keys(replay.rows).sort(), ["topic:f3-a", "topic:f3-b"],
     "a partially consumed page still replays completely");
+});
+
+// ---------------------------------------------------------------------------
+// G2 F3-R1 (2026-09-07 implementation review): cross-field consistency the
+// validators still missed. A correct hash proves the bytes, not the content:
+// an activation whose eventSeq contradicts its manifest, a package claiming
+// events before its own scan window, an impossible consumption count and a
+// repeated incremental cursor were ALL accepted.
+// ---------------------------------------------------------------------------
+
+const F3_ZERO_ACTIVATION = {
+  storageVersion: 2, kind: "projection_delta", scope: F3_SCOPE,
+  baseRevision: 0, revision: 1, eventSeq: 0, summary: null,
+  build: { buildId: "b-empty", generation: 1, pages: 0, firstEventSeq: null, lastEventSeq: 0 },
+  changes: []
+};
+
+test("F3-R1 replay refuses an activation whose eventSeq contradicts its manifest", async () => {
+  // The review's counter-example: a zero-event manifest (pages=0, last=0)
+  // with an activation claiming eventSeq=999 was accepted wholesale.
+  await assert.rejects(
+    () => f3Chain({ ...F3_ZERO_ACTIVATION, eventSeq: 999 }),
+    (error) => error.code === "replay_range_inconsistent",
+    "an activation must sit exactly on its manifest's last event (0 for an empty build)"
+  );
+  // The same rule for a non-empty manifest.
+  await assert.rejects(
+    () => f3Chain(F3_BASE_DELTA, F3_PACKAGE_ONE, F3_PACKAGE_TWO,
+      { ...F3_ACTIVATION, eventSeq: 5 }),
+    (error) => error.code === "replay_range_inconsistent",
+    "a non-empty activation must sit exactly on its manifest target"
+  );
+});
+
+test("F3-R1 replay refuses a package claiming events before its own scan window", async () => {
+  // The review's counter-example: manifest [5,5], package window [5,6) but
+  // firstEventSeq=1 — the page claims events it was never handed — and
+  // consumedCount=999, which no window of that width could hold.
+  const pkg = {
+    storageVersion: 2, kind: "build_package", scope: F3_SCOPE,
+    buildId: "b-f3", generation: 1, page: 1,
+    firstEventSeq: 1, lastEventSeq: 5, consumedCount: 999,
+    scanFirstCursor: 5, scanCursorAfter: 6, summary: { counts: { attempts: 9 } },
+    rowChanges: [{ rowKind: "topic", rowKey: "f3-x", value: { n: 9 } }]
+  };
+  const activation = {
+    storageVersion: 2, kind: "projection_delta", scope: F3_SCOPE,
+    baseRevision: 1, revision: 2, eventSeq: 5, summary: null,
+    build: { buildId: "b-f3", generation: 1, pages: 1, firstEventSeq: 5, lastEventSeq: 5 },
+    changes: []
+  };
+  await assert.rejects(
+    () => f3Chain(F3_BASE_DELTA, pkg, activation),
+    (error) => error.code === "replay_range_inconsistent",
+    "a package's consumed range must start at or after its scan window"
+  );
+  // The impossible count is caught even when the range sits inside the window.
+  await assert.rejects(
+    () => f3Chain(F3_BASE_DELTA, { ...pkg, firstEventSeq: 5 }, activation),
+    (error) => error.code === "replay_range_inconsistent",
+    "a consumption count larger than the window's span is impossible"
+  );
+});
+
+test("F3-R1 replay refuses a count of one whose first and last differ", async () => {
+  await assert.rejects(
+    () => f3Chain(F3_BASE_DELTA,
+      { ...F3_PACKAGE_ONE, firstEventSeq: 1, lastEventSeq: 2, consumedCount: 1,
+        scanCursorAfter: 3 },
+      { ...F3_PACKAGE_TWO, scanFirstCursor: 3 },
+      F3_ACTIVATION),
+    (error) => error.code === "replay_range_inconsistent",
+    "one consumed event cannot span two sequence numbers"
+  );
+});
+
+test("F3-R1 replay refuses an incremental delta that repeats its cursor", async () => {
+  // Two ordinary deltas claiming the SAME eventSeq would apply one event's
+  // effect twice. (An activation restating the target is the sanctioned
+  // exception — covered by the positive case below.)
+  await assert.rejects(
+    () => f3Chain(F3_BASE_DELTA,
+      { ...F3_BASE_DELTA, baseRevision: 1, revision: 2, eventSeq: 1 }),
+    (error) => error.code === "replay_revision_not_chained",
+    "an incremental cursor must strictly advance"
+  );
+});
+
+test("F3-R1 the first page's first event must be the manifest's first event", async () => {
+  // Page 1 scans from the manifest's first event, which the build proved to
+  // exist (MIN(event_seq)); a first consumed event after it means the prefix
+  // rule was broken somewhere.
+  await assert.rejects(
+    () => f3Chain(F3_BASE_DELTA,
+      { ...F3_PACKAGE_ONE, firstEventSeq: 2, lastEventSeq: 2, consumedCount: 1 },
+      { ...F3_PACKAGE_TWO, firstEventSeq: 3, lastEventSeq: 4, consumedCount: 2 },
+      F3_ACTIVATION),
+    (error) => error.code === "replay_range_inconsistent",
+    "the first page must start consuming at the manifest's first event"
+  );
+});
+
+test("F3-R1 an activation may restate its target while increments must advance", async () => {
+  // The rebuild exception: an ordinary incremental delta consumes event 4,
+  // and the paged rebuild then ACTIVATES at the same target — the activation
+  // replays the identical range, so its cursor may equal the last delta's.
+  // (The reverse order — an ordinary delta restating an activation's cursor —
+  // would consume one event twice and stays refused.)
+  const replay = await f3Chain(F3_BASE_DELTA,
+    {
+      storageVersion: 2, kind: "projection_delta", scope: F3_SCOPE,
+      baseRevision: 1, revision: 2, eventSeq: 4, summary: { counts: { attempts: 2 } },
+      build: null,
+      changes: [
+        { rowKind: "topic", rowKey: "f3-a", memberKey: null, sortKey: null, value: { n: 2 } },
+        { rowKind: "topic", rowKey: "f3-b", memberKey: null, sortKey: null, value: { n: 2 } }
+      ]
+    },
+    F3_PACKAGE_ONE, F3_PACKAGE_TWO,
+    { ...F3_ACTIVATION, baseRevision: 2, revision: 3 });
+  assert.equal(replay.revision, 3,
+    "an activation restating the target of the last ordinary delta is legal");
 });

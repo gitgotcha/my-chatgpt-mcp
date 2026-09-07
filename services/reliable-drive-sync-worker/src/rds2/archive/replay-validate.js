@@ -80,6 +80,9 @@ function assertChangeArray(changes, field, artifactName) {
 }
 
 // R4 / R5 / S2 for a projection delta (normal incremental or activation).
+// F3-R1: an activation delta must sit EXACTLY on its manifest's last event —
+// the zero-event build encodes that as 0. The review reproduced an
+// activation at eventSeq=999 over a zero-event manifest sailing through.
 export function validateDelta(delta, artifactName) {
   assertSafeInteger(delta.baseRevision, "baseRevision", artifactName);
   assertSafeInteger(delta.revision, "revision", artifactName);
@@ -95,6 +98,14 @@ export function validateDelta(delta, artifactName) {
   assertChangeArray(delta.changes, "changes", artifactName);
   if (delta.build !== null && delta.build !== undefined) {
     validateManifest(delta.build, artifactName);
+    const activationTarget = delta.build.pages === 0 ? 0 : delta.build.lastEventSeq;
+    if (delta.eventSeq !== activationTarget) {
+      throw replayError("replay_range_inconsistent", artifactName, {
+        field: "eventSeq",
+        expectedEventSeq: activationTarget,
+        foundEventSeq: delta.eventSeq
+      });
+    }
   }
 }
 
@@ -147,18 +158,45 @@ export function validatePackage(pkg, artifactName) {
   if (pkg.scanCursorAfter <= pkg.scanFirstCursor) {
     throw replayError("replay_range_inconsistent", artifactName, { field: "scanCursorAfter" });
   }
+  // F3-R1: the consumed range must sit INSIDE the scan window. A first event
+  // before the window means the page claims events it was never handed.
+  if (pkg.firstEventSeq < pkg.scanFirstCursor) {
+    throw replayError("replay_range_inconsistent", artifactName, { field: "firstEventSeq" });
+  }
+  if (pkg.lastEventSeq > pkg.scanCursorAfter - 1) {
+    throw replayError("replay_range_inconsistent", artifactName, { field: "lastEventSeq" });
+  }
   // The consumed range and the scan window must agree EXACTLY: the last
   // consumed event is the one just below the post-scan cursor.
   if (pkg.lastEventSeq !== pkg.scanCursorAfter - 1) {
     throw replayError("replay_range_inconsistent", artifactName, { field: "lastEventSeq" });
+  }
+  // F3-R1: the count cannot exceed the number of integers the consumed span
+  // could hold (cross-user gaps make it SMALLER, never larger), and one
+  // consumed event cannot span two sequence numbers.
+  if (pkg.consumedCount > pkg.lastEventSeq - pkg.firstEventSeq + 1) {
+    throw replayError("replay_range_inconsistent", artifactName, { field: "consumedCount" });
+  }
+  if (pkg.consumedCount === 1 && pkg.firstEventSeq !== pkg.lastEventSeq) {
+    throw replayError("replay_range_inconsistent", artifactName, { field: "consumedCount" });
   }
   assertChangeArray(pkg.rowChanges, "rowChanges", artifactName);
 }
 
 // R8: the manifest's window must be exactly covered by its packages' chained
 // scan windows. Sequence numbers may contain other users' gaps — that is fine
-// — but the windows themselves must tile without a hole.
+// — but the windows themselves must tile without a hole. F3-R1: the FIRST
+// page's first consumed event must be the manifest's first event — the build
+// proved that event exists (MIN(event_seq)), the page reads from it, and a
+// non-empty consumption prefix must start at the first row it read.
 export function validateWindowCoverage(manifest, packages, artifactName) {
+  if (packages[0].firstEventSeq !== manifest.firstEventSeq) {
+    throw replayError("replay_range_inconsistent", artifactName, {
+      field: "firstEventSeq",
+      expectedFirstEventSeq: manifest.firstEventSeq,
+      foundFirstEventSeq: packages[0].firstEventSeq
+    });
+  }
   let expectedCursor = manifest.firstEventSeq;
   for (const pkg of packages) {
     if (pkg.scanFirstCursor !== expectedCursor) {
