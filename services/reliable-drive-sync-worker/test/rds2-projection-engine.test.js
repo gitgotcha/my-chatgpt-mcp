@@ -1510,6 +1510,172 @@ test("F2 an incremental projection that keeps failing counts and parks like the 
   });
 });
 
+// G2-F1: the continuation must not carry the whole accumulated dictionary.
+// 35 events, each with its OWN long topic — the reproduction from the review.
+test("F1 a build over a long multi-topic history completes instead of wedging the scope", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    for (let index = 1; index <= 35; index += 1) {
+      await seedEventsThroughAccept(makeIo, rawDb, 1, {
+        topic: `t${index}-${"x".repeat(1000)}`,
+        idOffset: 1000 + index,
+        project: false
+      });
+    }
+    const before = await loadProjectionHead(io.db, SCOPE_A);
+    assert.equal(before.revision, 0, `(${binding}) seeding must not project`);
+    await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: 0, now: NOW });
+
+    const result = await drainBuildPages(makeIo, rawDb);
+    assert.equal(result.outcome, "completed",
+      `(${binding}) a legal history must build to completion, got ${JSON.stringify(result)}`);
+
+    const after = await loadProjectionHead(io.db, SCOPE_A);
+    assert.equal(after.revision, 1, `(${binding}) the build must activate`);
+    assert.equal(after.building, 0, `(${binding}) the scope must be released`);
+    const topics = await rawDb.prepare(
+      "SELECT COUNT(*) AS n FROM rds2_projection_rows WHERE user_id = ? AND generation = ? AND row_kind = 'topic'"
+    ).bind(USER_A, after.activeGeneration).first("n");
+    assert.equal(Number(topics), 35, `(${binding}) every distinct topic must be projected`);
+  });
+});
+
+// The continuation must hold bounded scalars only: no accumulated dictionary,
+// so its size no longer depends on how much history has been folded.
+test("F1 the continuation carries no accumulated topic or problem dictionary", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    for (let index = 1; index <= 12; index += 1) {
+      await seedEventsThroughAccept(makeIo, rawDb, 1, {
+        topic: `shared-${index}-${"y".repeat(400)}`,
+        idOffset: 3000 + index,
+        project: false
+      });
+    }
+    await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: 0, now: NOW });
+    const first = await runOneBuildPage(makeIo, rawDb);
+    assert.equal(first.outcome, "continued", `(${binding}) ${JSON.stringify(first)}`);
+
+    const row = await rawDb.prepare(
+      "SELECT continuation_json FROM rds2_projection_builds LIMIT 1"
+    ).first("continuation_json");
+    assert.ok(row, `(${binding}) a continuation must have been written`);
+    const bytes = Buffer.byteLength(row, "utf8");
+    assert.ok(bytes <= 65536, `(${binding}) continuation must respect the 64 KiB unit, got ${bytes}`);
+    // Per-topic state must not accumulate. The ONE seeded topic that may
+    // legitimately appear is the elected head carried by `summary` (a single,
+    // bounded string) — anything more would mean a dictionary survived. The
+    // assertion therefore counts how many seeded topics appear, and requires
+    // any survivor to live inside `summary`.
+    const present = [];
+    for (let index = 1; index <= 12; index += 1) {
+      if (row.includes(`shared-${index}-`)) present.push(index);
+    }
+    const parsed = JSON.parse(row);
+    assert.ok(present.length <= 1,
+      `(${binding}) the continuation must not accumulate per-topic state; ` +
+      `found ${present.length} seeded topics [${present}] in ${JSON.stringify(parsed)}`);
+    if (present.length === 1) {
+      assert.ok(JSON.stringify(parsed.summary ?? null).includes(`shared-${present[0]}-`),
+        `(${binding}) the only seeded topic in the continuation must be the elected ` +
+        `head inside summary, got ${JSON.stringify(parsed)}`);
+    }
+    for (const key of Object.keys(parsed)) {
+      assert.ok(
+        ["nextEventSeq", "stagedCount", "page", "firstEventSeq", "summary",
+          "counts", "latest", "headIdentity", "lastReceivedEventId"].includes(key),
+        `(${binding}) unexpected continuation field: ${key}`
+      );
+    }
+  });
+});
+
+test("F1 a topic repeated inside one page accumulates against the page's own value", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    // Same topic, six events, all inside one page: the second event must see
+    // what the first wrote, not the pre-read snapshot.
+    for (let index = 1; index <= 6; index += 1) {
+      await seedEventsThroughAccept(makeIo, rawDb, 1, {
+        topic: "repeated",
+        idOffset: 4000 + index,
+        project: false
+      });
+    }
+    await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: 0, now: NOW });
+    const result = await drainBuildPages(makeIo, rawDb);
+    assert.equal(result.outcome, "completed", `(${binding}) ${JSON.stringify(result)}`);
+
+    const after = await loadProjectionHead(io.db, SCOPE_A);
+    const topicRow = await rawDb.prepare(
+      "SELECT value_json FROM rds2_projection_rows WHERE user_id = ? AND generation = ? AND row_kind = 'topic' AND row_key = ?"
+    ).bind(USER_A, after.activeGeneration, "repeated").first("value_json");
+    assert.ok(topicRow, `(${binding}) the topic must be projected`);
+    const value = JSON.parse(topicRow);
+    assert.equal(Number(value.attempts), 6,
+      `(${binding}) every repeat inside the page must be counted, got ${topicRow}`);
+    const evidence = await rawDb.prepare(
+      "SELECT COUNT(*) AS n FROM rds2_projection_rows WHERE user_id = ? AND generation = ? AND row_kind = 'evidence'"
+    ).bind(USER_A, after.activeGeneration).first("n");
+    assert.equal(Number(evidence), 6, `(${binding}) each event keeps its own evidence row`);
+  });
+});
+
+test("F1 staged reads never cross a user or a generation", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    const topic = "shared-topic";
+    for (let index = 1; index <= 3; index += 1) {
+      await seedEventsThroughAccept(makeIo, rawDb, 1, {
+        topic, idOffset: 5000 + index, project: false
+      });
+    }
+    await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: 0, now: NOW });
+    const build = await rawDb.prepare(
+      "SELECT build_id, staging_generation FROM rds2_projection_builds LIMIT 1"
+    ).first();
+    // A different user, same key, and a stale generation, same key.
+    await rawDb.prepare(
+      `INSERT INTO rds2_projection_rows (user_id, namespace, projection_name, generation,
+         row_kind, row_key, member_key, sort_key, value_json, updated_at)
+       VALUES (?, ?, ?, ?, 'topic', ?, NULL, ?, ?, ?)`
+    ).bind("u-other", "algorithm", "learning", build.staging_generation, topic, topic,
+      JSON.stringify({ attempts: 999 }), NOW).run();
+    await rawDb.prepare(
+      `INSERT INTO rds2_projection_rows (user_id, namespace, projection_name, generation,
+         row_kind, row_key, member_key, sort_key, value_json, updated_at)
+       VALUES (?, ?, ?, ?, 'topic', ?, NULL, ?, ?, ?)`
+    ).bind(USER_A, "algorithm", "learning", build.staging_generation + 7, topic, topic,
+      JSON.stringify({ attempts: 888 }), NOW).run();
+
+    const result = await drainBuildPages(makeIo, rawDb);
+    assert.equal(result.outcome, "completed", `(${binding}) ${JSON.stringify(result)}`);
+    const after = await loadProjectionHead(io.db, SCOPE_A);
+    const topicRow = await rawDb.prepare(
+      "SELECT value_json FROM rds2_projection_rows WHERE user_id = ? AND generation = ? AND row_kind = 'topic' AND row_key = ?"
+    ).bind(USER_A, after.activeGeneration, topic).first("value_json");
+    const value = JSON.parse(topicRow);
+    assert.equal(Number(value.attempts), 3,
+      `(${binding}) only this user's events may accumulate, got ${topicRow}`);
+  });
+});
+
+test("F1 a build over a 200-event multi-topic history still completes", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    for (let index = 1; index <= 200; index += 1) {
+      await seedEventsThroughAccept(makeIo, rawDb, 1, {
+        topic: `big-${index}-${"z".repeat(300)}`,
+        idOffset: 9000 + index,
+        project: false
+      });
+    }
+    await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: 0, now: NOW });
+    const result = await drainBuildPages(makeIo, rawDb, { rounds: 120 });
+    assert.equal(result.outcome, "completed", `(${binding}) ${JSON.stringify(result)}`);
+    const after = await loadProjectionHead(io.db, SCOPE_A);
+    const topics = await rawDb.prepare(
+      "SELECT COUNT(*) AS n FROM rds2_projection_rows WHERE user_id = ? AND generation = ? AND row_kind = 'topic'"
+    ).bind(USER_A, after.activeGeneration).first("n");
+    assert.equal(Number(topics), 200, `(${binding}) every distinct topic must be projected`);
+  });
+});
+
 test("F2 a stage that would leave no room to book a failure waits instead of spending the reserve", async () => {
   await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
     await seedEventsThroughAccept(makeIo, rawDb, 2);

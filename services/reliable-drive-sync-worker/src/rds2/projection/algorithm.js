@@ -209,13 +209,44 @@ export const algorithmReducer = {
     };
   },
 
-  // Paged rebuild fold. Accumulators ride in the continuation; events are
-  // consumed in bounded groups so row changes never exceed the commit limit.
-  buildPage({ events, continuation }) {
-    const accumulators = continuation.topics ? continuation : {
-      topics: {}, problems: {}, counts: { attempts: 0, negative: 0, positive: 0, neutral: 0 },
-      stagedCount: 0, nextEventSeq: continuation.nextEventSeq, page: continuation.page ?? 1,
-      latest: null, headIdentity: null, lastReceivedEventId: null
+  // Declares which staged rows this page needs. Pure: no IO, no await. The
+  // engine validates, dedupes and executes it under a hard call cap, so a
+  // reducer cannot spend the invocation budget by re-reading (G2-F1).
+  planPageReads({ events }) {
+    const topicKeys = [];
+    const problemKeys = [];
+    for (const event of events) {
+      const learning = learningOf(event);
+      if (!learning) continue;
+      const topic = text(learning.topic);
+      if (topic) topicKeys.push(topic);
+      const problemId = problemIdOf(learning);
+      if (problemId) problemKeys.push(problemId);
+    }
+    return {
+      reads: [
+        { rowKind: "topic", rowKeys: topicKeys },
+        { rowKind: "problem", rowKeys: problemKeys }
+      ]
+    };
+  },
+
+  // Paged rebuild fold. The accumulated per-topic / per-problem state is read
+  // back from the staging generation, never carried in the continuation: a
+  // full-history dictionary there grows without bound and wedges the scope
+  // (G2-F1). Events are consumed in bounded groups so row changes never
+  // exceed the commit limit.
+  buildPage({ events, continuation, staged = null }) {
+    const topics = new Map(staged?.topic ?? []);
+    const problems = new Map(staged?.problem ?? []);
+    const accumulators = {
+      counts: continuation.counts ?? { attempts: 0, negative: 0, positive: 0, neutral: 0 },
+      stagedCount: continuation.stagedCount ?? 0,
+      nextEventSeq: continuation.nextEventSeq,
+      page: continuation.page ?? 1,
+      latest: continuation.latest ?? null,
+      headIdentity: continuation.headIdentity ?? null,
+      lastReceivedEventId: continuation.lastReceivedEventId ?? null
     };
     const rowChanges = [];
     let processed = 0;
@@ -224,37 +255,41 @@ export const algorithmReducer = {
       if (learning) {
         const topic = text(learning.topic);
         const problemId = problemIdOf(learning);
-        accumulators.topics[topic] = updateTopic(accumulators.topics[topic] ?? null, { outcome: learning.outcome });
+        // Read the value THIS PAGE has accumulated so far, not the pre-read
+        // snapshot: a topic repeated inside one page must see its own update.
+        const currentTopic = topics.get(topic) ?? null;
+        const updatedTopic = updateTopic(currentTopic, { outcome: learning.outcome });
         accumulators.counts = updateTopic(accumulators.counts, { outcome: learning.outcome });
-        const topicValue = {
-          ...accumulators.topics[topic],
-          lastOutcome: learning.outcome,
-          lastObservedAt: learning.observedAt,
-          lastEventId: event.eventId
-        };
-        const previousLatest = accumulators.latestByTopic?.[topic] ?? null;
+        const previousLatest = currentTopic
+          ? {
+            observedAt: currentTopic.lastObservedAt ?? null,
+            eventId: currentTopic.lastEventId ?? null,
+            outcome: currentTopic.lastOutcome ?? null
+          }
+          : null;
         const winning = latestWins(previousLatest, {
           observedAt: learning.observedAt, eventId: event.eventId, outcome: learning.outcome
         });
-        accumulators.latestByTopic = accumulators.latestByTopic ?? {};
-        accumulators.latestByTopic[topic] = winning;
-        topicValue.lastOutcome = winning.outcome;
-        topicValue.lastObservedAt = winning.observedAt;
-        topicValue.lastEventId = winning.eventId;
-        accumulators.topics[topic] = topicValue;
+        const topicValue = {
+          ...updatedTopic,
+          lastOutcome: winning.outcome,
+          lastObservedAt: winning.observedAt,
+          lastEventId: winning.eventId
+        };
+        topics.set(topic, topicValue);
         if (problemId) {
-          const previousProblem = accumulators.problems[problemId] ?? null;
-          accumulators.problems[problemId] = {
+          const previousProblem = problems.get(problemId) ?? null;
+          problems.set(problemId, {
             title: learning.problem?.title ?? null,
             source: learning.problem?.source ?? null,
             url: learning.problem?.url ?? null,
             latest: latestWins(previousProblem?.latest ?? null, {
               observedAt: learning.observedAt, eventId: event.eventId, outcome: learning.outcome
             })
-          };
+          });
         }
         rowChanges.push({
-          rowKind: "topic", rowKey: topic, sortKey: topic, value: accumulators.topics[topic]
+          rowKind: "topic", rowKey: topic, sortKey: topic, value: topicValue
         }, {
           rowKind: "evidence",
           rowKey: event.eventKey,
@@ -267,7 +302,7 @@ export const algorithmReducer = {
         });
         if (problemId) {
           rowChanges.push({
-            rowKind: "problem", rowKey: problemId, sortKey: topic, value: accumulators.problems[problemId]
+            rowKind: "problem", rowKey: problemId, sortKey: topic, value: problems.get(problemId)
           }, {
             rowKind: "topic_problem", rowKey: topicProblemRowKey(topic, problemId), memberKey: topic, sortKey: topic, value: {}
           });
@@ -324,11 +359,16 @@ export const algorithmReducer = {
     return {
       rowChanges,
       summary,
+      // Only bounded scalars ride in the continuation: no per-topic or
+      // per-problem dictionary, so its size no longer depends on history.
       continuation: {
-        ...accumulators,
         nextEventSeq,
         stagedCount: accumulators.stagedCount + consumed.length,
-        page: (continuation.page ?? 1) + 1
+        page: (continuation.page ?? 1) + 1,
+        counts: accumulators.counts,
+        latest: accumulators.latest,
+        headIdentity: accumulators.headIdentity,
+        lastReceivedEventId: accumulators.lastReceivedEventId
       }
     };
   }

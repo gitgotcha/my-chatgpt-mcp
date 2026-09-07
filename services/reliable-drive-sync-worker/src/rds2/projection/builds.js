@@ -9,6 +9,7 @@ import { commitActivation, buildDelta, assertRowChangesBounded, MAX_COMMIT_STATE
 import { canonicalJson } from "../../../../../shared/rds2-protocol.mjs";
 import { closeOutFailure } from "../errors/close-out.js";
 import { canAffordStage } from "../io/budget.js";
+import { readStagedWithinBudget } from "./staging-read.js";
 import { deriveTaskId } from "../events/repository.js";
 import { hashText } from "../identity/hashing.js";
 
@@ -276,8 +277,21 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
   const emptyPage = events.length === 0;
   let pageResult = null;
   if (!emptyPage) {
+    // G2-F1: the reducer declares the staged rows this page needs; the engine
+    // validates the plan, dedupes it, prices it and executes it under a hard
+    // call cap — so the accumulated state never rides in the continuation.
+    const readPlan = reducer.planPageReads ? reducer.planPageReads({ events }) : { reads: [] };
+    let staged = null;
+    if (readPlan.reads?.length) {
+      if (!canAffordStage(io.budget, STAGE_COST.stagedReads)) {
+        return releaseForBudget({ db: io.db, lease, now, taskId });
+      }
+      staged = await readStagedWithinBudget({
+        io, scope, stagingGeneration: build.staging_generation, plan: readPlan
+      });
+    }
     pageResult = reducer.buildPage({
-      scope, events, head,
+      scope, events, head, staged,
       continuation: { ...continuation, nextAfterPage: events[events.length - 1].eventSeq + 1 }
     });
     // The cursor is validated against BOTH bounds: the frozen target and the
