@@ -2,6 +2,7 @@ import readline from "node:readline";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { DeliveryService } from "./delivery-service.mjs";
+import { isV2ReadMessage, toV2Query, parseV2StatusInput } from "./v2-routing.mjs";
 
 const TOOL = {
   name: "submit_event",
@@ -65,8 +66,77 @@ async function createService(options) {
   });
 }
 
+// WriteVersion v2: reads go straight to /v2/query, writes go through the
+// local durable outbox (T09) whose delivery owns the single HTTP call.
+async function createV2Service(options) {
+  if (!options.workerUrl || !options.token) throw new Error("Bridge configuration is incomplete");
+  const { LocalOutboxV2 } = await import("./local-outbox-v2.mjs");
+  const { createDeliveryServiceV2 } = await import("./delivery-service-v2.mjs");
+  const outbox = options.outbox ?? new LocalOutboxV2({
+    path: options.outboxPath ?? defaultOutboxPath(),
+    clock: () => new Date().toISOString(),
+    owner: "stdio-bridge"
+  });
+  return createDeliveryServiceV2({
+    outbox,
+    clock: () => new Date().toISOString(),
+    send: async (envelope) => {
+      const response = await fetch(`${deriveWorkerUrl(options.workerUrl)}/v2/events`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${options.token}`,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify(envelope)
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        const error = new Error(body?.error?.code ?? `http_${response.status}`);
+        if (body?.error?.code) error.code = body.error.code;
+        throw error;
+      }
+      return response.json();
+    }
+  });
+}
+
+async function v2QueryCall(payload, options) {
+  const response = await fetch(`${deriveWorkerUrl(options.workerUrl)}/v2/query`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${options.token}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(body?.error?.code ?? `http_${response.status}`);
+    if (body?.error?.code) error.code = body.error.code;
+    throw error;
+  }
+  return body;
+}
+
 async function submitEvent(id, args, options) {
   try {
+    // WriteVersion v2: reads route to /v2/query and never touch the outbox;
+    // writes go through the local durable outbox; explicit V2 status inputs
+    // keep their own schema.
+    if ((options.writeVersion ?? "v1") === "v2") {
+      if (args?.storageVersion === 2 && args?.operation === "event.status") {
+        const status = parseV2StatusInput(args);
+        const result = await v2QueryCall(status, options);
+        return reply(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
+      }
+      if (isV2ReadMessage(args)) {
+        const result = await v2QueryCall(toV2Query(args), options);
+        return reply(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
+      }
+      const service = await (options.v2Service ?? createV2Service(options));
+      const result = await service.submit(args);
+      return reply(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
+    }
     const service = await (options.service ?? createService(options));
     const result = await service.submit(args);
     return reply(id, {
@@ -101,7 +171,8 @@ function configurationFromEnvironment() {
   return {
     workerUrl: configuredUrl,
     token: process.env.RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET,
-    outboxPath: process.env.RELIABLE_DRIVE_SYNC_OUTBOX_PATH
+    outboxPath: process.env.RELIABLE_DRIVE_SYNC_OUTBOX_PATH,
+    writeVersion: process.env.RELIABLE_DRIVE_SYNC_WRITE_VERSION
   };
 }
 

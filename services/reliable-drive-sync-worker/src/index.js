@@ -8,6 +8,7 @@ import { Reconciler } from "./reconciler.js";
 import { createDriveRepository } from "./google-drive.js";
 import { createStorageLayout } from "./storage-layout.js";
 import { createUserStore } from "./user-store.js";
+import { handleV2Request, handleV2Queue, handleV2Scheduled } from "./rds2/routes.js";
 
 export function createWorker(env, deps = {}) {
   const repository = deps.repository ?? new D1JobRepository(env.DB);
@@ -49,13 +50,26 @@ export function createWorker(env, deps = {}) {
   const reconciler = new Reconciler(repository, dispatcher);
 
   return {
-    async fetch(request, _runtimeEnv, context) {
+    async fetch(request, runtimeEnv, context) {
       const path = new URL(request.url).pathname;
       if (request.method === "POST" && path === "/v1/sync") return sync(request);
       if (request.method === "POST" && path === "/v1/qstash/failure") return failure(request);
+      // V2 read surface: a separate DTO and route, the V1 routes above stay
+      // exactly as they are.
+      if (request.method === "POST" && path === "/v2/query") {
+        return handleV2Request(request, runtimeEnv ?? env, context);
+      }
       return ingress(request, context);
     },
+    async queue(batch, runtimeEnv, context) {
+      return handleV2Queue(batch, runtimeEnv ?? env, context);
+    },
     scheduled(controller, _runtimeEnv, context) {
+      // The V2 recovery wake on its own reserved cron expression.
+      if (controller?.cron === "*/7 * * * *") {
+        context.waitUntil(handleV2Scheduled(controller, _runtimeEnv, context));
+        return;
+      }
       const work = controller?.cron === "0 * * * *"
         ? reconciler.runHourly()
         : controller?.cron === "0 */6 * * *"

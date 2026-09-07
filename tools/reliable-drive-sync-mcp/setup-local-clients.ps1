@@ -1,6 +1,9 @@
 param(
   [string] $WorkerUrl = 'https://reliable-drive-sync.qiaobingyuan886.workers.dev',
   [string] $SharedSecret = $env:RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET,
+  [ValidateSet('v1', 'v2')]
+  [string] $WriteVersion = 'v1',
+  [string] $OutboxPath = '',
   [string] $CodexConfigPath = (Join-Path $HOME '.codex\config.toml'),
   [string] $WorkBuddyConfigPath = ''
 )
@@ -20,6 +23,13 @@ if (-not $node) { throw 'Node.js 22 or newer is required.' }
 
 [Environment]::SetEnvironmentVariable('RELIABLE_DRIVE_SYNC_INGRESS_URL', $WorkerUrl, 'User')
 [Environment]::SetEnvironmentVariable('RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET', $SharedSecret, 'User')
+# T10: the write version selects the delivery path (v1 legacy or v2 outbox),
+# and the outbox path is an explicit parameter instead of an accident of the
+# environment. Both are written for real; stdout only reports them.
+[Environment]::SetEnvironmentVariable('RELIABLE_DRIVE_SYNC_WRITE_VERSION', $WriteVersion, 'User')
+if (-not [string]::IsNullOrWhiteSpace($OutboxPath)) {
+  [Environment]::SetEnvironmentVariable('RELIABLE_DRIVE_SYNC_OUTBOX_PATH', $OutboxPath, 'User')
+}
 
 $codexDirectory = Split-Path -Parent $CodexConfigPath
 New-Item -ItemType Directory -Force -Path $codexDirectory | Out-Null
@@ -54,6 +64,10 @@ $workBuddy.mcpServers | Add-Member -MemberType NoteProperty -Name 'reliable-driv
 $workBuddy | ConvertTo-Json -Depth 20 | Set-Content -Path $WorkBuddyConfigPath -Encoding UTF8
 
 Write-Output 'Local setup complete.'
+Write-Output "Write version: $WriteVersion"
+if (-not [string]::IsNullOrWhiteSpace($OutboxPath)) {
+  Write-Output "Outbox path: $OutboxPath"
+}
 Write-Output "Codex and ChatGPT desktop config: $CodexConfigPath"
 Write-Output "WorkBuddy MCP config: $WorkBuddyConfigPath"
 Write-Output 'Restart ChatGPT desktop, Codex, and WorkBuddy. The only tool must be submit_event.'
