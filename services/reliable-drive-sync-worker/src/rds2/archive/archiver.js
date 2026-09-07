@@ -32,7 +32,8 @@ async function completeArchive({ io, lease, artifactId, driveFileId, now }) {
        WHERE artifact_id = ? AND delivered_at IS NULL`
     ).bind(driveFileId, now, artifactId),
     io.db.prepare(
-      `UPDATE rds2_tasks SET state = 'completed', lease_owner = NULL, lease_until = NULL, updated_at = ?
+      `UPDATE rds2_tasks SET state = 'completed', lease_owner = NULL, lease_until = NULL,
+         failure_count = 0, updated_at = ?
        WHERE task_id = ? AND state = 'processing'
          AND lease_owner = ? AND lease_epoch = ? AND lease_until > ?`
     ).bind(now, lease.taskId, lease.owner, lease.epoch, now),

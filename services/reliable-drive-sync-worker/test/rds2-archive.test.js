@@ -292,6 +292,54 @@ test("a 429 from Drive is a budgeted retryable failure", async () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// P1-2 (2026-09-07 review): a counted failure followed by a successful retry
+// must complete with the consecutive-failure counter CLEARED. The guarded
+// completion UPDATE owns that, matching the completeTask contract in
+// tasks/repository.js.
+// ---------------------------------------------------------------------------
+
+test("P1-2 a retried archive success completes with a cleared failure count", async () => {
+  await runArchiveTest(async ({ binding, rawDb }) => {
+    // First pass: the readback 503s after a successful upload — a real
+    // (counted) failure. The bytes are already in Drive.
+    const files = new Map();
+    const failingDrive = fakeDriveFetch({ files, fail: { readback: 503 } });
+    const makeIo = (fetchImpl) => createInvocationIo({
+      db: rawDb,
+      queues: { RDS2_PROJECTION_QUEUE: { send: async () => {} }, RDS2_ARCHIVE_QUEUE: { send: async () => {} } },
+      fetchImpl, limit: ARCHIVE_LIMIT
+    });
+    const { taskId } = await seedArtifact(rawDb, {
+      objectName: "artifact-p12-retry.json", frozenJson: '{"p12":true}', taskId: "arch-p12"
+    });
+    await dispatchOne({ io: makeIo(failingDrive.fetchImpl), taskId, owner: "d", now: NOW });
+    const firstClient = createArchiveClient({ env: {}, io: makeIo(failingDrive.fetchImpl), folderId: FOLDER_ID, tokenProvider: async () => "t" });
+    const first = await archiveOne({ io: makeIo(failingDrive.fetchImpl), taskId, owner: "c", now: NOW, client: firstClient });
+    assert.equal(first.outcome, "retry", `(${binding}) a failed readback is a budgeted failure`);
+    const afterFail = await rawDb.prepare(
+      "SELECT state, failure_count FROM rds2_tasks WHERE task_id = ?"
+    ).bind(taskId).first();
+    assert.equal(Number(afterFail.failure_count), 1, `(${binding}) the failed pass counts`);
+    assert.equal(afterFail.state, "pending", `(${binding}) the task waits out its backoff`);
+
+    // The backoff window passes and the retry succeeds against the SAME Drive
+    // bucket: the uploaded object is found by exact lookup, never re-uploaded.
+    const later = new Date(Date.parse(NOW) + 31000).toISOString();
+    const goodDrive = fakeDriveFetch({ files });
+    await dispatchOne({ io: makeIo(goodDrive.fetchImpl), taskId, owner: "d2", now: later });
+    const secondClient = createArchiveClient({ env: {}, io: makeIo(goodDrive.fetchImpl), folderId: FOLDER_ID, tokenProvider: async () => "t" });
+    const second = await archiveOne({ io: makeIo(goodDrive.fetchImpl), taskId, owner: "c2", now: later, client: secondClient });
+    assert.equal(second.outcome, "completed", `(${binding}) ${JSON.stringify(second)}`);
+    const done = await rawDb.prepare(
+      "SELECT state, failure_count FROM rds2_tasks WHERE task_id = ?"
+    ).bind(taskId).first();
+    assert.equal(done.state, "completed", `(${binding}) the retry completes the task`);
+    assert.equal(Number(done.failure_count), 0,
+      `(${binding}) a successful completion clears the consecutive-failure counter`);
+  });
+});
+
 test("archiveOne reuses the delivered artifact idempotently", async () => {
   await runArchiveTest(async ({ binding, rawDb }) => {
     const frozen = JSON.stringify({ done: true });
