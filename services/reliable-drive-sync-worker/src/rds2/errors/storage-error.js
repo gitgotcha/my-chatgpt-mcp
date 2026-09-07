@@ -38,6 +38,9 @@ const INTERNAL_DETERMINISTIC_CODES = Object.freeze([
   "build_read_limit_exceeded",
   "build_read_kind_rejected",
   "build_read_key_invalid",
+  // Review P1-3: a malformed read plan (plan.reads not an array, missing or
+  // malformed eventCount) is a deterministic caller bug, not a transient fault.
+  "build_read_plan_invalid",
   "build_continuation_invalid",
   "invalid_page_size",
   "changes_too_large",

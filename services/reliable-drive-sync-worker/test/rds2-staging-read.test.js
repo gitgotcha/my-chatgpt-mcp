@@ -1,8 +1,10 @@
 // G2-F1: focused unit tests for the bounded staging-read interface.
 //
-// The engine — not the reducer — owns the read plan: it validates, dedupes,
-// prices the WHOLE plan before issuing a single query, and enforces a hard
-// call cap. These tests pin that contract directly; the engine-level tests
+// The engine — not the reducer — owns the read plan: it validates the shapes,
+// merges and dedupes same-kind declarations, judges the per-kind unique key
+// count against the page's event count (and an absolute cap of 50), prices
+// the WHOLE plan before issuing a single query, and enforces a hard call cap.
+// These tests pin that contract directly; the engine-level tests
 // (rds2-projection-engine) only exercise plans small enough never to hit it.
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -12,7 +14,7 @@ import { withD1, applySchema } from "./support/rds2-d1.js";
 import { createInvocationIo } from "../src/rds2/io/invocation-io.js";
 import {
   readStagedWithinBudget, planReadCost,
-  STAGING_READ_MAX_CALLS, STAGING_READ_CHUNK
+  STAGING_READ_MAX_CALLS, STAGING_READ_CHUNK, STAGING_READ_MAX_KEYS_PER_KIND
 } from "../src/rds2/projection/staging-read.js";
 
 const MIGRATION_SQL = readFileSync(fileURLToPath(
@@ -30,23 +32,23 @@ async function seedRow(rawDb, { userId = SCOPE.userId, generation = 1, rowKind =
 }
 
 test("F1 planReadCost prices chunks synchronously and rejects bad plans", () => {
-  assert.equal(planReadCost({ reads: [] }), 0, "an empty plan costs nothing");
-  assert.equal(planReadCost({ reads: [{ rowKind: "topic", rowKeys: ["a"] }] }), 1);
-  assert.equal(planReadCost({ reads: [{ rowKind: "topic", rowKeys: Array.from({ length: 33 }, (_, i) => `k${i}`) }] }), 2,
+  assert.equal(planReadCost({ reads: [] }, 5), 0, "an empty plan costs nothing");
+  assert.equal(planReadCost({ reads: [{ rowKind: "topic", rowKeys: ["a"] }] }, 5), 1);
+  assert.equal(planReadCost({ reads: [{ rowKind: "topic", rowKeys: Array.from({ length: 33 }, (_, i) => `k${i}`) }] }, 40), 2,
     "33 keys need two chunks of 32");
   assert.equal(planReadCost({
     reads: [
       { rowKind: "topic", rowKeys: Array.from({ length: STAGING_READ_CHUNK }, (_, i) => `t${i}`) },
       { rowKind: "problem", rowKeys: ["p1"] }
     ]
-  }), 2, "each rowKind is priced separately");
+  }, 40), 2, "each rowKind is priced separately");
   assert.throws(
-    () => planReadCost({ reads: [{ rowKind: "evidence", rowKeys: ["x"] }] }),
+    () => planReadCost({ reads: [{ rowKind: "evidence", rowKeys: ["x"] }] }, 5),
     (error) => error.code === "build_read_kind_rejected",
     "only topic/problem may be read back"
   );
   assert.throws(
-    () => planReadCost({ reads: [{ rowKind: "topic", rowKeys: [7] }] }),
+    () => planReadCost({ reads: [{ rowKind: "topic", rowKeys: [7] }] }, 5),
     (error) => error.code === "build_read_key_invalid",
     "keys must be non-empty strings"
   );
@@ -56,21 +58,33 @@ test("F1 a plan priced over the cap is refused before any query goes out", async
   await withD1(async (binding, rawDb) => {
     await applySchema(rawDb, MIGRATION_SQL);
     const io = createInvocationIo({ db: rawDb, limit: 24 });
-    // Five topic reads of 33 distinct keys each → 165 unique keys → 6 chunks
-    // → 6 calls > 4. (After the cross-read merge, 3 reads of 33 would only be
-    // 4 chunks: scattered declarations of one kind must be merged FIRST, and
-    // the cap is judged on the merged plan.)
+    // Plan §2.2 (review P1-3): after the cross-read merge, 165 unique keys on
+    // one rowKind exceed the absolute 50-key cap — no eventCount can rescue
+    // that. The refusal still happens before a single query goes out.
     const plan = {
       reads: [1, 2, 3, 4, 5].map((group) => ({
         rowKind: "topic",
         rowKeys: Array.from({ length: 33 }, (_, i) => `g${group}-k${i}`)
       }))
     };
-    assert.equal(planReadCost(plan), 6);
+    assert.throws(
+      () => planReadCost(plan, 165),
+      (error) => error.code === "build_read_limit_exceeded"
+        && error.detail?.maxKeysPerKind === STAGING_READ_MAX_KEYS_PER_KIND,
+      "the per-kind key cap refuses the plan synchronously"
+    );
     await assert.rejects(
-      () => readStagedWithinBudget({ io, scope: SCOPE, stagingGeneration: 1, plan }),
+      () => readStagedWithinBudget({ io, scope: SCOPE, stagingGeneration: 1, eventCount: 165, plan }),
       (error) => error.code === "build_read_limit_exceeded",
       `(${binding}) an over-cap plan must be refused`
+    );
+    // The event-count bound is independent of the 50 cap: 11 unique keys fit
+    // the absolute cap but still exceed a 10-event page.
+    const tight = { reads: [{ rowKind: "topic", rowKeys: Array.from({ length: 11 }, (_, i) => `k${i}`) }] };
+    assert.throws(
+      () => planReadCost(tight, 10),
+      (error) => error.code === "build_read_limit_exceeded",
+      "unique keys may never exceed the page's event count"
     );
     assert.equal(io.budget.snapshot().used, 0,
       `(${binding}) the refusal must happen before a single query is issued`);
@@ -84,9 +98,9 @@ test("F1 duplicate keys are deduped before pricing", async () => {
     // 40 declared keys, 8 duplicates → 32 unique → exactly one chunk.
     const keys = Array.from({ length: 40 }, (_, i) => `t${i % 32}`);
     const plan = { reads: [{ rowKind: "topic", rowKeys: keys }] };
-    assert.equal(planReadCost(plan), 1, "dedupe happens before pricing");
+    assert.equal(planReadCost(plan, 40), 1, "dedupe happens before pricing");
     for (let i = 0; i < 32; i += 1) await seedRow(rawDb, { rowKey: `t${i}`, value: { i } });
-    const staged = await readStagedWithinBudget({ io, scope: SCOPE, stagingGeneration: 1, plan });
+    const staged = await readStagedWithinBudget({ io, scope: SCOPE, stagingGeneration: 1, eventCount: 40, plan });
     assert.equal(staged.topic.size, 32, `(${binding}) every unique key is read back`);
     assert.equal(io.budget.snapshot().used, 1, `(${binding}) one chunk is one sub-request`);
   });
@@ -98,7 +112,7 @@ test("F1 a read that would not fit beside the reserve waits without querying", a
     const io = createInvocationIo({ db: rawDb, limit: 2 });
     const plan = { reads: [{ rowKind: "topic", rowKeys: ["a", "b"] }] };
     await assert.rejects(
-      () => readStagedWithinBudget({ io, scope: SCOPE, stagingGeneration: 1, plan }),
+      () => readStagedWithinBudget({ io, scope: SCOPE, stagingGeneration: 1, eventCount: 2, plan }),
       (error) => error.code === "budget_reserve_insufficient",
       `(${binding}) a read that would eat the close-out reserve must wait`
     );
@@ -120,17 +134,128 @@ test("F1 same-kind reads scattered across declarations merge into one deduped re
         { rowKind: "problem", rowKeys: ["p"] }
       ]
     };
-    assert.equal(planReadCost(plan), 2,
+    assert.equal(planReadCost(plan, 2), 2,
       "same-kind declarations merge and dedupe before pricing");
     await seedRow(rawDb, { rowKey: "same", value: { merged: true } });
     await seedRow(rawDb, { rowKind: "problem", rowKey: "p", value: { n: 1 } });
-    const staged = await readStagedWithinBudget({ io, scope: SCOPE, stagingGeneration: 1, plan });
+    const staged = await readStagedWithinBudget({ io, scope: SCOPE, stagingGeneration: 1, eventCount: 2, plan });
     assert.deepEqual(staged.topic.get("same"), { merged: true },
       `(${binding}) the duplicated key is read back once`);
     assert.deepEqual(staged.problem.get("p"), { n: 1 },
       `(${binding}) the other kind still reads its own key`);
     assert.equal(io.budget.snapshot().used, 2,
       `(${binding}) the merged plan costs two sub-requests, not three`);
+  });
+});
+
+test("P1-3 malformed plan shapes are rejected with stable codes, never raw TypeErrors", async () => {
+  await withD1(async (binding, rawDb) => {
+    await applySchema(rawDb, MIGRATION_SQL);
+    const io = createInvocationIo({ db: rawDb, limit: 24 });
+    for (const badKeys of ["abc", { 0: "a" }, null]) {
+      const plan = { reads: [{ rowKind: "topic", rowKeys: badKeys }] };
+      assert.throws(
+        () => planReadCost(plan, 3),
+        (error) => error.code === "build_read_key_invalid",
+        `(${binding}) planReadCost rejects rowKeys ${JSON.stringify(badKeys)} stably`
+      );
+      await assert.rejects(
+        () => readStagedWithinBudget({ io, scope: SCOPE, stagingGeneration: 1, eventCount: 3, plan }),
+        (error) => error.code === "build_read_key_invalid",
+        `(${binding}) readStagedWithinBudget rejects rowKeys ${JSON.stringify(badKeys)} stably`
+      );
+    }
+    // plan.reads itself must be an array (a non-iterable used to throw a raw
+    // TypeError from the for..of loop).
+    assert.throws(
+      () => planReadCost({ reads: 123 }, 3),
+      (error) => error.code === "build_read_plan_invalid",
+      `(${binding}) plan.reads must be an array`
+    );
+    // eventCount is part of the contract: missing or malformed is refused
+    // deterministically, never priced against an unknown bound.
+    for (const badCount of [undefined, "10", -1, 1.5]) {
+      assert.throws(
+        () => planReadCost({ reads: [] }, badCount),
+        (error) => error.code === "build_read_plan_invalid",
+        `(${binding}) eventCount ${String(badCount)} must be a safe non-negative integer`
+      );
+    }
+    await assert.rejects(
+      () => readStagedWithinBudget({ io, scope: SCOPE, stagingGeneration: 1, plan: { reads: [] } }),
+      (error) => error.code === "build_read_plan_invalid",
+      `(${binding}) the executor demands eventCount too`
+    );
+    assert.equal(io.budget.snapshot().used, 0, `(${binding}) nothing was queried`);
+  });
+});
+
+test("P1-3 51 unique keys over a 50-event page are refused before any query", async () => {
+  await withD1(async (binding, rawDb) => {
+    await applySchema(rawDb, MIGRATION_SQL);
+    const io = createInvocationIo({ db: rawDb, limit: 24 });
+    // 51 declared keys, all unique, on a 50-event page: the merged plan is
+    // 51 unique topic keys > eventCount — refused with zero queries.
+    const keys = Array.from({ length: 51 }, (_, i) => `k${i}`);
+    const plan = { reads: [{ rowKind: "topic", rowKeys: keys }] };
+    assert.throws(
+      () => planReadCost(plan, 50),
+      (error) => error.code === "build_read_limit_exceeded"
+        && error.detail?.rowKind === "topic" && error.detail?.keys === 51,
+      "the pricing itself refuses 51 unique keys on a 50-event page"
+    );
+    await assert.rejects(
+      () => readStagedWithinBudget({ io, scope: SCOPE, stagingGeneration: 1, eventCount: 50, plan }),
+      (error) => error.code === "build_read_limit_exceeded",
+      `(${binding}) the executor refuses the same bound`
+    );
+    assert.equal(io.budget.snapshot().used, 0,
+      `(${binding}) zero queries went out for the refused plan`);
+  });
+});
+
+test("P1-3 two same-kind declarations totalling 51 unique keys are refused too", async () => {
+  await withD1(async (binding, rawDb) => {
+    await applySchema(rawDb, MIGRATION_SQL);
+    const io = createInvocationIo({ db: rawDb, limit: 24 });
+    // Scattering the same excess across declarations changes nothing: the cap
+    // is judged on the MERGED unique key count, after dedupe.
+    const plan = {
+      reads: [
+        { rowKind: "topic", rowKeys: Array.from({ length: 25 }, (_, i) => `a${i}`) },
+        { rowKind: "topic", rowKeys: Array.from({ length: 26 }, (_, i) => `b${i}`) }
+      ]
+    };
+    assert.throws(
+      () => planReadCost(plan, 50),
+      (error) => error.code === "build_read_limit_exceeded",
+      "the merged count is what the cap judges"
+    );
+    await assert.rejects(
+      () => readStagedWithinBudget({ io, scope: SCOPE, stagingGeneration: 1, eventCount: 50, plan }),
+      (error) => error.code === "build_read_limit_exceeded",
+      `(${binding}) scattered excess is refused like a single excess read`
+    );
+    assert.equal(io.budget.snapshot().used, 0,
+      `(${binding}) zero queries went out for the refused plan`);
+  });
+});
+
+test("P1-3 many duplicate declarations under the event count still merge and execute", async () => {
+  await withD1(async (binding, rawDb) => {
+    await applySchema(rawDb, MIGRATION_SQL);
+    const io = createInvocationIo({ db: rawDb, limit: 24 });
+    // Five declarations of the SAME 10 keys on a 10-event page: the merged
+    // plan is 10 unique keys — legal — and costs exactly one chunk.
+    for (let i = 0; i < 10; i += 1) await seedRow(rawDb, { rowKey: `t${i}`, value: { i } });
+    const keys = Array.from({ length: 10 }, (_, i) => `t${i}`);
+    const plan = { reads: [1, 2, 3, 4, 5].map(() => ({ rowKind: "topic", rowKeys: keys })) };
+    assert.equal(planReadCost(plan, 10), 1,
+      "five declarations of the same 10 keys merge to one chunk");
+    const staged = await readStagedWithinBudget({ io, scope: SCOPE, stagingGeneration: 1, eventCount: 10, plan });
+    assert.equal(staged.topic.size, 10, `(${binding}) every unique key is read back once`);
+    assert.equal(io.budget.snapshot().used, 1,
+      `(${binding}) one merged chunk is one sub-request, whatever the declaration count`);
   });
 });
 
@@ -144,7 +269,7 @@ test("F1 every staged read binds all four scope segments", async () => {
     await seedRow(rawDb, { rowKind: "problem", rowKey: "shared", value: { problem: true } });
 
     const staged = await readStagedWithinBudget({
-      io, scope: SCOPE, stagingGeneration: 1,
+      io, scope: SCOPE, stagingGeneration: 1, eventCount: 1,
       plan: { reads: [{ rowKind: "topic", rowKeys: ["shared"] }] }
     });
     assert.deepEqual(staged.topic.get("shared"), { mine: true },

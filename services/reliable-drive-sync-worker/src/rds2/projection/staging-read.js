@@ -14,6 +14,9 @@ import { canAffordStage } from "../io/budget.js";
 
 export const STAGING_READ_MAX_CALLS = 4;
 export const STAGING_READ_CHUNK = 32;
+// Plan §2.2 (review P1-3): a page of N events may never need more than N
+// distinct keys of one kind, and never more than 50 even on a larger page.
+export const STAGING_READ_MAX_KEYS_PER_KIND = 50;
 
 const ALLOWED_ROW_KINDS = new Set(["topic", "problem"]);
 
@@ -26,41 +29,63 @@ function fail(code, detail) {
 
 /**
  * Normalize a declared read plan into ONE canonical read per rowKind with a
- * deduplicated key list, validating row kinds and keys along the way.
+ * deduplicated key list, validating shapes, row kinds and keys along the way.
+ * The page's event count bounds the plan: after merging and deduping, one
+ * rowKind may never carry more unique keys than there are events on the page,
+ * nor more than STAGING_READ_MAX_KEYS_PER_KIND even on a larger page.
  * Both the pricing and the actual execution consume THIS result, so scattered
  * declarations of the same rowKind merge into a single deduplicated read and
  * can never pay or query the same keys twice.
  */
-function normalizeReadPlan(plan) {
+function normalizeReadPlan(plan, eventCount) {
+  if (!Number.isSafeInteger(eventCount) || eventCount < 0) {
+    throw fail("build_read_plan_invalid", { field: "eventCount", eventCount });
+  }
+  const reads = plan?.reads ?? [];
+  if (!Array.isArray(reads)) {
+    throw fail("build_read_plan_invalid", { field: "plan.reads" });
+  }
   const merged = new Map();
-  for (const read of plan?.reads ?? []) {
+  for (const read of reads) {
     if (!ALLOWED_ROW_KINDS.has(read?.rowKind)) {
       throw fail("build_read_kind_rejected", String(read?.rowKind));
     }
-    const keys = read.rowKeys ?? [];
-    if (keys.some((key) => typeof key !== "string" || !key.length)) {
-      throw fail("build_read_key_invalid");
+    // rowKeys must be an ARRAY of non-empty strings: a bare string, an object
+    // or null is a deterministic plan bug and must surface as a stable code,
+    // never as a raw TypeError that could be mistaken for a transient fault.
+    const keys = read.rowKeys;
+    if (!Array.isArray(keys) || keys.some((key) => typeof key !== "string" || !key.length)) {
+      throw fail("build_read_key_invalid", read.rowKind);
     }
     if (!merged.has(read.rowKind)) merged.set(read.rowKind, new Set());
     for (const key of keys) merged.get(read.rowKind).add(key);
   }
-  const reads = [];
+  const normalized = [];
   let cost = 0;
   for (const [rowKind, keys] of merged) {
     if (!keys.size) continue;
+    if (keys.size > eventCount || keys.size > STAGING_READ_MAX_KEYS_PER_KIND) {
+      throw fail("build_read_limit_exceeded", {
+        rowKind,
+        keys: keys.size,
+        eventCount,
+        maxKeysPerKind: STAGING_READ_MAX_KEYS_PER_KIND
+      });
+    }
     cost += Math.ceil(keys.size / STAGING_READ_CHUNK);
-    reads.push({ rowKind, keys: [...keys] });
+    normalized.push({ rowKind, keys: [...keys] });
   }
-  return { reads, cost };
+  return { reads: normalized, cost };
 }
 
 /**
  * Cost of a read plan in sub-requests, computed WITHOUT issuing any query.
- * Same-kind declarations merge first; otherwise each rowKind costs one query
- * per chunk of its deduplicated keys.
+ * Same-kind declarations merge first; the per-kind unique key count is judged
+ * against the page's event count and the absolute cap; each surviving rowKind
+ * then costs one query per chunk of its deduplicated keys.
  */
-export function planReadCost(plan) {
-  return normalizeReadPlan(plan).cost;
+export function planReadCost(plan, eventCount) {
+  return normalizeReadPlan(plan, eventCount).cost;
 }
 
 /**
@@ -75,16 +100,17 @@ export async function readStagedWithinBudget({
   scope,
   stagingGeneration,
   plan,
+  eventCount,
   maxCalls = STAGING_READ_MAX_CALLS
 }) {
   const result = { topic: new Map(), problem: new Map() };
 
-  // Validate, merge, dedupe and price the WHOLE plan BEFORE any query goes
-  // out: discovering on the fourth call that a fifth is needed is not
-  // acceptable, and two declarations of the same rowKind must never pay or
-  // query twice. The queries below run against the SAME normalized result the
-  // price was computed from.
-  const { reads, cost } = normalizeReadPlan(plan);
+  // Validate the shapes, merge, dedupe, judge the per-kind key bounds and
+  // price the WHOLE plan BEFORE any query goes out: discovering on the fourth
+  // call that a fifth is needed is not acceptable, and two declarations of
+  // the same rowKind must never pay or query twice. The queries below run
+  // against the SAME normalized result the price was computed from.
+  const { reads, cost } = normalizeReadPlan(plan, eventCount);
   if (!reads.length) return result;
   if (cost > maxCalls) throw fail("build_read_limit_exceeded", { cost, maxCalls });
   if (!canAffordStage(io.budget, cost)) throw fail("budget_reserve_insufficient", { cost });

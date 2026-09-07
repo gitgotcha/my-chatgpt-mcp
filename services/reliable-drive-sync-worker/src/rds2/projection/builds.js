@@ -319,7 +319,10 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
         return releaseForBudget({ db: io.db, lease, now, taskId });
       }
       staged = await readStagedWithinBudget({
-        io, scope, stagingGeneration: build.staging_generation, plan: readPlan
+        io, scope, stagingGeneration: build.staging_generation, plan: readPlan,
+        // Plan §2.2: the page's own event count bounds how many unique keys
+        // one rowKind may declare, no matter what the reducer asks for.
+        eventCount: events.length
       });
     }
     pageResult = reducer.buildPage({
