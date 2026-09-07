@@ -308,6 +308,25 @@ test("P1-3 many duplicate declarations under the event count still merge and exe
   });
 });
 
+test("F1 the hard call cap is a separate guard from the per-kind key cap", async () => {
+  await withD1(async (binding, rawDb) => {
+    await applySchema(rawDb, MIGRATION_SQL);
+    const io = createInvocationIo({ db: rawDb, limit: 24 });
+    // 33 unique topic keys satisfy BOTH key caps on a 40-event page, yet they
+    // are two chunks — over a one-call cap. Since the 50-key cap makes the
+    // default cap of four unreachable, this input is the only thing that keeps
+    // the call-cap guard itself pinned.
+    const plan = { reads: [{ rowKind: "topic", rowKeys: Array.from({ length: 33 }, (_, i) => `k${i}`) }] };
+    await assert.rejects(
+      () => readStagedWithinBudget({ io, scope: SCOPE, stagingGeneration: 1, eventCount: 40, plan, maxCalls: 1 }),
+      (error) => error.code === "build_read_limit_exceeded",
+      `(${binding}) two chunks over a one-call cap must be refused`
+    );
+    assert.equal(io.budget.snapshot().used, 0, `(${binding}) nothing was queried`);
+    assert.equal(planReadCost(plan, 40), 2, "the same plan is two chunks under the default cap");
+  });
+});
+
 test("F1 every staged read binds all four scope segments", async () => {
   await withD1(async (binding, rawDb) => {
     await applySchema(rawDb, MIGRATION_SQL);
