@@ -56,9 +56,12 @@ test("F1 a plan priced over the cap is refused before any query goes out", async
   await withD1(async (binding, rawDb) => {
     await applySchema(rawDb, MIGRATION_SQL);
     const io = createInvocationIo({ db: rawDb, limit: 24 });
-    // Three topic reads of 33 keys each → 6 chunks → 6 calls > 4.
+    // Five topic reads of 33 distinct keys each → 165 unique keys → 6 chunks
+    // → 6 calls > 4. (After the cross-read merge, 3 reads of 33 would only be
+    // 4 chunks: scattered declarations of one kind must be merged FIRST, and
+    // the cap is judged on the merged plan.)
     const plan = {
-      reads: [1, 2, 3].map((group) => ({
+      reads: [1, 2, 3, 4, 5].map((group) => ({
         rowKind: "topic",
         rowKeys: Array.from({ length: 33 }, (_, i) => `g${group}-k${i}`)
       }))
@@ -100,6 +103,34 @@ test("F1 a read that would not fit beside the reserve waits without querying", a
       `(${binding}) a read that would eat the close-out reserve must wait`
     );
     assert.equal(io.budget.snapshot().used, 0, `(${binding}) nothing was queried`);
+  });
+});
+
+test("F1 same-kind reads scattered across declarations merge into one deduped read", async () => {
+  await withD1(async (binding, rawDb) => {
+    await applySchema(rawDb, MIGRATION_SQL);
+    const io = createInvocationIo({ db: rawDb, limit: 24 });
+    // The review's counter-example: two topic reads declaring the SAME key
+    // plus one problem read. Three declarations, but the merged plan is one
+    // deduped topic read and one problem read — cost 2, not 3.
+    const plan = {
+      reads: [
+        { rowKind: "topic", rowKeys: ["same"] },
+        { rowKind: "topic", rowKeys: ["same"] },
+        { rowKind: "problem", rowKeys: ["p"] }
+      ]
+    };
+    assert.equal(planReadCost(plan), 2,
+      "same-kind declarations merge and dedupe before pricing");
+    await seedRow(rawDb, { rowKey: "same", value: { merged: true } });
+    await seedRow(rawDb, { rowKind: "problem", rowKey: "p", value: { n: 1 } });
+    const staged = await readStagedWithinBudget({ io, scope: SCOPE, stagingGeneration: 1, plan });
+    assert.deepEqual(staged.topic.get("same"), { merged: true },
+      `(${binding}) the duplicated key is read back once`);
+    assert.deepEqual(staged.problem.get("p"), { n: 1 },
+      `(${binding}) the other kind still reads its own key`);
+    assert.equal(io.budget.snapshot().used, 2,
+      `(${binding}) the merged plan costs two sub-requests, not three`);
   });
 });
 

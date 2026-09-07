@@ -25,23 +25,42 @@ function fail(code, detail) {
 }
 
 /**
- * Cost of a read plan in sub-requests, computed WITHOUT issuing any query.
- * Empty reads cost nothing; otherwise each rowKind costs one query per chunk.
+ * Normalize a declared read plan into ONE canonical read per rowKind with a
+ * deduplicated key list, validating row kinds and keys along the way.
+ * Both the pricing and the actual execution consume THIS result, so scattered
+ * declarations of the same rowKind merge into a single deduplicated read and
+ * can never pay or query the same keys twice.
  */
-export function planReadCost(plan) {
-  let calls = 0;
+function normalizeReadPlan(plan) {
+  const merged = new Map();
   for (const read of plan?.reads ?? []) {
     if (!ALLOWED_ROW_KINDS.has(read?.rowKind)) {
       throw fail("build_read_kind_rejected", String(read?.rowKind));
     }
-    const keys = [...new Set(read.rowKeys ?? [])];
-    if (!keys.length) continue;
+    const keys = read.rowKeys ?? [];
     if (keys.some((key) => typeof key !== "string" || !key.length)) {
       throw fail("build_read_key_invalid");
     }
-    calls += Math.ceil(keys.length / STAGING_READ_CHUNK);
+    if (!merged.has(read.rowKind)) merged.set(read.rowKind, new Set());
+    for (const key of keys) merged.get(read.rowKind).add(key);
   }
-  return calls;
+  const reads = [];
+  let cost = 0;
+  for (const [rowKind, keys] of merged) {
+    if (!keys.size) continue;
+    cost += Math.ceil(keys.size / STAGING_READ_CHUNK);
+    reads.push({ rowKind, keys: [...keys] });
+  }
+  return { reads, cost };
+}
+
+/**
+ * Cost of a read plan in sub-requests, computed WITHOUT issuing any query.
+ * Same-kind declarations merge first; otherwise each rowKind costs one query
+ * per chunk of its deduplicated keys.
+ */
+export function planReadCost(plan) {
+  return normalizeReadPlan(plan).cost;
 }
 
 /**
@@ -59,18 +78,19 @@ export async function readStagedWithinBudget({
   maxCalls = STAGING_READ_MAX_CALLS
 }) {
   const result = { topic: new Map(), problem: new Map() };
-  const reads = plan?.reads ?? [];
-  if (!reads.length) return result;
 
-  // Validate and price the plan BEFORE any query goes out: discovering on the
-  // fourth call that a fifth is needed is not acceptable.
-  const cost = planReadCost(plan);
+  // Validate, merge, dedupe and price the WHOLE plan BEFORE any query goes
+  // out: discovering on the fourth call that a fifth is needed is not
+  // acceptable, and two declarations of the same rowKind must never pay or
+  // query twice. The queries below run against the SAME normalized result the
+  // price was computed from.
+  const { reads, cost } = normalizeReadPlan(plan);
+  if (!reads.length) return result;
   if (cost > maxCalls) throw fail("build_read_limit_exceeded", { cost, maxCalls });
   if (!canAffordStage(io.budget, cost)) throw fail("budget_reserve_insufficient", { cost });
 
   for (const read of reads) {
-    const keys = [...new Set(read.rowKeys ?? [])];
-    if (!keys.length) continue;
+    const keys = read.keys;
     const bucket = result[read.rowKind];
     for (let offset = 0; offset < keys.length; offset += STAGING_READ_CHUNK) {
       const chunk = keys.slice(offset, offset + STAGING_READ_CHUNK);
