@@ -172,6 +172,21 @@ test("P1-4 the only legal empty plan is { reads: [] } — a missing or null read
         `(${binding}) readStagedWithinBudget refuses plan ${label}`
       );
     }
+    // An INHERITED reads is not an own field: this is the only input that
+    // separates the two guards (the field reads fine and is an array, yet the
+    // plan does not own it). Without the hasOwnProperty check it would be
+    // accepted — which is exactly why it is pinned separately.
+    const inherited = Object.create({ reads: ["inherited"] });
+    assert.throws(
+      () => planReadCost(inherited, 3),
+      (error) => error.code === "build_read_plan_invalid",
+      `(${binding}) an inherited reads is not an own field`
+    );
+    await assert.rejects(
+      () => readStagedWithinBudget({ io, scope: SCOPE, stagingGeneration: 1, eventCount: 3, plan: inherited }),
+      (error) => error.code === "build_read_plan_invalid",
+      `(${binding}) the executor rejects an inherited reads too`
+    );
     // The one legal empty plan still prices to zero and queries nothing.
     assert.equal(planReadCost({ reads: [] }, 3), 0, "an explicit empty plan is legal");
     const staged = await readStagedWithinBudget({
