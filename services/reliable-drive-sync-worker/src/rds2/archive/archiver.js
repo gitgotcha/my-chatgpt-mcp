@@ -7,6 +7,10 @@ import { claimForProcessing, completeTask, failTask, parkNeedsAttention } from "
 import { hashText } from "../identity/hashing.js";
 import { deriveTaskId } from "../events/repository.js";
 import { canonicalJson } from "../../../../../shared/rds2-protocol.mjs";
+import {
+  requireScope, scopeFieldsEqual, validateDelta, validatePackage,
+  validateWindowCoverage, replayError
+} from "./replay-validate.js";
 
 function stepResult(outcome, taskId, code) {
   return { outcome, taskId, code };
@@ -156,16 +160,19 @@ export async function replayProjection(artifacts) {
       error.artifact = item.objectName;
       throw error;
     }
-    if (item.data.scope) {
-      const key = JSON.stringify(item.data.scope);
-      if (scopeKey === null) scopeKey = key;
-      else if (key !== scopeKey) {
-        const error = new Error("replay_scope_mismatch");
-        error.code = "replay_scope_mismatch";
-        error.artifact = item.objectName;
-        throw error;
-      }
+    // R1: the scope is NOT optional. A delta or package without a complete
+    // scope cannot be attributed to a projection at all.
+    const scope = requireScope(item.data.scope, item.objectName);
+    // R2: scopes are compared field by field — never by JSON text, which
+    // would make the verdict depend on key order no writer promises.
+    if (scopeKey === null) scopeKey = scope;
+    else if (!scopeFieldsEqual(scope, scopeKey)) {
+      throw replayError("replay_scope_mismatch", item.objectName);
     }
+    // S1–S5 / R4 / R7 / R9: the artifact must be internally coherent on its
+    // own before it is allowed to take part in a replay.
+    if (item.objectType === "projection_delta") validateDelta(item.data, item.objectName);
+    else validatePackage(item.data, item.objectName);
   }
   const deltas = parsed
     .filter((item) => item.objectType === "projection_delta")
@@ -191,6 +198,7 @@ export async function replayProjection(artifacts) {
   let expectedRevision = 0;
   let revision = 0;
   let summary = null;
+  let previousEventSeq = null;
   for (const delta of deltas) {
     if (delta.baseRevision !== expectedRevision) {
       const error = new Error("replay_missing_page");
@@ -199,6 +207,14 @@ export async function replayProjection(artifacts) {
       error.foundBaseRevision = delta.baseRevision;
       throw error;
     }
+    // R5: the replayed cursor never rewinds. An activation delta sits at its
+    // frozen target, so a rewind means two activations claim the same range.
+    if (previousEventSeq !== null && delta.eventSeq < previousEventSeq) {
+      throw replayError("replay_revision_not_chained", null, {
+        field: "eventSeq", previousEventSeq, foundEventSeq: delta.eventSeq
+      });
+    }
+    previousEventSeq = delta.eventSeq;
     if (delta.build) {
       const manifest = delta.build;
       const packages = (packagesByBuild.get(manifest.buildId) ?? [])
@@ -209,24 +225,40 @@ export async function replayProjection(artifacts) {
         error.buildId = manifest.buildId;
         throw error;
       }
+      // R6: page numbers must tile 1..pages — a duplicate page is as fatal as
+      // a missing one, because either leaves the manifest unprovable.
+      const seenPages = new Set();
+      for (const pkg of packages) {
+        if (seenPages.has(pkg.page)) {
+          throw replayError("replay_missing_page", null, {
+            buildId: manifest.buildId, duplicatePage: pkg.page
+          });
+        }
+        seenPages.add(pkg.page);
+      }
       for (let index = 0; index < packages.length; index += 1) {
-        if (packages[index].page !== index + 1) {
+        const pkg = packages[index];
+        if (pkg.page !== index + 1) {
           const error = new Error("replay_missing_page");
           error.code = "replay_missing_page";
           error.buildId = manifest.buildId;
           throw error;
         }
-        if (packages[index].generation !== manifest.generation) {
-          const error = new Error("replay_missing_page");
-          error.code = "replay_missing_page";
-          error.buildId = manifest.buildId;
-          throw error;
+        if (pkg.buildId !== manifest.buildId) {
+          throw replayError("replay_manifest_invalid", null, { field: "buildId" });
+        }
+        if (pkg.generation !== manifest.generation) {
+          throw replayError("replay_manifest_invalid", null, { field: "generation" });
         }
         const rows = rowsOf(manifest.generation);
-        for (const change of packages[index].rowChanges) {
+        for (const change of pkg.rowChanges) {
           rows.set(change.rowKind + ":" + change.rowKey, change.value);
         }
       }
+      // R8: the manifest's window must be exactly tiled by the packages'
+      // chained scan windows. Cross-user sequence gaps inside a window are
+      // expected; a window seam that does not close is not.
+      if (manifest.pages >= 1) validateWindowCoverage(manifest, packages, null);
       activeGeneration = manifest.generation;
     } else {
       const rows = rowsOf(activeGeneration);

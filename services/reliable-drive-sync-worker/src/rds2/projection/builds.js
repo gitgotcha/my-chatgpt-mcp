@@ -276,6 +276,11 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
   // consumption progress, never by the fetched page length.
   const emptyPage = events.length === 0;
   let pageResult = null;
+  // G2-F3 (R9): what the page actually CONSUMED, derived by the engine from
+  // the validated cursor — never self-reported, never inferred from
+  // `nextEventSeq - 1` (a legal zero-event page has no such event).
+  let consumedCount = 0;
+  let consumedLastEventSeq = null;
   if (!emptyPage) {
     // G2-F1: the reducer declares the staged rows this page needs; the engine
     // validates the plan, dedupes it, prices it and executes it under a hard
@@ -307,6 +312,23 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
       await parkNeedsAttention({ db: io.db, lease, now, code: "build_no_progress" });
       return stepResult("needs_attention", taskId, "build_no_progress");
     }
+    // Consumption must be a NON-EMPTY PREFIX of the page actually read. The
+    // cursor may sit inside a cross-user gap, but a page that offered events
+    // and consumed none would re-read them forever.
+    while (consumedCount < events.length && events[consumedCount].eventSeq < nextSeq) {
+      consumedCount += 1;
+    }
+    if (consumedCount === 0) {
+      await parkNeedsAttention({ db: io.db, lease, now, code: "build_no_progress" });
+      return stepResult("needs_attention", taskId, "build_no_progress");
+    }
+    consumedLastEventSeq = events[consumedCount - 1].eventSeq;
+    if (consumedLastEventSeq + 1 !== nextSeq) {
+      // The post-scan cursor sits EXACTLY above the last consumed event;
+      // anything else means the cursor skipped unread events.
+      await parkNeedsAttention({ db: io.db, lease, now, code: "build_no_progress" });
+      return stepResult("needs_attention", taskId, "build_no_progress");
+    }
   }
   const nextEventSeq = emptyPage ? targetEventSeq + 1 : pageResult.continuation.nextEventSeq;
   const done = nextEventSeq > targetEventSeq;
@@ -331,8 +353,14 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
       buildId: build.build_id,
       generation: build.staging_generation,
       page: continuation.page,
-      firstEventSeq: continuation.firstEventSeq,
-      lastEventSeq: events[events.length - 1].eventSeq,
+      // G2-F3 (R9): the range the page actually consumed — not the last event
+      // it merely READ — plus both scan cursors, so an offline replay can
+      // prove the windows tile without a gap.
+      firstEventSeq: events[0].eventSeq,
+      lastEventSeq: consumedLastEventSeq,
+      consumedCount,
+      scanFirstCursor: continuation.nextEventSeq,
+      scanCursorAfter: pageResult.continuation.nextEventSeq,
       summary: pageResult.summary ?? continuation.summary ?? null,
       rowChanges: pageResult.rowChanges
     };

@@ -657,12 +657,18 @@ test("R5 replay switches generation and drops rows the superseded generation own
   });
   const packageOne = await freeze({
     storageVersion: 2, kind: "build_package", scope,
-    buildId: "build-1", generation: 1, page: 1, firstEventSeq: 1, lastEventSeq: 2, summary: null,
+    buildId: "build-1", generation: 1, page: 1,
+    // G2-F3 (R9): the consumed range plus both scan cursors, so replay can
+    // prove the windows tile.
+    firstEventSeq: 1, lastEventSeq: 2, consumedCount: 2,
+    scanFirstCursor: 1, scanCursorAfter: 3, summary: null,
     rowChanges: [{ rowKind: "topic", rowKey: "new-a", value: { name: "new-a" } }]
   });
   const packageTwo = await freeze({
     storageVersion: 2, kind: "build_package", scope,
-    buildId: "build-1", generation: 1, page: 2, firstEventSeq: 3, lastEventSeq: 4,
+    buildId: "build-1", generation: 1, page: 2,
+    firstEventSeq: 3, lastEventSeq: 4, consumedCount: 2,
+    scanFirstCursor: 3, scanCursorAfter: 5,
     summary: { counts: { attempts: 4 } },
     rowChanges: [{ rowKind: "topic", rowKey: "new-b", value: { name: "new-b" } }]
   });
@@ -677,8 +683,25 @@ test("R5 replay switches generation and drops rows the superseded generation own
   const wrongGeneration = await freeze({ ...JSON.parse(packageOne.frozenJson), generation: 2 });
   await assert.rejects(
     () => replayProjection([staleDelta, activation, wrongGeneration, packageTwo]),
-    (error) => error.code === "replay_missing_page",
+    (error) => error.code === "replay_manifest_invalid",
     "a package from another generation must be refused"
+  );
+  // A package carrying a foreign buildId is gathered under its OWN buildId,
+  // so at manifest level it is indistinguishable from a missing page — and
+  // both leave the manifest unprovable.
+  const wrongBuild = await freeze({ ...JSON.parse(packageOne.frozenJson), buildId: "build-other" });
+  await assert.rejects(
+    () => replayProjection([staleDelta, activation, wrongBuild, packageTwo]),
+    (error) => error.code === "replay_missing_page",
+    "a package from another build must be refused"
+  );
+  // A duplicate page number leaves the manifest unprovable, exactly like a
+  // missing page.
+  const duplicatePage = await freeze({ ...JSON.parse(packageTwo.frozenJson), page: 1 });
+  await assert.rejects(
+    () => replayProjection([staleDelta, activation, duplicatePage]),
+    (error) => error.code === "replay_missing_page",
+    "a duplicated page number must be refused"
   );
   // A malformed artifact is never "not found".
   const malformed = { objectType: "build_package", objectName: "bad.json", frozenJson: "{not json", hash: await hashText("{not json") };
@@ -1041,4 +1064,191 @@ test("C5 a spent invocation budget stops Drive calls and only a new invocation g
     );
     assert.equal(drive.state.lists, 1, `(${binding}) and no further call went out`);
   });
+});
+
+// ---------------------------------------------------------------------------
+// G2-F3: a correct hash proves the bytes, not the contract. Replay refuses
+// any artifact whose structure or range cannot be proven, and never returns
+// a partial result as a complete recovery. Single-failure cases assert the
+// EXACT code; nothing here depends on trigger order.
+// ---------------------------------------------------------------------------
+const F3_SCOPE = { userId: "u-f3", namespace: "algorithm", projectionName: "learning" };
+const F3_SCOPE_REORDERED = { projectionName: "learning", namespace: "algorithm", userId: "u-f3" };
+
+async function f3Freeze(data) {
+  const frozenJson = JSON.stringify(data);
+  return {
+    objectType: data.kind,
+    objectName: `${data.kind}-${data.revision ?? data.page ?? "x"}.json`,
+    frozenJson,
+    hash: await hashText(frozenJson)
+  };
+}
+
+const F3_BASE_DELTA = {
+  storageVersion: 2, kind: "projection_delta", scope: F3_SCOPE,
+  baseRevision: 0, revision: 1, eventSeq: 1, summary: null, build: null,
+  changes: [{ rowKind: "topic", rowKey: "f3-topic", memberKey: null, sortKey: null, value: { n: 1 } }]
+};
+const F3_ACTIVATION = {
+  storageVersion: 2, kind: "projection_delta", scope: F3_SCOPE,
+  baseRevision: 1, revision: 2, eventSeq: 4,
+  summary: { counts: { attempts: 2 } },
+  build: { buildId: "b-f3", generation: 1, pages: 2, firstEventSeq: 1, lastEventSeq: 4 },
+  changes: []
+};
+const F3_PACKAGE_ONE = {
+  storageVersion: 2, kind: "build_package", scope: F3_SCOPE,
+  buildId: "b-f3", generation: 1, page: 1,
+  firstEventSeq: 1, lastEventSeq: 2, consumedCount: 2,
+  scanFirstCursor: 1, scanCursorAfter: 3, summary: null,
+  rowChanges: [{ rowKind: "topic", rowKey: "f3-a", value: { n: 1 } }]
+};
+const F3_PACKAGE_TWO = {
+  storageVersion: 2, kind: "build_package", scope: F3_SCOPE,
+  buildId: "b-f3", generation: 1, page: 2,
+  firstEventSeq: 3, lastEventSeq: 4, consumedCount: 2,
+  scanFirstCursor: 3, scanCursorAfter: 5, summary: { counts: { attempts: 2 } },
+  rowChanges: [{ rowKind: "topic", rowKey: "f3-b", value: { n: 2 } }]
+};
+
+async function f3Chain(...datas) {
+  const artifacts = [];
+  for (const data of datas) artifacts.push(await f3Freeze(data));
+  return replayProjection(artifacts);
+}
+
+test("F3 replay refuses a delta or package without a complete scope", async () => {
+  for (const mutate of [
+    (data) => ({ ...data, scope: undefined }),
+    (data) => ({ ...data, scope: { ...data.scope, userId: "" } }),
+    (data) => ({ ...data, scope: { ...data.scope, namespace: null } }),
+    (data) => ({ ...data, scope: { ...data.scope, projectionName: 7 } })
+  ]) {
+    await assert.rejects(
+      () => f3Chain(mutate(F3_BASE_DELTA), F3_ACTIVATION, F3_PACKAGE_ONE, F3_PACKAGE_TWO),
+      (error) => error.code === "replay_scope_missing",
+      "an artifact without a complete scope must be refused"
+    );
+  }
+});
+
+test("F3 replay refuses a revision that does not chain from its base", async () => {
+  await assert.rejects(
+    () => f3Chain({ ...F3_BASE_DELTA, revision: 99 }, F3_ACTIVATION),
+    (error) => error.code === "replay_revision_not_chained",
+    "a revision that skips its base must be refused"
+  );
+  await assert.rejects(
+    () => f3Chain({ ...F3_BASE_DELTA, revision: 1.5 }),
+    (error) => error.code === "replay_artifact_invalid",
+    "a non-integer revision must be refused"
+  );
+});
+
+test("F3 replay refuses a replayed cursor that rewinds", async () => {
+  // The base delta ends at cursor 5; the activation claims cursor 4.
+  await assert.rejects(
+    () => f3Chain({ ...F3_BASE_DELTA, eventSeq: 5 }, F3_ACTIVATION),
+    (error) => error.code === "replay_revision_not_chained",
+    "a rewinding cursor must be refused"
+  );
+});
+
+test("F3 replay refuses malformed change collections", async () => {
+  for (const mutate of [
+    (data) => ({ ...data, changes: "not-an-array" }),
+    (data) => ({ ...data, changes: [{ rowKind: "topic" }] }),
+    (data) => ({ ...data, changes: [{ rowKind: "topic", rowKey: "k", value: undefined }] })
+  ]) {
+    await assert.rejects(
+      () => f3Chain(mutate(F3_BASE_DELTA)),
+      (error) => error.code === "replay_artifact_invalid",
+      "malformed changes must be refused"
+    );
+  }
+  await assert.rejects(
+    () => f3Chain({ ...F3_PACKAGE_ONE, rowChanges: { 0: "x" } }),
+    (error) => error.code === "replay_artifact_invalid",
+    "a non-array rowChanges must be refused"
+  );
+});
+
+test("F3 replay refuses a manifest whose pages do not match its range", async () => {
+  for (const mutate of [
+    (data) => ({ ...data, build: { ...data.build, pages: 0 } }),
+    (data) => ({ ...data, build: { ...data.build, pages: 0, firstEventSeq: null, lastEventSeq: null } })
+  ]) {
+    await assert.rejects(
+      () => f3Chain(mutate(F3_ACTIVATION)),
+      (error) => error.code === "replay_range_inconsistent",
+      "a manifest that cannot prove its range must be refused"
+    );
+  }
+});
+
+test("F3 replay refuses a package whose range and scan window disagree", async () => {
+  for (const mutate of [
+    (data) => ({ ...data, lastEventSeq: 1 }),
+    (data) => ({ ...data, scanCursorAfter: data.scanFirstCursor }),
+    (data) => ({ ...data, consumedCount: 0 })
+  ]) {
+    await assert.rejects(
+      () => f3Chain(F3_BASE_DELTA, mutate(F3_PACKAGE_ONE), F3_PACKAGE_TWO, F3_ACTIVATION),
+      (error) => error.code === "replay_range_inconsistent",
+      "a package whose range contradicts its window must be refused"
+    );
+  }
+});
+
+test("F3 replay refuses windows that do not tile the manifest range", async () => {
+  await assert.rejects(
+    () => f3Chain(F3_BASE_DELTA, F3_PACKAGE_ONE, { ...F3_PACKAGE_TWO, scanFirstCursor: 4 }, F3_ACTIVATION),
+    (error) => error.code === "replay_range_inconsistent",
+    "a window seam that does not close must be refused"
+  );
+  await assert.rejects(
+    () => f3Chain(F3_BASE_DELTA, F3_PACKAGE_ONE,
+      { ...F3_PACKAGE_TWO, lastEventSeq: 3, scanCursorAfter: 4 }, F3_ACTIVATION),
+    (error) => error.code === "replay_range_inconsistent",
+    "a window that stops short of the target must be refused"
+  );
+});
+
+test("F3 replay accepts the legal empty build, reordered scopes and gapped windows", async () => {
+  // The zero-event build has exactly one encoding and replays fine.
+  const empty = await f3Chain({
+    storageVersion: 2, kind: "projection_delta", scope: F3_SCOPE,
+    baseRevision: 0, revision: 1, eventSeq: 0, summary: null,
+    build: { buildId: "b-empty", generation: 1, pages: 0, firstEventSeq: null, lastEventSeq: 0 },
+    changes: []
+  });
+  assert.deepEqual(empty.rows, {}, "an empty build replays to no rows");
+  assert.equal(empty.revision, 1);
+
+  // Key order inside the scope object is irrelevant: comparison is field-wise.
+  const ok = await f3Chain(F3_BASE_DELTA, { ...F3_PACKAGE_ONE, scope: F3_SCOPE_REORDERED },
+    F3_PACKAGE_TWO, F3_ACTIVATION);
+  assert.equal(ok.revision, 2, "a reordered scope object must not be refused");
+
+  // Cross-user sequence gaps INSIDE a window are legal: the windows tile even
+  // though the consumed sequence numbers are not contiguous.
+  const withGaps = await f3Chain(F3_BASE_DELTA, F3_PACKAGE_ONE,
+    { ...F3_PACKAGE_TWO, firstEventSeq: 9, lastEventSeq: 10, consumedCount: 2,
+      scanFirstCursor: 3, scanCursorAfter: 11 },
+    { ...F3_ACTIVATION, build: { buildId: "b-f3", generation: 1, pages: 2, firstEventSeq: 1, lastEventSeq: 10 } });
+  assert.equal(withGaps.revision, 2, "windows over gapped sequence numbers still tile");
+});
+
+test("F3 replay accepts a partially consumed page", async () => {
+  // Page 1 read three events but consumed only the first; page 2 starts at
+  // the cursor page 1 ended on. The windows still tile.
+  const replay = await f3Chain(F3_BASE_DELTA,
+    { ...F3_PACKAGE_ONE, firstEventSeq: 1, lastEventSeq: 1, consumedCount: 1,
+      scanFirstCursor: 1, scanCursorAfter: 2 },
+    { ...F3_PACKAGE_TWO, firstEventSeq: 2, lastEventSeq: 4, consumedCount: 3,
+      scanFirstCursor: 2, scanCursorAfter: 5 },
+    F3_ACTIVATION);
+  assert.deepEqual(Object.keys(replay.rows).sort(), ["topic:f3-a", "topic:f3-b"],
+    "a partially consumed page still replays completely");
 });
