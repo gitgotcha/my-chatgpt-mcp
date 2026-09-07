@@ -45,6 +45,7 @@ export function createDeliveryServiceV2({
   });
 
   let timer = null;
+  let flushing = false;
   let closed = false;
 
   const arm = () => {
@@ -52,6 +53,9 @@ export function createDeliveryServiceV2({
     timer = scheduleFn(() => {
       timer = null;
       if (closed) return;
+      // No overlapping flushes: while one is running it re-arms itself when
+      // it finishes, so the wake chain never breaks and never doubles up.
+      if (flushing) return;
       flushDue().catch(() => {});
     }, wakeMs);
   };
@@ -77,10 +81,12 @@ export function createDeliveryServiceV2({
   }
 
   async function flushDue() {
-    if (closed) return { delivered: 0, failed: 0 };
-    const claimed = outbox.claimDue({ limit: MAX_FLUSH_ROWS });
-    let delivered = 0;
-    let failed = 0;
+    if (closed || flushing) return { delivered: 0, failed: 0, skipped: flushing };
+    flushing = true;
+    try {
+      const claimed = outbox.claimDue({ limit: MAX_FLUSH_ROWS });
+      let delivered = 0;
+      let failed = 0;
     for (const row of claimed) {
       // The send is a single HTTP request and MUST stay outside any local
       // transaction: a durable write may never span a network call.
@@ -103,7 +109,14 @@ export function createDeliveryServiceV2({
         failed += 1;
       }
     }
-    return { delivered, failed };
+      return { delivered, failed };
+    } finally {
+      // Survive every path — success, a failed send and a failed confirm all
+      // reschedule here, so the service keeps waking while it is alive. A
+      // close that raced an in-flight flush schedules nothing new.
+      flushing = false;
+      if (!closed) arm();
+    }
   }
 
   function close() {
