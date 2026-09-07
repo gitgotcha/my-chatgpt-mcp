@@ -23,11 +23,26 @@ const CLEANUP = { recursive: true, force: true, maxRetries: 5, retryDelay: 50 };
 const USER_ID = "11111111-1111-4111-8111-111111111111";
 const EVENT_ID = "a0000000-0000-4000-8000-000000000001";
 
+// A real V2 submission envelope: the identity and the event id travel with
+// the fact, so the outbox can match a receipt against what it actually froze.
 const envelope = (overrides = {}) => ({
+  schemaVersion: "1.2",
   requestId: "req-1",
   namespace: "algorithm",
   eventType: "algorithm.learning.completed",
-  payload: { topic: "two-sum" },
+  identity: { userId: USER_ID, username: "乔炳源" },
+  payload: {
+    event: {
+      eventId: EVENT_ID,
+      eventKey: "algorithm:two-sum:2026-09-07",
+      eventType: "algorithm.learning.completed",
+      userId: USER_ID,
+      username: "乔炳源",
+      observedAt: "2026-09-07T00:00:00.000Z",
+      topic: "two-sum",
+      outcome: "consulted"
+    }
+  },
   ...overrides
 });
 
@@ -262,26 +277,82 @@ test("T09 flushDue delivers at most 20 rows and one HTTP request each", async (t
   assert.equal(seen.length, 25, "the remainder goes on the next flush");
 });
 
-test("T09 the wake-up timer starts on the first write and is cancelled on close", async (t) => {
-  const { open } = await fixture(t);
+test("T09 the wake reschedules itself: a failed send is retried without any new submit", async (t) => {
+  const { open, clock } = await fixture(t);
   const outbox = open();
-  const scheduled = [];
-  let cancelled = 0;
+  const wakes = [];
+  let attempts = 0;
   const service = createDeliveryServiceV2({
     outbox,
-    clock: () => "2026-09-07T00:00:00.000Z",
-    send: async (payload) => acceptedReceipt(payload.requestId),
+    clock,
+    send: async (payload) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("response_lost");
+      return acceptedReceipt(payload.requestId);
+    },
     schedule: (action, ms) => {
-      scheduled.push(ms);
-      return { unref: () => {}, cancel: () => { cancelled += 1; } };
+      const handle = { action, ms, cancelled: false };
+      wakes.push(handle);
+      return {
+        cancel: () => {
+          handle.cancelled = true;
+        }
+      };
+    }
+  });
+  t.after(() => service.close());
+
+  await service.submit(envelope());
+  await service.flushDue();
+  assert.equal(attempts, 1, "the first send fails");
+  assert.equal(wakes.length, 1, "the first write armed the timer");
+
+  // The wake fires after the backoff: no new submit, the retry still runs and
+  // the loop reschedules itself for the next wake.
+  clock.advance(30_000);
+  await wakes[0].action();
+  assert.equal(attempts, 2, "the retry ran on its own");
+  assert.equal(outbox.inspect()[0].state, "acknowledged", "the retry confirms");
+  assert.equal(wakes.length, 2, "the wake rescheduled itself after finishing");
+
+  // And the loop keeps going while the service lives, even when idle.
+  clock.advance(30_000);
+  await wakes[1].action();
+  assert.equal(wakes.length, 3, "an idle wake still reschedules");
+  assert.equal(wakes[1].cancelled, false, "a fired wake was not the close target");
+});
+
+test("T09 close during an in-flight wake schedules nothing new", async (t) => {
+  const { open, clock } = await fixture(t);
+  const outbox = open();
+  const wakes = [];
+  let releaseSend;
+  const service = createDeliveryServiceV2({
+    outbox,
+    clock,
+    send: async (payload) => new Promise((resolve) => {
+      releaseSend = () => resolve(acceptedReceipt(payload.requestId));
+    }),
+    schedule: (action, ms) => {
+      const handle = { action, ms, cancelled: false };
+      wakes.push(handle);
+      return {
+        cancel: () => {
+          handle.cancelled = true;
+        }
+      };
     }
   });
 
-  assert.deepEqual(scheduled, [], "no timer before anything is written");
   await service.submit(envelope());
-  assert.equal(scheduled.length, 1, "the first write arms the timer");
+  assert.equal(wakes.length, 1);
 
+  // The wake fires and its flush hangs on the in-flight send; close races it.
+  const inFlight = wakes[0].action();
   service.close();
-  assert.equal(cancelled, 1, "close cancels the timer");
-  assert.equal(service.timerActive, false);
+  releaseSend();
+  await inFlight;
+
+  assert.equal(wakes.length, 1, "a close that raced a flush schedules nothing new");
+  assert.equal(service.timerActive, false, "no timer survives the close");
 });

@@ -20,12 +20,28 @@ import { LocalOutboxV2 } from "../local-outbox-v2.mjs";
 
 const CLEANUP = { recursive: true, force: true, maxRetries: 5, retryDelay: 50 };
 const USER_ID = "11111111-1111-4111-8111-111111111111";
+const OTHER_USER_ID = "22222222-2222-4222-8222-222222222222";
+const EVENT_ID = "a0000000-0000-4000-8000-000000000001";
+const OTHER_EVENT_ID = "b0000000-0000-4000-8000-000000000002";
 
 const envelope = (overrides = {}) => ({
+  schemaVersion: "1.2",
   requestId: "req-1",
   namespace: "algorithm",
   eventType: "algorithm.learning.completed",
-  payload: { topic: "two-sum" },
+  identity: { userId: USER_ID, username: "乔炳源" },
+  payload: {
+    event: {
+      eventId: EVENT_ID,
+      eventKey: "algorithm:two-sum:2026-09-07",
+      eventType: "algorithm.learning.completed",
+      userId: USER_ID,
+      username: "乔炳源",
+      observedAt: "2026-09-07T00:00:00.000Z",
+      topic: "two-sum",
+      outcome: "consulted"
+    }
+  },
   ...overrides
 });
 
@@ -168,13 +184,48 @@ test("T09 confirm acknowledges only a receipt that matches the attempt, identity
     () => outbox.confirm(receipt({ cloudPersistence: "unknown" })),
     (error) => error.code === "receipt_mismatch"
   );
+  // The row's frozen envelope carries the identity and the event: a receipt
+  // that matches the request id but belongs to another user, another event or
+  // another canonical request must not acknowledge it either.
+  for (const [label, wrong] of [
+    ["userId", receipt({ userId: OTHER_USER_ID })],
+    ["eventId", receipt({ eventId: OTHER_EVENT_ID })],
+    ["canonicalRequestId", receipt({ canonicalRequestId: "req-other" })]
+  ]) {
+    assert.throws(
+      () => outbox.confirm(wrong),
+      (error) => error.code === "receipt_mismatch",
+      `a receipt with the wrong ${label} must be refused`
+    );
+  }
   assert.equal(outbox.inspect()[0].state, "sending", "a rejected receipt changes nothing");
+  assert.equal(outbox.inspect()[0].receipt, null, "a refused receipt is never stored");
 
   const result = outbox.confirm(receipt());
   assert.equal(result.acknowledged, true);
   const row = outbox.inspect()[0];
   assert.equal(row.state, "acknowledged");
-  assert.equal(row.receipt.eventId, "a0000000-0000-4000-8000-000000000001");
+  assert.equal(row.receipt.eventId, EVENT_ID);
+
+  // A legitimate dedupe receipt: the cloud folded this submission into an
+  // older fact, so canonicalRequestId points at the creating request and the
+  // event id is the canonical one — which differs from what this row declared.
+  // Refusing that shape would reject a valid already_recorded answer.
+  const aliasEnvelope = envelope({ requestId: "req-alias" });
+  aliasEnvelope.payload.event.eventId = OTHER_EVENT_ID;
+  outbox.enqueue(aliasEnvelope);
+  outbox.claimDue({ limit: 20 });
+  const aliasResult = outbox.confirm(receipt({
+    attemptedRequestId: "req-alias",
+    canonicalRequestId: "req-1",
+    eventId: EVENT_ID,
+    disposition: "already_recorded"
+  }));
+  assert.equal(aliasResult.acknowledged, true, "a dedupe receipt is a valid answer");
+  const aliasRow = outbox.inspect().find((entry) => entry.requestId === "req-alias");
+  assert.equal(aliasRow.state, "acknowledged");
+  assert.equal(aliasRow.receipt.disposition, "already_recorded");
+  assert.equal(aliasRow.receipt.eventId, EVENT_ID, "the canonical event id is kept");
 });
 
 test("T09 acknowledged rows are retained and purging never touches pending or blocked", async (t) => {

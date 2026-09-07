@@ -64,6 +64,20 @@ function envelopeHash(envelope) {
   return createHash("sha256").update(canonicalJson(envelope)).digest("hex");
 }
 
+// The identity and the event travel with the frozen envelope, in exactly the
+// fields the worker reads when it accepts a submission — the outbox never
+// invents either. Confirm compares against these, so a receipt for the right
+// request but another user or another event cannot acknowledge the row.
+function envelopeUserId(envelope) {
+  const value = envelope?.identity?.userId ?? envelope?.payload?.userId ?? envelope?.payload?.event?.userId;
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function envelopeEventId(envelope) {
+  const value = envelope?.payload?.event?.eventId;
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
 function backoffFor(attempts) {
   const index = Math.min(Math.max(Number(attempts) || 0, 0), BACKOFF_MS.length - 1);
   return BACKOFF_MS[index];
@@ -216,7 +230,8 @@ export class LocalOutboxV2 {
     const now = this.clock();
     return transaction(db, () => {
       const record = db.prepare(
-        `SELECT request_id, state, lease_owner, lease_until FROM local_outbox_rows WHERE request_id = ?`
+        `SELECT request_id, state, lease_owner, lease_until, envelope_json
+         FROM local_outbox_rows WHERE request_id = ?`
       ).get(requestId);
       // A receipt for a request we never attempted — or one that was already
       // settled — can never acknowledge: that is how one request's receipt is
@@ -227,6 +242,32 @@ export class LocalOutboxV2 {
       }
       if (record.lease_until !== null && Date.parse(record.lease_until) <= Date.parse(now)) {
         throw fail("receipt_mismatch", "lease_expired");
+      }
+      // Identity and event association: the receipt has to describe the very
+      // fact this row froze, not merely a request id that happens to match.
+      // The rules follow the frozen dedupe protocol instead of demanding
+      // equality everywhere — a legitimate dedupe receipt carries the
+      // CANONICAL event's id, which may differ from what this row declared.
+      const frozen = JSON.parse(record.envelope_json);
+      const expectedUserId = envelopeUserId(frozen);
+      const expectedEventId = envelopeEventId(frozen);
+      if (expectedUserId === null) throw fail("receipt_mismatch", "envelope_user");
+      if (receipt.userId !== expectedUserId) throw fail("receipt_mismatch", "userId");
+      if (typeof receipt?.canonicalRequestId !== "string" || !receipt.canonicalRequestId.trim()) {
+        throw fail("receipt_mismatch", "canonicalRequestId");
+      }
+      if (receipt.canonicalRequestId === requestId) {
+        // The cloud says THIS request created the event (or exactly replayed
+        // it): the event id must be the one the frozen envelope declared.
+        if (expectedEventId === null) throw fail("receipt_mismatch", "envelope_event");
+        if (receipt.eventId !== expectedEventId) throw fail("receipt_mismatch", "eventId");
+      } else {
+        // A merged fact: the cloud folded this submission into an older one,
+        // so the receipt carries that older event's id and the disposition
+        // has to say so — anything else is an unfounded canonical reference.
+        if (receipt.disposition !== "already_recorded") {
+          throw fail("receipt_mismatch", "canonicalRequestId");
+        }
       }
       db.prepare(
         `UPDATE local_outbox_rows
