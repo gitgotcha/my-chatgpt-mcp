@@ -148,6 +148,40 @@ test("F1 same-kind reads scattered across declarations merge into one deduped re
   });
 });
 
+test("P1-4 the only legal empty plan is { reads: [] } — a missing or null reads is refused", async () => {
+  await withD1(async (binding, rawDb) => {
+    await applySchema(rawDb, MIGRATION_SQL);
+    const io = createInvocationIo({ db: rawDb, limit: 24 });
+    // Frozen contract (final review P1): the plan is a non-null plain object
+    // whose OWN "reads" field is an array. A missing, null or non-array reads
+    // is a caller bug — never silently an empty plan. Pricing and execution
+    // share the same strict check, so neither can accept what the other
+    // refuses.
+    const badPlans = [null, undefined, {}, { reads: null }, { reads: undefined }, { reads: 123 }, { reads: "abc" }];
+    for (let index = 0; index < badPlans.length; index += 1) {
+      const plan = badPlans[index];
+      const label = `#${index} ${JSON.stringify(plan)}`;
+      assert.throws(
+        () => planReadCost(plan, 3),
+        (error) => error.code === "build_read_plan_invalid",
+        `(${binding}) planReadCost refuses plan ${label}`
+      );
+      await assert.rejects(
+        () => readStagedWithinBudget({ io, scope: SCOPE, stagingGeneration: 1, eventCount: 3, plan }),
+        (error) => error.code === "build_read_plan_invalid",
+        `(${binding}) readStagedWithinBudget refuses plan ${label}`
+      );
+    }
+    // The one legal empty plan still prices to zero and queries nothing.
+    assert.equal(planReadCost({ reads: [] }, 3), 0, "an explicit empty plan is legal");
+    const staged = await readStagedWithinBudget({
+      io, scope: SCOPE, stagingGeneration: 1, eventCount: 3, plan: { reads: [] }
+    });
+    assert.equal(staged.topic.size, 0, `(${binding}) an empty plan reads nothing`);
+    assert.equal(io.budget.snapshot().used, 0, `(${binding}) nothing was queried`);
+  });
+});
+
 test("P1-3 malformed plan shapes are rejected with stable codes, never raw TypeErrors", async () => {
   await withD1(async (binding, rawDb) => {
     await applySchema(rawDb, MIGRATION_SQL);

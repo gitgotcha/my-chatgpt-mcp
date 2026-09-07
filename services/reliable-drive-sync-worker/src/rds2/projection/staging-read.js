@@ -41,12 +41,19 @@ function normalizeReadPlan(plan, eventCount) {
   if (!Number.isSafeInteger(eventCount) || eventCount < 0) {
     throw fail("build_read_plan_invalid", { field: "eventCount", eventCount });
   }
-  const reads = plan?.reads ?? [];
-  if (!Array.isArray(reads)) {
+  // The frozen contract: the plan is a non-null object whose OWN "reads"
+  // field is an array. A missing, inherited, null or non-array reads is a
+  // caller bug, never an empty plan — `{ reads: [] }` is the ONLY legal empty
+  // plan. Pricing and execution run this same strict check, so neither can
+  // accept a shape the other would refuse.
+  if (plan === null || typeof plan !== "object") {
+    throw fail("build_read_plan_invalid", { field: "plan" });
+  }
+  if (!Object.prototype.hasOwnProperty.call(plan, "reads") || !Array.isArray(plan.reads)) {
     throw fail("build_read_plan_invalid", { field: "plan.reads" });
   }
   const merged = new Map();
-  for (const read of reads) {
+  for (const read of plan.reads) {
     if (!ALLOWED_ROW_KINDS.has(read?.rowKind)) {
       throw fail("build_read_kind_rejected", String(read?.rowKind));
     }
