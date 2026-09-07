@@ -342,18 +342,24 @@ test("needs_attention tasks are never completed by the projection engine", async
   });
 });
 
-test("rowChanges beyond the bounded limit are rejected, never truncated", async () => {
+test("F2-R1 rowChanges beyond the bounded limit park deterministically, never truncate", async () => {
   await runProjectionTest(async ({ binding, rawDb, io }) => {
     const { eventSeqs } = await seedScope(rawDb, { userId: USER_A, eventKeys: ["e-1"] });
     await dispatchOne({ io, taskId: `task-11-${eventSeqs[0]}`, owner: "dispatch-oversize", now: NOW });
-    await assert.rejects(
-      () => projectOne({
-        io, taskId: `task-11-${eventSeqs[0]}`, owner: "c1", now: NOW,
-        reducer: testReducer({ oversize: true })
-      }),
-      (error) => error.code === "changes_too_large",
-      `(${binding}) 21 row changes exceed the 20-row commit bound`
-    );
+    // G2-R1: a deterministic size error must PARK (class D) instead of
+    // escaping to the caller — an escaped error left the task in processing,
+    // and the recovery pass would keep re-claiming the same doomed task.
+    const result = await projectOne({
+      io, taskId: `task-11-${eventSeqs[0]}`, owner: "c1", now: NOW,
+      reducer: testReducer({ oversize: true })
+    });
+    assert.equal(result.outcome, "needs_attention",
+      `(${binding}) 21 row changes exceed the 20-row commit bound and must park: ${JSON.stringify(result)}`);
+    assert.equal(result.code, "changes_too_large");
+    const task = await rawDb.prepare("SELECT state, failure_count FROM rds2_tasks WHERE task_id = ?")
+      .bind(`task-11-${eventSeqs[0]}`).first();
+    assert.equal(task.state, "needs_attention", `(${binding}) parked for a human`);
+    assert.equal(Number(task.failure_count), 0, `(${binding}) a deterministic error is not a counted failure`);
     assert.equal(await countRows(rawDb, { userId: USER_A, generation: 0 }), 0);
     const head = await getHead(rawDb, USER_A);
     assert.equal(head.revision, 0);
@@ -628,7 +634,7 @@ test("R2 a build never reads past its frozen target", async () => {
   });
 });
 
-test("R2 the build page size is validated and capped at 50", async () => {
+test("F2-R1 the build page size is validated and capped at 50 (deterministic park)", async () => {
   await runProjectionTest(async ({ binding, rawDb, io, makeIo, sent }) => {
     await seedEventsThroughAccept(makeIo, rawDb, 2);
     const head = await loadProjectionHead(io.db, { userId: USER_A, namespace: "algorithm", projectionName: "learning" });
@@ -640,11 +646,18 @@ test("R2 the build page size is validated and capped at 50", async () => {
       "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' LIMIT 1"
     ).first("task_id");
     await dispatchOne({ io: makeIo(), taskId: nextTask, owner: "dispatch", now: NOW });
-    await assert.rejects(
-      () => continueBuild({ io: makeIo(), taskId: nextTask, owner: "builder", now: NOW, reducer: algorithmReducer, pageSize: 51 }),
-      (error) => error.code === "invalid_page_size",
-      `(${binding}) a page size above 50 must be rejected`
-    );
+    // G2-R1: an out-of-range page size is a deterministic contract error —
+    // it parks with its own stable code instead of escaping the boundary
+    // (the review reproduced it falling through to a blind C retry).
+    const result = await continueBuild({ io: makeIo(), taskId: nextTask, owner: "builder", now: NOW, reducer: algorithmReducer, pageSize: 51 });
+    assert.equal(result.outcome, "needs_attention",
+      `(${binding}) a page size above 50 must park: ${JSON.stringify(result)}`);
+    assert.equal(result.code, "invalid_page_size");
+    const task = await rawDb.prepare(
+      "SELECT state, failure_count FROM rds2_tasks WHERE task_id = ?"
+    ).bind(nextTask).first();
+    assert.equal(task.state, "needs_attention", `(${binding}) parked for a human`);
+    assert.equal(Number(task.failure_count), 0, `(${binding}) deterministic errors never count`);
   });
 });
 
@@ -806,7 +819,7 @@ for (const [label, reducer, note] of [
   ["a row value beyond 64 KiB", cappedReducer({ rowCount: 1, valueSize: 64 * 1024 }), "row unit"],
   ["a package beyond 256 KiB", cappedReducer({ rowCount: 20, valueSize: 13 * 1024 }), "package"]
 ]) {
-  test(`R2 an intermediate page with ${label} is refused, never truncated`, async () => {
+  test(`R2 an intermediate page with ${label} parks deterministically, never truncated`, async () => {
     await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
       await seedEventsThroughAccept(makeIo, rawDb, 2);
       const before = await loadProjectionHead(io.db, SCOPE_A);
@@ -815,11 +828,16 @@ for (const [label, reducer, note] of [
         "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' LIMIT 1"
       ).first("task_id");
       await dispatchOne({ io: makeIo(), taskId: pageTask, owner: "dispatch", now: NOW });
-      await assert.rejects(
-        () => continueBuild({ io: makeIo(), taskId: pageTask, owner: "builder", now: NOW, reducer }),
-        (error) => error.code === "changes_too_large",
-        `(${binding}) the ${note} cap must be a hard refusal`
-      );
+      // G2-R1: the ${note} cap is a deterministic class-D close-out — parked
+      // with a stable reason instead of thrown past the error boundary.
+      const result = await continueBuild({ io: makeIo(), taskId: pageTask, owner: "builder", now: NOW, reducer });
+      assert.equal(result.outcome, "needs_attention",
+        `(${binding}) the ${note} cap must park: ${JSON.stringify(result)}`);
+      assert.equal(result.code, "changes_too_large");
+      const parkedTask = await rawDb.prepare("SELECT state, failure_count FROM rds2_tasks WHERE task_id = ?")
+        .bind(pageTask).first();
+      assert.equal(parkedTask.state, "needs_attention", `(${binding}) parked for a human`);
+      assert.equal(Number(parkedTask.failure_count), 0, `(${binding}) deterministic errors never count`);
       const after = await loadProjectionHead(io.db, SCOPE_A);
       assert.equal(after.revision, before.revision, `(${binding}) nothing is committed`);
       const staged = await rawDb.prepare(
@@ -828,7 +846,7 @@ for (const [label, reducer, note] of [
       assert.equal(staged, 0, `(${binding}) an oversized page must not be partially staged`);
       const stage = await rawDb.prepare("SELECT stage FROM rds2_projection_builds WHERE build_id = ?")
         .bind(build.build_id).first("stage");
-      assert.equal(stage, "scanning", `(${binding}) the build survives for a corrected retry`);
+      assert.equal(stage, "scanning", `(${binding}) the build survives for a corrected replay`);
     });
   });
 }
@@ -1925,5 +1943,124 @@ test("F2 the measured build-page budget account matches the design account", asy
     assert.ok(booked.available_at > NOW,
       `(${binding}) the retry is backed off, not immediate: ${booked.available_at}`);
     assert.equal(failingBuild.stage, "scanning", `(${binding}) the build survives for the retry`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G2 F2-R1 (2026-09-07 implementation review): the classified close-out must
+// cover the WHOLE post-lease lifecycle. The review reproduced a fault in the
+// staging SELECT escaping builds.js entirely (task stuck in processing,
+// failure_count = 0); the same gap existed for the page read and the head
+// load. Every case below fails a read BELOW wrapD1, so the fault lands where
+// a real one would.
+// ---------------------------------------------------------------------------
+
+// Intercepts one SQL fragment at the native driver level. Only SELECT reads
+// are trapped; batches and writes pass through untouched.
+function dbReadFailingOn(rawDb, matchSql, message = "storage_fault_read_probe") {
+  return {
+    prepare: (sql) => {
+      const native = rawDb.prepare(sql);
+      if (sql.includes(matchSql)) {
+        const trap = () => {
+          const error = new Error(message);
+          error.code = "ERR_SQLITE_ERROR";
+          error.errcode = 1;
+          throw error;
+        };
+        return {
+          bind: () => ({ first: trap, all: trap, run: trap }),
+          first: trap,
+          all: trap,
+          run: trap
+        };
+      }
+      return native;
+    },
+    batch: (statements) => rawDb.batch(statements)
+  };
+}
+
+// Creates one accepted event plus its running build and returns the pending
+// build-page task id.
+async function seedBuildPageTask(makeIo, rawDb) {
+  await seedEventsThroughAccept(makeIo, rawDb, 1, { project: false });
+  const head = await loadProjectionHead(rawDb, SCOPE_A);
+  await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: head.revision, now: NOW });
+  return rawDb.prepare(
+    "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' ORDER BY created_at, task_id LIMIT 1"
+  ).first("task_id");
+}
+
+const F2_LIFECYCLE_FAULTS = [
+  ["the head load", "SELECT revision, last_event_seq, active_generation, building, summary_json"],
+  ["the event page read", "SELECT event_seq, event_id, event_key, event_type, user_id, envelope_json"],
+  ["the staging read", "SELECT row_key, value_json FROM rds2_projection_rows"]
+];
+
+for (const [stage, matchSql] of F2_LIFECYCLE_FAULTS) {
+  test(`F2-R1 a fault in ${stage} is classified and counted, never escapes the build`, async () => {
+    await runProjectionTest(async ({ binding, rawDb, makeIo }) => {
+      const logged = [];
+      const pageTask = await seedBuildPageTask(makeIo, rawDb);
+      const faultedIo = createInvocationIo({
+        db: dbReadFailingOn(rawDb, matchSql),
+        queues: { RDS2_PROJECTION_QUEUE: { send: async () => {} }, RDS2_ARCHIVE_QUEUE: { send: async () => {} } },
+        fetchImpl: async () => new Response("{}", { status: 200 }),
+        limit: PROJECTION_LIMIT,
+        log: (line) => logged.push(line)
+      });
+      await dispatchOne({ io: makeIo(), taskId: pageTask, owner: "dispatch", now: NOW });
+      // Before the fix the RAW error propagated out of continueBuild and the
+      // task stayed processing with failure_count = 0.
+      const result = await continueBuild({
+        io: faultedIo, taskId: pageTask, owner: "builder", now: NOW, reducer: algorithmReducer
+      });
+      assert.equal(result.outcome, "retry",
+        `(${binding}) a transient read fault must be closed out by class: ${JSON.stringify(result)}`);
+      assert.equal(result.code, "deferred_commit_failed");
+      const task = await rawDb.prepare(
+        "SELECT state, failure_count, available_at FROM rds2_tasks WHERE task_id = ?"
+      ).bind(pageTask).first();
+      assert.equal(task.state, "pending", `(${binding}) the task must not stay in processing`);
+      assert.equal(Number(task.failure_count), 1, `(${binding}) the fault must be counted`);
+      assert.ok(task.available_at > NOW, `(${binding}) the retry must back off`);
+      // The sanitized close-out log: one line, closed-set fields, no raw text.
+      assert.equal(logged.length, 1, `(${binding}) one structured line, got ${JSON.stringify(logged)}`);
+      const entry = JSON.parse(logged[0]);
+      assert.deepEqual(Object.keys(entry).sort(),
+        ["at", "class", "code", "event", "outcome", "taskId"]);
+      assert.equal(entry.class, "C");
+      assert.ok(!logged[0].includes("storage_fault_read_probe"),
+        `(${binding}) the raw error message must never reach the log`);
+      // The build itself survives: the fault was transient, the next page
+      // invocation retries the same page.
+      const build = await rawDb.prepare(
+        "SELECT stage FROM rds2_projection_builds WHERE stage IN ('scanning', 'activating')"
+      ).first("stage");
+      assert.equal(build, "scanning", `(${binding}) a transient fault must not abort the build`);
+    });
+  });
+}
+
+test("F2-R1 a fault in the projection head load is counted on the incremental path too", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    const { eventSeqs } = await seedScope(rawDb, { userId: USER_A, eventKeys: ["e-1"] });
+    const taskId = `task-11-${eventSeqs[0]}`;
+    const faultedIo = createInvocationIo({
+      db: dbReadFailingOn(rawDb, "SELECT revision, last_event_seq, active_generation, building, summary_json"),
+      queues: { RDS2_PROJECTION_QUEUE: { send: async () => {} }, RDS2_ARCHIVE_QUEUE: { send: async () => {} } },
+      fetchImpl: async () => new Response("{}", { status: 200 }),
+      limit: PROJECTION_LIMIT
+    });
+    await dispatchOne({ io: faultedIo, taskId, owner: "dispatch", now: NOW });
+    const result = await projectOne({ io: faultedIo, taskId, owner: "c1", now: NOW, reducer: testReducer() });
+    assert.equal(result.outcome, "retry",
+      `(${binding}) ${JSON.stringify(result)}`);
+    assert.equal(result.code, "deferred_commit_failed");
+    const task = await rawDb.prepare("SELECT state, failure_count FROM rds2_tasks WHERE task_id = ?")
+      .bind(taskId).first();
+    assert.equal(task.state, "pending");
+    assert.equal(Number(task.failure_count), 1, `(${binding}) the post-lease load must be inside the boundary`);
   });
 });

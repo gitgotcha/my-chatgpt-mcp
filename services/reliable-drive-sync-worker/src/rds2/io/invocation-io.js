@@ -77,11 +77,17 @@ export function wrapFetch(fetchImpl, budget) {
   };
 }
 
-export function createInvocationIo({ db, queues = {}, fetchImpl, limit }) {
+// `log` is the optional structured-logger sink (a (line: string) => void).
+// Close-outs emit exactly one sanitized line per SUCCESSFUL persisted
+// transition; the sink stays out of the budget (logging is not an outbound
+// sub-request). Production entry points pass their real logger; tests pass a
+// collector. Unset means logging is skipped, never thrown.
+export function createInvocationIo({ db, queues = {}, fetchImpl, limit, log = null }) {
   if (!db) throw new Error("missing_db_binding");
   const budget = createBudget(limit);
   return Object.freeze({
     budget,
+    log,
     db: wrapD1(db, budget),
     queues: Object.freeze(Object.fromEntries(
       Object.entries(queues).map(([name, queue]) => [name, wrapQueue(queue, budget)])

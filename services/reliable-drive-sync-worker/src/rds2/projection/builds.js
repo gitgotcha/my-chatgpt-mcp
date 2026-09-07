@@ -183,6 +183,16 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
   const lease = await claimForProcessing({ db: io.db, taskId, owner, now });
   if (!lease) return stepResult("noop", taskId, "not_claimable");
   const scope = lease.scope;
+  // G2-R1 (2026-09-07 implementation review): EVERYTHING after the lease
+  // lives inside ONE error boundary. Before this, a storage fault in the
+  // head load, the page read, the staging read or the reducer escaped
+  // continueBuild entirely — the task stayed in processing with a zero
+  // failure count until its lease simply expired. Budget gates stay OUTSIDE
+  // the boundary where they were (they return, they never throw), and the
+  // lease claim itself stays outside too: without a lease there is nothing
+  // to close out and no state may be fabricated.
+  let build = null;
+  const runLeased = async () => {
   // Page tasks bind their build: the authoritative build row is loaded by the
   // task's payload buildId, never by "whatever is currently running".
   const taskRow = await getTask(io.db, taskId);
@@ -190,7 +200,7 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
     try { return JSON.parse(taskRow?.payload_json ?? "{}")?.buildId ?? null; }
     catch { return null; }
   })();
-  const build = boundBuildId
+  build = boundBuildId
     ? await io.db.prepare(
         `SELECT build_id, base_revision, target_event_seq, stage, staging_generation, continuation_json
          FROM rds2_projection_builds WHERE build_id = ?`
@@ -337,8 +347,7 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
     return releaseForBudget({ db: io.db, lease, now, taskId });
   }
 
-  try {
-    // Every non-empty page — mid-build OR final — stages its rows and freezes
+  // Every non-empty page — mid-build OR final — stages its rows and freezes
     // an auditable build package with its own archive task. The activation
     // itself only switches the generation and carries the manifest plus the
     // final summary, so offline replay can rebuild from packages alone.
@@ -516,21 +525,29 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
     await io.db.batch(statements);
     if (!done) return stepResult("continued", taskId, "build_page_staged");
     return stepResult("completed", taskId, "build_activated");
+  };
+  try {
+    return await runLeased();
   } catch (error) {
-    if (error?.code === "changes_too_large" || error?.code === "commit_batch_too_large") throw error;
     // G2-F2: a storage fault is no longer blanket-deferred at availableAt=now.
     // The error is translated to its specific marker once, then closed out by
-    // class: a lease/CAS conflict re-checks the authoritative state (never
-    // claiming success without it), a transient fault counts and backs off,
-    // and a deterministic contract error parks with a stable reason instead of
-    // retrying forever.
+    // class: budget exhaustion is a normal wait (A), a lease/CAS conflict
+    // re-checks the authoritative state (never claiming success without it),
+    // a transient fault counts and backs off, and a deterministic contract or
+    // size error parks with a stable reason instead of retrying forever.
+    // G2-R1: size/contract errors (changes_too_large, commit_batch_too_large,
+    // build_state_too_large, ...) no longer escape the boundary — an escaped
+    // error left the task in processing for the recovery pass to re-claim
+    // forever. Until the build row is loaded there is nothing to re-verify:
+    // passing no verify hook keeps class B honest (lease_lost, and no
+    // fabricated completion).
     return closeOutFailure({
       io,
       lease,
       now,
       taskId,
       error,
-      verifyAuthoritative: () => verifyBuildActivated({ db: io.db, scope, build })
+      verifyAuthoritative: build ? () => verifyBuildActivated({ db: io.db, scope, build }) : null
     });
   }
 }

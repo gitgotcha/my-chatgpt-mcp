@@ -25,7 +25,14 @@ export async function projectOne({ io, taskId, owner, now, reducer, lease = null
   const activeLease = lease ?? await claimForProcessing({ db: io.db, taskId, owner, now });
   if (!activeLease) return stepResult("noop", taskId, "not_claimable");
   const scope = activeLease.scope;
-
+  // G2-R1 (2026-09-07 implementation review): EVERYTHING after the lease
+  // lives inside ONE error boundary — the head load, the convergence probe,
+  // the event fetch, the predecessor probe, the reducer reads and plan, and
+  // ensureBuild used to run OUTSIDE the commit try, so a fault there escaped
+  // projectOne and left the task in processing, uncounted, until the lease
+  // expired. Without a lease (the claim itself fails) there is nothing to
+  // close out and no state may be fabricated, so that part stays outside.
+  const runLeased = async () => {
   const head = await loadProjectionHead(io.db, scope);
   // Already-applied event: converge the stale task without touching the
   // reducer, the revision or the archive — exactly-once business effect with
@@ -88,22 +95,25 @@ export async function projectOne({ io, taskId, owner, now, reducer, lease = null
     return stepResult("retry", taskId, "rebuild_started");
   }
 
+  await commitProjection({
+    io, lease: activeLease, baseRevision: head.revision,
+    activeGeneration: head.activeGeneration,
+    changes: { rowChanges: plan.rowChanges, summary: plan.summary, eventSeq: activeLease.eventSeq },
+    now
+  });
+  return stepResult("completed", taskId, null);
+  };
   try {
-    await commitProjection({
-      io, lease: activeLease, baseRevision: head.revision,
-      activeGeneration: head.activeGeneration,
-      changes: { rowChanges: plan.rowChanges, summary: plan.summary, eventSeq: activeLease.eventSeq },
-      now
-    });
-    return stepResult("completed", taskId, null);
+    return await runLeased();
   } catch (error) {
-    // A reducer that exceeds the bounded commit limits is a programming
-    // error: it must never be truncated and never silently deferred.
-    if (error?.code === "changes_too_large" || error?.code === "commit_batch_too_large") throw error;
-    // G2-F2: classified exactly like the build path. A racing commit is not a
-    // real failure (and must not be reported as success without checking the
-    // authoritative state); a transient fault counts and backs off; a
-    // deterministic contract error parks instead of deferring forever.
+    // G2-F2/R1: classified exactly like the build path — including the
+    // deterministic size/contract codes (changes_too_large,
+    // commit_batch_too_large, ...), which now PARK instead of escaping past
+    // the boundary for the recovery pass to re-claim forever. A racing
+    // commit is not a real failure (and must not be reported as success
+    // without checking the authoritative state); a transient fault counts
+    // and backs off; a deterministic contract error parks instead of
+    // deferring forever.
     return closeOutFailure({
       io,
       lease: activeLease,

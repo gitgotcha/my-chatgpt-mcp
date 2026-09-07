@@ -171,6 +171,56 @@ test("F2 an unrecognised storage error falls through to bounded retry (class C)"
   }
 });
 
+test("F2-R1 internal deterministic codes are class D, never a blind retry", () => {
+  // These codes are thrown by our OWN modules (staging-read.js, builds.js,
+  // commit.js, invocation-io.js): they are closed-set, deterministic contract
+  // or size errors. The 2026-09-07 implementation review reproduced all three
+  // named codes falling through to C/storage_error — that hid them behind
+  // endless retries instead of parking.
+  for (const code of [
+    "build_state_too_large",
+    "build_read_limit_exceeded",
+    "build_read_kind_rejected",
+    "build_read_key_invalid",
+    "build_continuation_invalid",
+    "invalid_page_size",
+    "changes_too_large",
+    "commit_batch_too_large",
+    "unsupported_algorithm_event"
+  ]) {
+    const result = classifyStorageError({ error: { message: code, code } });
+    assert.equal(result.class, "D", `${code} must be deterministic`);
+    assert.equal(result.code, code, `${code} must keep its specific code`);
+    assert.equal(result.marker, null);
+    assert.equal(result.column, null);
+  }
+});
+
+test("F2-R1 budget_exhausted keeps the approved A semantics (no parking)", () => {
+  // The approved plan's three-way split: entering a stage without room is a
+  // normal wait (A); only a close-out without booking room is E. Parking on
+  // budget exhaustion would be "park everything" again.
+  const result = classifyStorageError({ error: { message: "budget_exhausted", code: "budget_exhausted" } });
+  assert.equal(result.class, "A");
+  assert.equal(result.code, "budget_exhausted");
+});
+
+test("F2-R1 an internal code wins over decoy text and is not confused with driver codes", () => {
+  // The internal code is the trusted closed-set signal: raw text around it
+  // (which may legitimately quote table or guard names) must not override it.
+  const decoy = classifyStorageError({
+    error: { message: "invalid_page_size near stale_task_write", code: "invalid_page_size" }
+  });
+  assert.equal(decoy.class, "D");
+  assert.equal(decoy.code, "invalid_page_size");
+
+  // A driver-level code (ERR_SQLITE_ERROR) is NOT an internal code: it must
+  // still go through text extraction.
+  const driver = classifyStorageError({ error: SQLITE_TRIGGER("stale_task_write") });
+  assert.equal(driver.class, "B");
+  assert.equal(driver.code, "lease_conflict");
+});
+
 // ------------------------------------------------------------------ hygiene
 
 test("F2 the classification result carries no raw message, SQL or parameters", () => {

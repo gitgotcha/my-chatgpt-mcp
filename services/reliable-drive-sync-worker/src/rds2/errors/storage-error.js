@@ -28,6 +28,25 @@ const TRIGGER_MARKERS = Object.freeze([
   "build_requires_building_flag"
 ]);
 
+// G2-R1: codes thrown by our OWN modules are closed-set and deterministic,
+// contract or size errors. They must be class D (park with a stable reason),
+// never the blind bounded retry: parking is what stops a doomed task from
+// being re-claimed forever. The review reproduced all three named codes
+// falling through to C/storage_error.
+const INTERNAL_DETERMINISTIC_CODES = Object.freeze([
+  "build_state_too_large",
+  "build_read_limit_exceeded",
+  "build_read_kind_rejected",
+  "build_read_key_invalid",
+  "build_continuation_invalid",
+  "invalid_page_size",
+  "changes_too_large",
+  "commit_batch_too_large",
+  // A reducer refusing an event type it cannot interpret is deterministic:
+  // retrying only burns the backoff schedule before parking anyway.
+  "unsupported_algorithm_event"
+]);
+
 function textOf(error) {
   if (!error || typeof error !== "object") return "";
   const parts = [error.message, error.errstr];
@@ -64,10 +83,13 @@ export function extractStorageMarker(error) {
 /**
  * Classify a storage error into one of the plan's classes.
  *
- *   B — lease/CAS conflict: no real failure counted, but the caller must NOT
+ *   A - budget exhaustion: a normal wait, never counted, never parked.
+ *       (Stage entry is gated by the budget reserve; this class only fires
+ *       when the ledger itself refused a consume mid-stage.)
+ *   B - lease/CAS conflict: no real failure counted, but the caller must NOT
  *       report success without re-checking authoritative state.
- *   C — transient storage fault: bounded retry (count, backoff, park at 5).
- *   D — deterministic contract/size error: park with a stable reason, never
+ *   C - transient storage fault: bounded retry (count, backoff, park at 5).
+ *   D - deterministic contract/size error: park with a stable reason, never
  *       deferred forever.
  *
  * @param {object}  options
@@ -76,9 +98,22 @@ export function extractStorageMarker(error) {
  * @param {boolean} [options.context.buildStartCasFailed] whether the CAS that
  *        sets building=1 lost the race. Only then is
  *        `build_requires_building_flag` a race rather than a broken invariant.
- * @returns {{class: "B"|"C"|"D", code: string, marker: string|null, column: string|null}}
+ * @returns {{class: "A"|"B"|"C"|"D", code: string, marker: string|null, column: string|null}}
  */
 export function classifyStorageError({ error, context = {} } = {}) {
+  // Internal codes are the trusted signal and are checked FIRST: they are our
+  // own closed-set vocabulary, while the surrounding message text may
+  // legitimately quote guard names, table names or driver prefixes.
+  const internalCode = error && typeof error === "object" && typeof error.code === "string"
+    ? error.code
+    : null;
+  if (internalCode && INTERNAL_DETERMINISTIC_CODES.includes(internalCode)) {
+    return { class: "D", code: internalCode, marker: null, column: null };
+  }
+  if (internalCode === "budget_exhausted") {
+    return { class: "A", code: "budget_exhausted", marker: null, column: null };
+  }
+
   const found = extractStorageMarker(error);
 
   if (found.kind === "trigger") {
