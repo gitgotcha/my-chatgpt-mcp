@@ -1773,3 +1773,113 @@ test("F2 a lease conflict during the commit is never counted as a real failure",
     assert.equal(Number(after.failure_count), 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// G2-F2 (§5.3): the budget account is MEASURED, not estimated. These tests
+// trace budget.snapshot() of a real build-page invocation on both bindings and
+// pin the exact numbers the design account (plan §5.1) predicted.
+// ---------------------------------------------------------------------------
+test("F2 the measured build-page budget account matches the design account", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    // Three learning events produce 12 row changes (topic/evidence/problem/
+    // topic_problem each), safely inside the 20-row commit bound — so this
+    // page consumes everything and activates in place.
+    await seedEventsThroughAccept(makeIo, rawDb, 3);
+    const before = await loadProjectionHead(io.db, SCOPE_A);
+    await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: before.revision, now: NOW });
+    const pageTask = await rawDb.prepare(
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' LIMIT 1"
+    ).first("task_id");
+
+    // --- the activation page: one invocation, fully traced
+    const pageIo = makeIo();
+    await dispatchOne({ io: makeIo(), taskId: pageTask, owner: "dispatch", now: NOW });
+    const result = await continueBuild({
+      io: pageIo, taskId: pageTask, owner: "builder", now: NOW, reducer: algorithmReducer
+    });
+    assert.equal(result.outcome, "completed", `(${binding}) ${JSON.stringify(result)}`);
+    const snapshot = pageIo.budget.snapshot();
+    console.log(`BUDGET-TRACE[${binding}] activation used=${snapshot.used} ` +
+      `entries=${JSON.stringify(snapshot.entries)}`);
+    // Every sub-request of a build page is a D1 execution: no queue send and
+    // no HTTP fetch happens inside continueBuild.
+    assert.ok(snapshot.entries.every((entry) => entry.category === "d1"),
+      `(${binding}) a build page only spends D1 sub-requests: ${JSON.stringify(snapshot.entries)}`);
+    // Measured (plan §5.3): load 4 (claim + task + build row + head)
+    //   + firstPage 1 (MIN) + pageRead 1 + stagedReads 2 (topic chunk + problem
+    //   chunk for three distinct keys each) + commit 1 = 9.
+    assert.equal(snapshot.used, 9,
+      `(${binding}) the measured activation-page account changed — re-derive §5.1`);
+
+    // --- the failure close-out, measured against the SAME business account.
+    // Two builds seeded with the same event shape, differing ONLY in whether
+    // the commit batch succeeds: the difference is exactly the close-out.
+    await seedEventsThroughAccept(makeIo, rawDb, 2, { idOffset: 900, project: false });
+    const laterHead = await loadProjectionHead(io.db, SCOPE_A);
+    await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: laterHead.revision, now: NOW });
+    const firstBuildTask = await rawDb.prepare(
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' " +
+      "ORDER BY created_at, task_id LIMIT 1"
+    ).first("task_id");
+    await dispatchOne({ io: makeIo(), taskId: firstBuildTask, owner: "dispatch", now: NOW });
+    const healthyIo = makeIo();
+    const healthy = await continueBuild({
+      io: healthyIo, taskId: firstBuildTask, owner: "builder", now: NOW, reducer: algorithmReducer
+    });
+    assert.equal(healthy.outcome, "completed", `(${binding}) ${JSON.stringify(healthy)}`);
+    const healthyUsed = healthyIo.budget.snapshot().used;
+
+    await seedEventsThroughAccept(makeIo, rawDb, 2, { idOffset: 950, project: false });
+    const secondHead = await loadProjectionHead(io.db, SCOPE_A);
+    const failingBuild = await ensureBuild({
+      db: rawDb, scope: SCOPE_A, baseRevision: secondHead.revision, now: NOW
+    });
+    const failingTask = await rawDb.prepare(
+      "SELECT task_id FROM rds2_tasks WHERE type = 'projection_build' AND state = 'pending' " +
+      "ORDER BY created_at DESC, task_id LIMIT 1"
+    ).first("task_id");
+    const probeIo = makeIo();
+    const probeInner = probeIo.db;
+    let usedAtCommit = null;
+    const failingIo = {
+      ...probeIo,
+      db: {
+        prepare: (sql) => probeInner.prepare(sql),
+        batch: async () => {
+          // Mimic wrapD1 exactly: the sub-request is consumed BEFORE the call
+          // is issued, so a FAILING commit still spends its statement.
+          usedAtCommit = probeIo.budget.snapshot().used;
+          probeIo.budget.consume("d1");
+          throw new Error("storage_unavailable");
+        }
+      }
+    };
+    await dispatchOne({ io: makeIo(), taskId: failingTask, owner: "dispatch", now: NOW });
+    const failed = await continueBuild({
+      io: failingIo, taskId: failingTask, owner: "builder", now: NOW, reducer: algorithmReducer
+    });
+    assert.equal(failed.outcome, "retry", `(${binding}) ${JSON.stringify(failed)}`);
+    assert.equal(failed.code, "deferred_commit_failed", `(${binding}) ${JSON.stringify(failed)}`);
+    const failedUsed = failingIo.budget.snapshot().used;
+    // The failed commit STILL spent its sub-request (consume before issue):
+    // the business account up to and including the commit matches the healthy
+    // invocation exactly.
+    assert.equal(usedAtCommit + 1, healthyUsed,
+      `(${binding}) a failed commit is still accounted: ${usedAtCommit}+1 vs ${healthyUsed}`);
+    // failTask = getTask (1) + conditional UPDATE (1): the reserved two
+    // statements are exactly what the class-C close-out spends.
+    assert.equal(failedUsed, healthyUsed + 2,
+      `(${binding}) the class-C close-out must cost exactly the reserved two statements ` +
+      `(${failedUsed} vs ${healthyUsed})`);
+    assert.ok(failedUsed <= 24,
+      `(${binding}) even with the close-out the invocation stays inside the quota`);
+    const booked = await rawDb.prepare(
+      "SELECT state, failure_count, available_at FROM rds2_tasks WHERE task_id = ?"
+    ).bind(failingTask).first();
+    assert.equal(booked.state, "pending", `(${binding}) a real failure goes back to the queue`);
+    assert.equal(Number(booked.failure_count), 1, `(${binding}) and it IS counted`);
+    assert.ok(booked.available_at > NOW,
+      `(${binding}) the retry is backed off, not immediate: ${booked.available_at}`);
+    assert.equal(failingBuild.stage, "scanning", `(${binding}) the build survives for the retry`);
+  });
+});
