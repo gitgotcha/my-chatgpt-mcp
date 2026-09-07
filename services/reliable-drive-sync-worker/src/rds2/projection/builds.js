@@ -16,6 +16,23 @@ import { hashText } from "../identity/hashing.js";
 export const BUILD_PAGE_SIZE = 50;
 export const MAX_BUILD_PAGE_SIZE = 50;
 
+// G2-F1-R1: build state (the saved continuation and the activation summary)
+// is byte-checked BEFORE the transaction against the same limit the storage
+// CHECK enforces (65536 bytes). A row value that could never be committed
+// must surface as one deterministic class-D code instead of a driver-level
+// CHECK violation inside a rolled-back batch.
+export const MAX_BUILD_STATE_BYTES = 64 * 1024;
+
+function assertBuildStateBounded(part, value) {
+  const bytes = new TextEncoder().encode(canonicalJson(value ?? null)).length;
+  if (bytes > MAX_BUILD_STATE_BYTES) {
+    const error = new Error("build_state_too_large");
+    error.code = "build_state_too_large";
+    error.part = part;
+    throw error;
+  }
+}
+
 // Page size is a bounded parameter, never an unbounded caller knob.
 export function validatePageSize(pageSize) {
   const value = pageSize === undefined ? BUILD_PAGE_SIZE : Number(pageSize);
@@ -401,6 +418,9 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
       firstEventSeq: continuation.firstEventSeq,
       summary: (pageResult ? pageResult.summary : null) ?? continuation.summary ?? null
     };
+    // G2-F1-R1: measured before the transaction — a continuation the storage
+    // CHECK could never accept must fail HERE, deterministically.
+    assertBuildStateBounded("continuation", savedContinuation);
     const statements = [
       io.db.prepare(
         `INSERT INTO rds2_commit_guards (guard_id, task_id, owner, expected_epoch, now_utc, expected_revision, created_at)
@@ -437,6 +457,7 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
       // The activation delta itself carries the build manifest and the final
       // summary; its changes are empty because every page's rows are already
       // frozen in build packages.
+      assertBuildStateBounded("summary", savedContinuation.summary ?? head.summary);
       const activationDelta = buildDelta({
         scope,
         baseRevision: head.revision,

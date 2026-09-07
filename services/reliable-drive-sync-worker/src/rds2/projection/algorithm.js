@@ -239,14 +239,21 @@ export const algorithmReducer = {
   buildPage({ events, continuation, staged = null }) {
     const topics = new Map(staged?.topic ?? []);
     const problems = new Map(staged?.problem ?? []);
+    // G2-F1-R1: the summary is the SINGLE authoritative representation.
+    // The accumulators recover from it (the legacy top-level fields stay as
+    // a fallback for continuations written before this change) and the
+    // continuation returned below carries only bounded scalars, so a long
+    // topic string appears at most twice (currentTopic + latest.topic)
+    // instead of three times.
+    const authoritative = continuation.summary ?? null;
     const accumulators = {
-      counts: continuation.counts ?? { attempts: 0, negative: 0, positive: 0, neutral: 0 },
+      counts: authoritative?.counts ?? continuation.counts ?? { attempts: 0, negative: 0, positive: 0, neutral: 0 },
       stagedCount: continuation.stagedCount ?? 0,
       nextEventSeq: continuation.nextEventSeq,
       page: continuation.page ?? 1,
-      latest: continuation.latest ?? null,
-      headIdentity: continuation.headIdentity ?? null,
-      lastReceivedEventId: continuation.lastReceivedEventId ?? null
+      latest: authoritative?.latest ?? continuation.latest ?? null,
+      headIdentity: authoritative?.identity ?? continuation.headIdentity ?? null,
+      lastReceivedEventId: authoritative?.lastReceivedEventId ?? continuation.lastReceivedEventId ?? null
     };
     const rowChanges = [];
     let processed = 0;
@@ -359,16 +366,15 @@ export const algorithmReducer = {
     return {
       rowChanges,
       summary,
-      // Only bounded scalars ride in the continuation: no per-topic or
-      // per-problem dictionary, so its size no longer depends on history.
+      // G2-F1-R1: ONLY bounded scalars ride in the continuation. The
+      // summary (persisted alongside by builds.js) is the single
+      // authoritative representation of counts/latest/identity, so no
+      // long string can ride a third time at the top level and wedge
+      // the continuation_json limit.
       continuation: {
         nextEventSeq,
         stagedCount: accumulators.stagedCount + consumed.length,
-        page: (continuation.page ?? 1) + 1,
-        counts: accumulators.counts,
-        latest: accumulators.latest,
-        headIdentity: accumulators.headIdentity,
-        lastReceivedEventId: accumulators.lastReceivedEventId
+        page: (continuation.page ?? 1) + 1
       }
     };
   }

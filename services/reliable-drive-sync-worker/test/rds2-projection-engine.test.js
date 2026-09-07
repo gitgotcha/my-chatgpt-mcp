@@ -1598,9 +1598,12 @@ test("F1 the continuation carries no accumulated topic or problem dictionary", a
         `head inside summary, got ${JSON.stringify(parsed)}`);
     }
     for (const key of Object.keys(parsed)) {
+      // G2-F1-R1: the closed key set — the legacy top-level accumulators
+      // (counts/latest/headIdentity/lastReceivedEventId) are no longer
+      // allowed anywhere in the continuation; the summary is the single
+      // authoritative representation.
       assert.ok(
-        ["nextEventSeq", "stagedCount", "page", "firstEventSeq", "summary",
-          "counts", "latest", "headIdentity", "lastReceivedEventId"].includes(key),
+        ["nextEventSeq", "stagedCount", "page", "firstEventSeq", "summary"].includes(key),
         `(${binding}) unexpected continuation field: ${key}`
       );
     }
@@ -2062,5 +2065,189 @@ test("F2-R1 a fault in the projection head load is counted on the incremental pa
       .bind(taskId).first();
     assert.equal(task.state, "pending");
     assert.equal(Number(task.failure_count), 1, `(${binding}) the post-lease load must be inside the boundary`);
+  });
+});
+
+// ---- G2-F1-R1: one authoritative summary + the pre-transaction byte bound ----
+
+const CONTINUATION_KEYS = ["firstEventSeq", "nextEventSeq", "page", "stagedCount", "summary"];
+
+function longTopic(n) {
+  return `long-topic-${"x".repeat(n)}`;
+}
+
+// Seeds algorithm learning events with a controlled topic length directly
+// into the schema. acceptEvent is deliberately bypassed: its envelope budget
+// is an INGESTION guard, not a replay-fixture constraint, and these cases
+// must reach the build layer at full topic size.
+async function seedLongTopicEvents(rawDb, { count, topicLength }) {
+  const topic = longTopic(topicLength);
+  await rawDb.prepare(
+    `INSERT INTO rds2_projections (user_id, namespace, projection_name, revision, last_event_seq,
+       active_generation, building, summary_json, updated_at)
+     VALUES (?, 'algorithm', 'learning', 0, 0, 0, 0, NULL, ?)
+     ON CONFLICT (user_id, namespace, projection_name) DO NOTHING`
+  ).bind(USER_A, NOW).run();
+  for (let index = 1; index <= count; index += 1) {
+    const eventId = `73000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+    const envelope = {
+      schemaVersion: "1.2",
+      namespace: "algorithm",
+      eventType: "algorithm.learning.completed",
+      identity: { username: NAME, userId: USER_A },
+      payload: {
+        event: {
+          schemaVersion: "1.2",
+          eventType: "algorithm.learning.completed",
+          eventId,
+          eventKey: `r2-long-${index}`,
+          userId: USER_A,
+          username: NAME,
+          observedAt: `2026-09-06T${String(index % 24).padStart(2, "0")}:00:00.000Z`,
+          source: "qa",
+          topic,
+          problem: { title: "P", source: "S", url: "" },
+          outcome: "consulted",
+          evidence: "e",
+          tags: [],
+          confidence: "medium"
+        }
+      },
+      requestId: `req-long-${index}`
+    };
+    const inserted = await rawDb.prepare(
+      `INSERT INTO rds2_events (user_id, namespace, projection_name, event_id, event_key, event_type,
+         created_by_request, envelope_json, content_hash, created_at)
+       VALUES (?, 'algorithm', 'learning', ?, ?, 'algorithm.learning.completed', 'seed', ?, 'c', ?)`
+    ).bind(USER_A, eventId, `r2-long-${index}`, JSON.stringify(envelope), NOW).run();
+    const eventSeq = Number(inserted.meta.last_row_id);
+    await rawDb.prepare(
+      `INSERT INTO rds2_tasks (task_id, type, user_id, namespace, projection_name, event_seq, state,
+         available_at, created_at, updated_at)
+       VALUES (?, 'projection', ?, 'algorithm', 'learning', ?, 'pending', ?, ?, ?)`
+    ).bind(`task-long-${eventSeq}`, USER_A, eventSeq, NOW, NOW, NOW).run();
+  }
+  return { topic };
+}
+
+test("F1-R1 a 23000-char topic completes a build with the summary as the only authoritative copy", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    const { topic } = await seedLongTopicEvents(rawDb, { count: 2, topicLength: 23000 });
+    const head = await loadProjectionHead(io.db, SCOPE_A);
+    await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: head.revision, now: NOW });
+    // Before F1-R1 the topic rode THREE times (the top-level latest plus the
+    // two summary fields) and the continuation_json CHECK rejected the page
+    // commit; with the fix it rides exactly twice and the build completes.
+    const last = await drainBuildPages(makeIo, rawDb, { pageSize: 1 });
+    assert.equal(last.outcome, "completed", `(${binding}) the build activates: ${JSON.stringify(last)}`);
+    const built = await loadProjectionHead(io.db, SCOPE_A);
+    assert.equal(built.summary.currentTopic, topic, `(${binding}) the elected head carries the long topic`);
+    assert.equal(built.summary.latest.topic, topic, `(${binding}) the sort key keeps the topic`);
+    assert.equal(built.summary.counts.attempts, 2, `(${binding}) both events count`);
+    assert.equal(built.revision, head.revision + 1, `(${binding}) exactly one activation revision`);
+  });
+});
+
+test("F1-R1 the mid-build continuation carries the closed key set and the topic only inside the summary", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    const { topic } = await seedLongTopicEvents(rawDb, { count: 2, topicLength: 23000 });
+    const head = await loadProjectionHead(io.db, SCOPE_A);
+    await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: head.revision, now: NOW });
+    const pageOne = await runOneBuildPage(makeIo, rawDb, { pageSize: 1 });
+    assert.equal(pageOne.outcome, "continued", `(${binding}) the first page stages: ${JSON.stringify(pageOne)}`);
+    const continuationJson = await rawDb.prepare(
+      "SELECT continuation_json FROM rds2_projection_builds WHERE stage = 'scanning'"
+    ).first("continuation_json");
+    assert.ok(continuationJson, `(${binding}) the continuation must be persisted between pages`);
+    const parsed = JSON.parse(continuationJson);
+    assert.deepEqual(Object.keys(parsed).sort(), [...CONTINUATION_KEYS].sort(),
+      `(${binding}) the continuation carries the closed key set, got ${JSON.stringify(Object.keys(parsed))}`);
+    assert.equal(parsed.stagedCount, 1, `(${binding}) the scalar progress counts the consumed prefix`);
+    const { summary, ...scalars } = parsed;
+    assert.ok(!JSON.stringify(scalars).includes(topic),
+      `(${binding}) the long topic must ride ONLY inside the summary`);
+    assert.equal(summary.currentTopic, topic, `(${binding}) the summary elects the head`);
+    assert.equal(summary.latest.topic, topic, `(${binding}) the summary keeps the sort key`);
+    assert.equal(summary.counts.attempts, 1, `(${binding}) the summary is the authoritative accumulator`);
+    assert.ok(Buffer.byteLength(continuationJson, "utf8") <= 65536,
+      `(${binding}) the continuation must fit the storage CHECK`);
+    // And the summarized continuation still drives the build home.
+    const last = await drainBuildPages(makeIo, rawDb, { pageSize: 1 });
+    assert.equal(last.outcome, "completed", `(${binding}) the build activates: ${JSON.stringify(last)}`);
+  });
+});
+
+// A minimal reducer that reproduces the summary-shape risk in isolation: the
+// summary carries the long topic twice (currentTopic + latest.topic) while
+// its row changes stay tiny, so the 256KiB package bound never fires and the
+// case pins the 64KiB build-state bound ALONE.
+function longSummaryReducer() {
+  return {
+    plan({ event, head }) {
+      return {
+        rowChanges: [{
+          rowKind: "topic", rowKey: event.eventKey,
+          sortKey: String(event.eventSeq).padStart(20, "0"), value: { n: event.eventSeq }
+        }],
+        summary: {
+          count: (head?.summary?.count ?? 0) + 1,
+          currentTopic: event.payload?.event?.topic ?? null,
+          latest: { eventId: event.eventId, topic: event.payload?.event?.topic ?? null }
+        }
+      };
+    },
+    buildPage({ events, continuation }) {
+      const last = events[events.length - 1];
+      const topic = last.payload?.event?.topic ?? null;
+      return {
+        rowChanges: events.map((event) => ({
+          rowKind: "topic", rowKey: event.eventKey,
+          sortKey: String(event.eventSeq).padStart(20, "0"), value: { n: event.eventSeq }
+        })),
+        summary: {
+          count: (continuation.summary?.count ?? 0) + events.length,
+          currentTopic: topic,
+          latest: { eventId: last.eventId, topic }
+        },
+        continuation: {
+          nextEventSeq: continuation.nextAfterPage,
+          stagedCount: continuation.stagedCount + events.length
+        }
+      };
+    }
+  };
+}
+
+test("F1-R1 a 33000-char topic is rejected before the transaction with build_state_too_large", async () => {
+  await runProjectionTest(async ({ binding, rawDb, io, makeIo }) => {
+    await seedLongTopicEvents(rawDb, { count: 1, topicLength: 33000 });
+    const head = await loadProjectionHead(io.db, SCOPE_A);
+    await ensureBuild({ db: rawDb, scope: SCOPE_A, baseRevision: head.revision, now: NOW });
+    // Two summary copies of the topic = ~66KB > 65536. The bound fires
+    // BEFORE the batch: the failure is the deterministic internal code, not
+    // a driver-level CHECK violation inside a rolled-back transaction.
+    const result = await runOneBuildPage(makeIo, rawDb, { pageSize: 1, reducer: longSummaryReducer() });
+    assert.equal(result.outcome, "needs_attention",
+      `(${binding}) the oversize build state must park: ${JSON.stringify(result)}`);
+    assert.equal(result.code, "build_state_too_large",
+      `(${binding}) the deterministic pre-transaction code, got ${JSON.stringify(result)}`);
+    // Zero persistence: the batch never ran.
+    assert.equal(await countRows(rawDb, { userId: USER_A, generation: 1 }), 0,
+      `(${binding}) no staging row may be written`);
+    const deliveries = await rawDb.prepare(
+      "SELECT COUNT(*) AS n FROM rds2_archive_deliveries WHERE user_id = ?"
+    ).bind(USER_A).first("n");
+    assert.equal(Number(deliveries), 0, `(${binding}) no package or delta may be frozen`);
+    const buildRow = await rawDb.prepare(
+      "SELECT stage, continuation_json FROM rds2_projection_builds WHERE stage IN ('scanning', 'activating', 'completed')"
+    ).first();
+    assert.equal(buildRow.stage, "scanning", `(${binding}) the build itself must survive untouched`);
+    assert.equal(buildRow.continuation_json, null, `(${binding}) the continuation must stay unwritten`);
+    const task = await rawDb.prepare(
+      "SELECT state, failure_count FROM rds2_tasks WHERE task_id = ?"
+    ).bind(result.taskId).first();
+    assert.equal(task.state, "needs_attention", `(${binding}) the task parks`);
+    assert.equal(Number(task.failure_count), 0,
+      `(${binding}) a deterministic size error is never counted`);
   });
 });
