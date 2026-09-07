@@ -695,11 +695,16 @@ test("R5 replay switches generation and drops rows the superseded generation own
     (error) => error.code === "replay_missing_page",
     "a package from another build must be refused"
   );
-  // A duplicate page number leaves the manifest unprovable, exactly like a
-  // missing page.
-  const duplicatePage = await freeze({ ...JSON.parse(packageTwo.frozenJson), page: 1 });
+  // A duplicate page number leaves the manifest unprovable. The fixture keeps
+  // the package COUNT equal to `pages` (three packages, pages = 3) so the
+  // count check cannot mask the duplicate: only the page-tiling rule sees it.
+  const activationThree = await freeze({
+    ...JSON.parse(activation.frozenJson),
+    build: { buildId: "build-1", generation: 1, pages: 3, firstEventSeq: 1, lastEventSeq: 4 }
+  });
+  const duplicatePage = await freeze(JSON.parse(packageTwo.frozenJson));
   await assert.rejects(
-    () => replayProjection([staleDelta, activation, duplicatePage]),
+    () => replayProjection([staleDelta, activationThree, packageOne, packageTwo, duplicatePage]),
     (error) => error.code === "replay_missing_page",
     "a duplicated page number must be refused"
   );

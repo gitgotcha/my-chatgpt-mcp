@@ -9,13 +9,14 @@ import { projectOne, PREDECESSOR_PROBE_SQL } from "../src/rds2/projection/engine
 import { continueBuild, loadProjectionHead, ensureBuild } from "../src/rds2/projection/builds.js";
 import { commitProjection } from "../src/rds2/projection/commit.js";
 import { algorithmReducer } from "../src/rds2/projection/algorithm.js";
-import { deferTask } from "../src/rds2/tasks/repository.js";
+import { deferTask, completeTask, failTask } from "../src/rds2/tasks/repository.js";
 import { dispatchOne } from "../src/rds2/tasks/dispatcher.js";
 
 const MIGRATION_SQL = readFileSync(fileURLToPath(
   new URL("../migrations/0006_rds2_v2_tables.sql", import.meta.url)
 ), "utf8");
 const NOW = "2026-09-06T00:00:00.000Z";
+const FUTURE_LEASE = "2026-09-06T01:00:00.000Z";
 const USER_A = "11111111-1111-4111-8111-111111111111";
 const USER_B = "22222222-2222-4222-8222-222222222222";
 const NAME = "乔炳源";
@@ -1771,6 +1772,49 @@ test("F2 a lease conflict during the commit is never counted as a real failure",
     // The task still holds a processing lease, so the state is untouched here;
     // what matters is that neither a backoff nor a count was written.
     assert.equal(Number(after.failure_count), 0);
+  });
+});
+
+// The counter-clearing exists on BOTH success paths: the build activation's
+// inline UPDATE and the repository's completeTask (the settled-build path).
+// This pins the second copy — a mutation of the first copy must not be the
+// only thing standing between a stale counter and a completed task.
+test("F2 completeTask clears the counter on the settled-build path too", async () => {
+  await runProjectionTest(async ({ binding, rawDb }) => {
+    await rawDb.prepare(
+      `INSERT INTO rds2_tasks (task_id, type, user_id, namespace, projection_name, event_seq,
+         state, available_at, attempt, failure_count, lease_owner, lease_until, lease_epoch,
+         payload_json, created_at, updated_at)
+       VALUES ('t-clear', 'projection', 'u-clear', 'algorithm', 'learning', 1,
+         'processing', ?, 4, 2, 'o1', ?, 3, '{}', ?, ?)`
+    ).bind(NOW, FUTURE_LEASE, NOW, NOW).run();
+
+    const lease = {
+      taskId: "t-clear", owner: "o1", epoch: 3, leaseUntil: FUTURE_LEASE,
+      scope: { userId: "u-clear", namespace: "algorithm", projectionName: "learning" }
+    };
+    // The class-C close-out ran earlier in this task's life; completing now
+    // must clear what it counted, in the same write.
+    const counted = await failTask({ db: rawDb, lease, now: NOW, code: "probe" });
+    assert.equal(counted.rowsWritten, 1, `(${binding}) the probe failure is counted`);
+    assert.equal(Number((await rawDb.prepare(
+      "SELECT failure_count FROM rds2_tasks WHERE task_id = 't-clear'"
+    ).first("failure_count"))), 3, `(${binding}) counter sits at three`);
+
+    // Hand the lease back so completeTask's predicate can match again.
+    await rawDb.prepare(
+      "UPDATE rds2_tasks SET state = 'processing', lease_owner = 'o1', lease_until = ?, lease_epoch = 4 WHERE task_id = 't-clear'"
+    ).bind(FUTURE_LEASE).run();
+    const done = await completeTask({
+      db: rawDb, lease: { ...lease, epoch: 4 }, now: NOW
+    });
+    assert.equal(done.rowsWritten, 1, `(${binding}) the completion is authoritative`);
+    const after = await rawDb.prepare(
+      "SELECT state, failure_count FROM rds2_tasks WHERE task_id = 't-clear'"
+    ).first();
+    assert.equal(after.state, "completed", `(${binding}) ${JSON.stringify(after)}`);
+    assert.equal(Number(after.failure_count), 0,
+      `(${binding}) the settled path clears the counter itself, not an admin replay`);
   });
 });
 
