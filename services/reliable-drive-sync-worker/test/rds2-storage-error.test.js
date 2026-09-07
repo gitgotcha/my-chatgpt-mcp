@@ -182,6 +182,10 @@ test("F2-R1 internal deterministic codes are class D, never a blind retry", () =
     "build_read_limit_exceeded",
     "build_read_kind_rejected",
     "build_read_key_invalid",
+    // Review P1-3: a malformed read plan is a deterministic caller bug.
+    // Pinned here so dropping it from the whitelist cannot silently degrade
+    // it to the class-C fallback (blind retry).
+    "build_read_plan_invalid",
     "build_continuation_invalid",
     "invalid_page_size",
     "changes_too_large",
