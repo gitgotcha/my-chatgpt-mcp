@@ -15,6 +15,8 @@
 //   are dispatched under the recovery budget (32).
 import { createV2QueryExecutor, OPERATIONS } from "./query.js";
 import { authenticate } from "./identity/auth.js";
+import { hashText } from "./identity/hashing.js";
+import { initializeUser } from "./identity/initialize.js";
 import { createInvocationIo } from "./io/invocation-io.js";
 import { splitQueueBatch } from "./tasks/dispatcher.js";
 import { getTask } from "./tasks/repository.js";
@@ -56,7 +58,14 @@ const STATUS_BY_CODE = {
   unsupported_write_type: 400,
   migration_disabled: 400,
   v2_query_disabled: 503,
-  v2_write_disabled: 503
+  v2_write_disabled: 503,
+  v2_init_disabled: 503,
+  admin_not_configured: 500,
+  admin_credential_rejected: 403,
+  invalid_display_name: 400,
+  invalid_user_id: 400,
+  identity_conflict: 409,
+  credential_conflict: 409
 };
 
 function jsonResponse(body, status = 200) {
@@ -75,6 +84,67 @@ function credentialFrom(request) {
   const header = request.headers.get("authorization") ?? "";
   const match = /^Bearer\s+(.+)$/i.exec(header.trim());
   return match ? match[1].trim() : null;
+}
+
+/**
+ * Admin-only synthetic/real identity initialization. The endpoint is kept
+ * separate from /v2/events: a normal user credential can never create a
+ * user, and the one-time plaintext credential is returned only in this
+ * response. The admin secret itself is compared through its hash and is
+ * never included in a response or diagnostic.
+ */
+export async function handleV2Init(request, env, ctx, deps = {}) {
+  const db = deps.db ?? env?.DB;
+  try {
+    if (!featureEnabled(env, "RDS2_INIT_ENABLED")) {
+      return errorResponse("v2_init_disabled");
+    }
+    if (request.method !== "POST") return errorResponse("invalid_params", 405);
+    const raw = await request.text();
+    if (Buffer.byteLength(raw, "utf8") > 64 * 1024) {
+      return errorResponse("invalid_params");
+    }
+    let body;
+    try { body = JSON.parse(raw); } catch { return errorResponse("invalid_params"); }
+    if (!body || typeof body !== "object" || Array.isArray(body)
+      || Object.keys(body).some((key) => !["displayName", "userId"].includes(key))) {
+      return errorResponse("invalid_params");
+    }
+    if (typeof body.displayName !== "string" || !body.displayName.trim()) {
+      return errorResponse("invalid_display_name");
+    }
+    const adminToken = env?.RDS2_ADMIN_TOKEN;
+    if (typeof adminToken !== "string" || !adminToken) {
+      return errorResponse("admin_not_configured");
+    }
+    const adminCredential = credentialFrom(request);
+    const expectedAdminHash = await hashText(adminToken);
+    const randomUUID = deps.randomUUID ?? (() => crypto.randomUUID());
+    const credential = deps.randomCredential
+      ? await deps.randomCredential()
+      : `rds2_${randomUUID()}_${randomUUID()}`;
+    const credentialHash = await hashText(credential);
+    const result = await initializeUser({
+      db,
+      adminCredential,
+      expectedAdminHash,
+      displayName: body.displayName,
+      userIdOverride: body.userId,
+      credentialHash,
+      now: deps.now ? deps.now() : undefined
+    });
+    return jsonResponse({
+      storageVersion: 2,
+      userId: result.userId,
+      displayName: result.username,
+      credential,
+      created: Boolean(result.created),
+      credentialBound: Boolean(result.credentialBound)
+    }, 201);
+  } catch (error) {
+    const code = error?.code ?? "internal_error";
+    return errorResponse(code, error?.status);
+  }
 }
 
 function featureEnabled(env, name) {

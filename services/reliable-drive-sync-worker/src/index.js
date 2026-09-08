@@ -8,7 +8,7 @@ import { Reconciler } from "./reconciler.js";
 import { createDriveRepository } from "./google-drive.js";
 import { createStorageLayout } from "./storage-layout.js";
 import { createUserStore } from "./user-store.js";
-import { handleV2Request, handleV2Write, handleV2Queue, handleV2Scheduled } from "./rds2/routes.js";
+import { handleV2Request, handleV2Write, handleV2Init, handleV2Queue, handleV2Scheduled } from "./rds2/routes.js";
 
 export const V2_RECOVERY_CRON = "2-57/5 * * * *";
 
@@ -71,6 +71,9 @@ export function createWorker(env, deps = {}) {
       // delivers to.
       if (request.method === "POST" && path === "/v2/events") {
         return handleV2Write(request, runtimeEnv ?? env, context);
+      }
+      if (request.method === "POST" && path === "/v2/users/init") {
+        return handleV2Init(request, runtimeEnv ?? env, context);
       }
       return ingress(request, context);
     },
