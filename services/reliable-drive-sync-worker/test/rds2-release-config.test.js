@@ -230,7 +230,7 @@ test("T10 queue task rows with D1 snake_case columns select the real algorithm r
   );
 });
 
-test("V1 write gate defaults on and rejects legacy write entry points when disabled", async () => {
+test("V1 write gate defaults on and rejects legacy job ingress when disabled", async () => {
   assert.match(WRANGLER, /V1_WRITE_ENABLED\s*=\s*"true"/);
   const { createWorker } = await import("../src/index.js");
   const env = { V1_WRITE_ENABLED: "false", MCP_BEARER_TOKEN: "test-token" };
@@ -239,7 +239,7 @@ test("V1 write gate defaults on and rejects legacy write entry points when disab
     publisher: {},
     identityLookup: async () => ({ userId: "u-1", displayName: "test" })
   });
-  for (const path of ["/v1/sync", "/v1/jobs"]) {
+  for (const path of ["/v1/jobs"]) {
     const response = await worker.fetch(new Request(`https://worker.example${path}`, {
       method: "POST",
       headers: { authorization: "Bearer test-token", "content-type": "application/json" },
@@ -265,4 +265,18 @@ test("V1 read identity remains available while legacy writes are disabled", asyn
   assert.deepEqual(await response.json(), {
     identity: { userId: "u-1", username: "test", verified: true }
   });
+});
+
+test("V1 sync callback remains reachable to drain accepted work after ingress closes", async () => {
+  const { createWorker } = await import("../src/index.js");
+  const env = {
+    V1_WRITE_ENABLED: "false",
+    SYNC_WORKER_URL: "https://worker.example/v1/sync",
+    QSTASH_CURRENT_SIGNING_KEY: "test-key"
+  };
+  const worker = createWorker(env, { repository: {}, publisher: {} });
+  const response = await worker.fetch(new Request("https://worker.example/v1/sync", {
+    method: "POST", body: "{}"
+  }), env, null);
+  assert.equal(response.status, 489, "the callback still reaches signature validation");
 });
