@@ -220,3 +220,12 @@ test("T16 production archive consumers construct the budgeted V2 Drive client", 
   assert.match(ROUTES, /RDS2_ARCHIVE_FOLDER_ID/);
   assert.match(ROUTES, /accessToken\(env, io\.fetch\)/);
 });
+
+test("T10 queue task rows with D1 snake_case columns select the real algorithm reducer", async () => {
+  const { reducerForScope } = await import("../src/rds2/projection/registry.js");
+  const { algorithmReducer } = await import("../src/rds2/projection/algorithm.js");
+  assert.equal(
+    reducerForScope({ namespace: "algorithm", projection_name: "learning" }),
+    algorithmReducer
+  );
+});

@@ -23,16 +23,21 @@ const unsupportedReducer = Object.freeze({
   }
 });
 
-export function reducerForScope({ namespace, projectionName } = {}, overrides = {}) {
+export function reducerForScope(scope = {}, overrides = {}) {
+  const { namespace, projectionName } = scope;
+  // Queue consumers pass the authoritative D1 task row, whose columns use
+  // snake_case. HTTP/test callers commonly use the camelCase scope DTO. Both
+  // spellings describe the same scope; normalize at this boundary so a valid
+  // algorithm task cannot fall through to unsupported_projection_domain.
+  const scopeProjectionName = projectionName ?? scope.projection_name;
   if (typeof overrides.reducerForScope === "function") {
-    return overrides.reducerForScope({ namespace, projectionName });
+    return overrides.reducerForScope({ namespace, projectionName: scopeProjectionName });
   }
-  if (namespace === "algorithm" && projectionName === "learning") return algorithmReducer;
+  if (namespace === "algorithm" && scopeProjectionName === "learning") return algorithmReducer;
   if (namespace === "profile") return genericProfileReducer;
-  if (namespace === "interview" && projectionName === "interview") return interviewReducer;
-  if (namespace === "resume-knowledge" && projectionName === "resume-knowledge") return resumeKnowledgeReducer;
+  if (namespace === "interview" && scopeProjectionName === "interview") return interviewReducer;
+  if (namespace === "resume-knowledge" && scopeProjectionName === "resume-knowledge") return resumeKnowledgeReducer;
   return unsupportedReducer;
 }
 
 export { unsupportedReducer };
-
