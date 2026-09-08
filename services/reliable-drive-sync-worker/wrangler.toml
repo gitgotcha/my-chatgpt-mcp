@@ -7,6 +7,7 @@ SYNC_WORKER_URL = "https://reliable-drive-sync.qiaobingyuan886.workers.dev/v1/sy
 QSTASH_FAILURE_CALLBACK_URL = "https://reliable-drive-sync.qiaobingyuan886.workers.dev/v1/qstash/failure"
 QSTASH_URL = "https://qstash-us-east-1.upstash.io"
 GENERIC_PROFILE_ENABLED = "false"
+V1_WRITE_ENABLED = "true"
 RDS2_WRITE_ENABLED = "false"
 RDS2_QUERY_ENABLED = "false"
 RDS2_PROJECTION_ENABLED = "false"

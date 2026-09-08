@@ -229,3 +229,40 @@ test("T10 queue task rows with D1 snake_case columns select the real algorithm r
     algorithmReducer
   );
 });
+
+test("V1 write gate defaults on and rejects legacy write entry points when disabled", async () => {
+  assert.match(WRANGLER, /V1_WRITE_ENABLED\s*=\s*"true"/);
+  const { createWorker } = await import("../src/index.js");
+  const env = { V1_WRITE_ENABLED: "false", MCP_BEARER_TOKEN: "test-token" };
+  const worker = createWorker(env, {
+    repository: {},
+    publisher: {},
+    identityLookup: async () => ({ userId: "u-1", displayName: "test" })
+  });
+  for (const path of ["/v1/sync", "/v1/jobs"]) {
+    const response = await worker.fetch(new Request(`https://worker.example${path}`, {
+      method: "POST",
+      headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+      body: "{}"
+    }), env, null);
+    assert.equal(response.status, 410, path);
+    assert.deepEqual(await response.json(), { error: "v1_write_disabled" });
+  }
+});
+
+test("V1 read identity remains available while legacy writes are disabled", async () => {
+  const { createWorker } = await import("../src/index.js");
+  const env = { V1_WRITE_ENABLED: "false", MCP_BEARER_TOKEN: "test-token" };
+  const worker = createWorker(env, {
+    repository: {},
+    publisher: {},
+    identityLookup: async () => ({ userId: "u-1", displayName: "test" })
+  });
+  const response = await worker.fetch(new Request("https://worker.example/v1/identity?username=test", {
+    headers: { authorization: "Bearer test-token" }
+  }), env, null);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    identity: { userId: "u-1", username: "test", verified: true }
+  });
+});

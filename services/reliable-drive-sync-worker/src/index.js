@@ -18,6 +18,18 @@ function featureEnabled(runtimeEnv, name) {
   return runtimeEnv?.[name] === "true";
 }
 
+// V1 remains enabled by default for backwards compatibility. The release
+// switch is intentionally opt-out: only the exact literal "false" closes the
+// two legacy write entry points, while reads and callback/recovery surfaces
+// remain available to drain already-accepted work.
+function v1WriteEnabled(runtimeEnv) {
+  return runtimeEnv?.V1_WRITE_ENABLED !== "false";
+}
+
+function v1WriteDisabledResponse() {
+  return Response.json({ error: "v1_write_disabled" }, { status: 410 });
+}
+
 export function createWorker(env, deps = {}) {
   const repository = deps.repository ?? new D1JobRepository(env.DB);
   const publisher = deps.publisher ?? createQStashPublisher(
@@ -60,7 +72,11 @@ export function createWorker(env, deps = {}) {
   return {
     async fetch(request, runtimeEnv, context) {
       const path = new URL(request.url).pathname;
-      if (request.method === "POST" && path === "/v1/sync") return sync(request);
+      const activeEnv = runtimeEnv ?? env;
+      if (request.method === "POST" && path === "/v1/sync") {
+        if (!v1WriteEnabled(activeEnv)) return v1WriteDisabledResponse();
+        return sync(request);
+      }
       if (request.method === "POST" && path === "/v1/qstash/failure") return failure(request);
       // V2 read surface: a separate DTO and route, the V1 routes above stay
       // exactly as they are.
@@ -74,6 +90,10 @@ export function createWorker(env, deps = {}) {
       }
       if (request.method === "POST" && path === "/v2/users/init") {
         return handleV2Init(request, runtimeEnv ?? env, context);
+      }
+      if (request.method === "POST" && path === "/v1/jobs"
+        && !v1WriteEnabled(activeEnv)) {
+        return v1WriteDisabledResponse();
       }
       return ingress(request, context);
     },
