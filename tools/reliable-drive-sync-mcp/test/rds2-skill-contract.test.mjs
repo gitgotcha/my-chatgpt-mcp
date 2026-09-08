@@ -36,3 +36,23 @@ test("T15 the only exposed MCP tool remains submit_event", async () => {
   assert.match(bridge, /name: "submit_event"/);
   assert.doesNotMatch(bridge, /tools:\s*\[[^\]]*query/i);
 });
+
+test("T15 source skills keep evidence and incomplete-state guardrails", async () => {
+  const algorithm = await text(new URL("algorithm-learning/SKILL.md", ROOT));
+  const backend = await text(new URL("backend-project-learning/SKILL.md", ROOT));
+  const interviewer = await text(new URL("conducting-java-backend-mock-interviews/SKILL.md", ROOT));
+  const reviewer = await text(new URL("reviewing-java-backend-interviews/SKILL.md", ROOT));
+
+  assert.match(algorithm, /没有掌握度证据时记录中性的 `consulted`/);
+  assert.match(algorithm, /未完成题在下一日优先/);
+  assert.match(interviewer, /身份解析或注册失败时[\s\S]*不绕过解析继续读取历史/);
+  assert.match(backend, /默认只读学习/);
+  assert.match(backend, /源码事实/);
+  assert.match(interviewer, /一次只问一道主问题/);
+  assert.match(interviewer, /原回答永远不被事后改写/);
+  assert.match(reviewer, /applyProfileChanges: false/);
+  assert.match(reviewer, /reviewVersion/);
+  assert.match(algorithm, /Skill 不直接读写 Drive/);
+  assert.match(interviewer, /不直接访问 Google Drive、D1、R2 或云端 HTTP/);
+  assert.match(reviewer, /本地报告只保留为本地派生输出/);
+});
