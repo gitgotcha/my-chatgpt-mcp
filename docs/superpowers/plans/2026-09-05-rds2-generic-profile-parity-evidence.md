@@ -37,8 +37,9 @@ outcome 分类：正向 `{completed, correct, passed}`、负向 `{stuck, incorre
 ## 3. 排序规则（不变量）
 
 1. 事件处理顺序：`observedAt` → `eventKey` → `eventId`（`compareStable`，与 V1 逐字节一致）。
-   V2 分页按 `event_seq`（接收序）交付事件；reducer 在页内先按 `compareStable` 排序后再应用，
-   跨页乱序由 V2 的 `event_seq` 单调性保证不早于已处理页（Oracle 差异见 §5 第 8 条）。
+   V2 分页按 `event_seq`（接收序）扫描，但页内先按 `compareStable` 排序后应用；
+   如果跨页迟到事件会改变已处理纠正关系，必须启动固定 `target_event_seq` 的完整 scope 分页重算，
+   直到结果与 V1 全量 Oracle 一致。
 2. 行页内序：`(sort_key, row_key)` 双键；`sort_key` = 该成员的最新 `observedAt`。
 3. 输出组内排序：`dimensionKey` → `subjectKey`（`sortMembers`）。
 
@@ -69,7 +70,7 @@ outcome 分类：正向 `{completed, correct, passed}`、负向 `{stuck, incorre
 | 6 | `distinctPositiveSources ≥ 2`（最近负向后） | `source_signal` 中 `lastPositiveAt > lastNegativeAt` 的来源数 | 负向写 `lastNegativeAt` 清零语义 |
 | 7 | `sourceEventKeys`（去重排序） | `event_activity` 行全集 | 读侧聚合 |
 | 8 | `headEventId/generatedAt`（最后去重事件） | 构建激活 summary（V2 头） | 头部承载，与 F1 契约一致 |
-| 9 | 乱序结果 | 事件按 `event_seq` 页序处理，页内 `compareStable` | **与 V1 全量排序可能不同的唯一来源**：V1 对同一批事件按内容时间排序；V2 按 seq 分页后页内排序。裁定：`observedAt` 乱序到达时 V1 会重排，V2 语义为「到达序处理 + 时间约束拒绝倒挂纠正」，与 T11 规格「乱序结果对齐V1」的差距由 parity 测试逐例钉住（同页乱序必须与 V1 一致；跨页乱序按 seq 语义，不做全量重算） |
+| 9 | 乱序结果 | 页内 `compareStable`；跨页影响历史关系时固定目标的完整 scope 重算 | 同页乱序必须与 V1 一致；跨页迟到事件不得固化为“到达序语义”，必须在新 generation 完成后与 V1 Oracle 对齐 |
 
 分类判定（与 V1 158-168 行逐条一致）：
 `distinctPositiveSources ≥ 2 且 latest 非负 → strengths`；`latest 负向 → weaknesses`；
