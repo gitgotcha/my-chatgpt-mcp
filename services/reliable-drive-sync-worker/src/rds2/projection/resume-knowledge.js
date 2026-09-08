@@ -1,9 +1,8 @@
 // T13 resume-knowledge projection primitives.
 //
 // The scoring, issue extraction and question-bank evidence rules are reused
-// from the reviewed V1 model.  V2 adds the server-derived business key and a
-// bounded read declaration; the paged staged fold is intentionally explicit
-// about its remaining integration dependency.
+// from the reviewed V1 model. V2 persists bank/question/first-score/mastery
+// rows while the pure Oracle computes the public summary for each page.
 import { canonicalJson } from "../../../../../shared/rds2-protocol.mjs";
 import { rebuildResumeKnowledgeProfile } from "../../resume-knowledge-model.js";
 
@@ -80,12 +79,80 @@ export const resumeKnowledgeReducer = Object.freeze({
     return planResumeKnowledgePageReads(events);
   },
 
-  buildPage() {
-    const error = new Error("resume_knowledge_staged_question_paginator_required");
-    error.code = "resume_knowledge_staged_question_paginator_required";
-    throw error;
+  buildPage({ events = [], continuation = {} } = {}) {
+    const scoreEvents = Array.isArray(continuation.scoreEvents)
+      ? structuredClone(continuation.scoreEvents) : [];
+    const seen = new Set(scoreEvents.map((item) => item.eventKey));
+    let questionBank = continuation.questionBank ? structuredClone(continuation.questionBank) : null;
+    const rowChanges = [];
+    let processed = 0;
+    let nextEventSeq = continuation.nextEventSeq;
+    for (const candidate of events) {
+      const source = structuredClone(sourceEventOf(candidate));
+      if (!source || typeof source !== "object") continue;
+      const eventSeq = Number(candidate?.eventSeq);
+      if (Number.isSafeInteger(eventSeq)) nextEventSeq = eventSeq + 1;
+      else if (Number.isSafeInteger(nextEventSeq)) nextEventSeq += 1;
+
+      if (source.eventType === "resume-knowledge.question-bank-created") {
+        const currentVersion = String(questionBank?.resumeVersion ?? "");
+        if (!questionBank || String(source.resumeVersion ?? "") >= currentVersion) {
+          questionBank = {
+            resumeVersion: source.resumeVersion,
+            questions: structuredClone(source.questions ?? [])
+          };
+        }
+        rowChanges.push({
+          rowKind: "bank", rowKey: source.resumeVersion,
+          sortKey: String(source.generatedAt ?? ""), value: questionBank
+        });
+        for (const question of source.questions ?? []) {
+          if (!question?.questionKey) continue;
+          rowChanges.push({
+            rowKind: "question", rowKey: question.questionKey,
+            memberKey: question.knowledgePointId ?? null,
+            sortKey: question.questionKey, value: { ...question, resumeVersion: source.resumeVersion }
+          });
+        }
+      }
+      if (source.eventType === "resume-knowledge.answer-scored" && source.eventKey && !seen.has(source.eventKey)) {
+        scoreEvents.push(source);
+        seen.add(source.eventKey);
+        const key = businessDedupeKey(source);
+        rowChanges.push({
+          rowKind: "first_score", rowKey: key,
+          memberKey: source.questionKey, sortKey: `${source.localDate}\u0000${source.scoredAt ?? ""}`,
+          value: { ...source, businessDedupeKey: key }
+        });
+      }
+      processed += 1;
+      if (rowChanges.length > 14) break;
+    }
+    if (processed === 0 && events.length > 0) {
+      const error = new Error("changes_too_large");
+      error.code = "changes_too_large";
+      throw error;
+    }
+    const summary = reduceResumeKnowledgeProfile(scoreEvents, questionBank);
+    if (summary.status !== "resume_required") {
+      for (const [questionKey, mastery] of Object.entries(summary.questionMastery ?? {})) {
+        rowChanges.push({
+          rowKind: "mastery", rowKey: questionKey, memberKey: mastery.knowledgePointId,
+          sortKey: questionKey, value: mastery
+        });
+      }
+    }
+    return {
+      rowChanges,
+      summary,
+      continuation: {
+        nextEventSeq: processed > 0 ? nextEventSeq : continuation.nextEventSeq,
+        page: (continuation.page ?? 1) + 1,
+        questionBank,
+        scoreEvents
+      }
+    };
   }
 });
 
 export { sourceEventOf, questionKeyOf };
-

@@ -80,3 +80,31 @@ test("T13 the reducer declares bounded question and mastery reads", () => {
   assert.deepEqual(plan.reads.map((item) => item.rowKind), ["question", "mastery"]);
 });
 
+test("T13 buildPage persists question-bank and first-score rows", () => {
+  const bankEvent = {
+    schemaVersion: "1.2", eventId: "40000000-0000-4000-8000-000000000001", eventKey: "bank:resume-1",
+    eventType: "resume-knowledge.question-bank-created", userId: USER_ID, username: "乔炳源",
+    resumeVersion: BANK.resumeVersion, generatedAt: "2026-09-01T08:00:00.000Z", questions: BANK.questions
+  };
+  const result = resumeKnowledgeReducer.buildPage({
+    events: [bankEvent, score()], staged: { question: new Map(), mastery: new Map(), bank: new Map(), first_score: new Map() },
+    continuation: { nextEventSeq: 1, page: 1 }
+  });
+  assert.equal(result.summary.questionMastery["q-redis"].masteryScore, 80);
+  assert.ok(result.rowChanges.some((row) => row.rowKind === "bank"));
+  assert.ok(result.rowChanges.some((row) => row.rowKind === "first_score"));
+});
+
+test("T13 a second-page score uses the first-score-per-day rule and weighted mastery", () => {
+  const first = score({ eventKey: "score:first", eventId: "10000000-0000-4000-8000-000000000010" });
+  const firstPage = resumeKnowledgeReducer.buildPage({
+    events: [first], staged: { question: new Map(), mastery: new Map(), bank: new Map(), first_score: new Map() },
+    continuation: { nextEventSeq: 1, page: 1, questionBank: BANK }
+  });
+  const second = resumeKnowledgeReducer.buildPage({
+    events: [score({ eventKey: "score:next", eventId: "10000000-0000-4000-8000-000000000011", localDate: "2026-09-02", scoredAt: "2026-09-02T10:00:00.000Z", total: 60 })],
+    staged: { question: new Map(), mastery: new Map(), bank: new Map(), first_score: new Map() },
+    continuation: { ...firstPage.continuation, questionBank: BANK }
+  });
+  assert.equal(second.summary.questionMastery["q-redis"].masteryScore, 68);
+});
