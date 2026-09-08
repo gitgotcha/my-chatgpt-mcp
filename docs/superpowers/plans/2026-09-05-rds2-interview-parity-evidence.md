@@ -2,7 +2,8 @@
 
 ## Scope
 
-本文件冻结 T12 的 V2 纯 reducer 与 V1 `src/profile-model.js` 的语义边界。V2
+本文件冻结 T12 的 V2 reducer 与 V1 `src/profile-model.js` 的语义边界。T12
+本地分页实现已交付，真实远程消费者仍需后续入口门验证。V2
 不读取不存在的 `status` 字段；能力状态只来自 `profileChanges` 的
 `status/result/outcome/action` 规范化结果。
 
@@ -20,13 +21,14 @@
 
 ## V2 读计划
 
-每页只声明 `session` 与 `review` 的去重键；不把历史 reviews 塞进
-`continuation_json`。`buildPage` 在 staged contribution paginator 接线前以稳定
-错误拒绝，避免把不完整的贡献集发布为成功画像。
+每页声明 `session`、`review` 以及按需的 `selected_review`/`contribution` 键；
+`buildPage` 会把选择结果和贡献行写入 staging，并在分页 continuation 中保留
+当前折叠状态。当前实现仍以受控页大小和 continuation 行大小门保护，未把完整
+远程重算规模宣称为已验证。
 
 ## 测试证据
 
-`test/rds2-interview.test.js` 覆盖 7 个独立场景：apply 开关、版本替换、迟到旧
-版本、同版本排序、重复 variant、空变更撤销、有限读计划。完整分代分页与真实
-D1 接线由后续集成门负责，当前不宣称已完成。
-
+`test/rds2-interview.test.js` 覆盖 9 个独立场景：apply 开关、版本替换、迟到旧
+版本、同版本排序、重复 variant、空变更撤销、有限读计划和两项 `buildPage`
+跨页行为。完整分代分页的真实 D1/Queue 接线和大规模行大小证明由 T14/T16
+集成门负责。

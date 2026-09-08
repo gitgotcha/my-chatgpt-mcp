@@ -1,8 +1,9 @@
 # T11 Parity Evidence：V1 通用画像 → V2 行模型逐项映射
 
-状态：**实现及自检完成前的前置交付**。本文档按 T11 规格先于实现交付，
-逐项映射 V1 源模型（`src/generic-profile-model.js`，HEAD `aaf4c57`）与 V2 行模型，
-并给出与 V1 输出（Oracle）对齐的规则。任何实现与本文件的偏差都是缺陷。
+状态：**T11 本地实现已交付，本文档作为 parity 基线与审计记录**。实现复用
+V1 源模型（`src/generic-profile-model.js`）作为 Oracle，并在 V2 投影引擎中提供
+可续页的 `buildPage`。任何实现与本文件的语义偏差都是缺陷；真实远程运行时与
+大规模状态上界仍由 T14/T16 验收。
 
 ## 1. 源模型（V1）字段清单
 
@@ -30,7 +31,7 @@ outcome 分类：正向 `{completed, correct, passed}`、负向 `{stuck, incorre
 | `event_activity` | `{eventKey}` | 空事件键（行级） | `{eventId, observedAt, action, supersededBy?, invalidatedBy?}` — 事件的活跃性账本 |
 | `observation` | `{eventKey}#{index}` | `member_key` = `{dimensionKey}\u0000{subjectKey}` | 单条观察（outcome/confidence/sourceRef）— **evidence 逐行保存，不是 JSON 数组** |
 | `source_signal` | `{member_key}#{sourceRef}` | `member_key` | 该 (维度,主体,来源) 的最新正向 `observedAt` 与计数 — 「最近负向以来的不同正向来源」的可增量载体 |
-| `member` | `{member_key}` | `member_key` | `memberOf` 输出 + 分类桶（`bucket: weaknesses/improving/strengths/observations`） |
+| `member` | `{member_key}` | `member_key` | `{memberKey, events, projected}`；`projected` 为 V1 Oracle 对该成员历史的结果 |
 
 键展开规则：`member_key = dimensionKey + "\u0000" + subjectKey`（与 V1 分组键逐字节一致）。
 
@@ -77,13 +78,22 @@ outcome 分类：正向 `{completed, correct, passed}`、负向 `{stuck, incorre
 `latest partial → 有负向 ? improving : observations`；`latest 正向 → 有负向 ? weaknesses : observations`；
 其余 → `有负向 ? weaknesses : observations`。
 
-## 6. 迁移 0007
+## 6. 当前实现边界
+
+`buildPage` 已将 observation、source_signal、event_activity 与 member 变化写入
+staging，并能通过 `expandPageReads` 读取跨页纠正影响的成员。为保持 V1 语义，
+member 行当前仍携带该成员的事件历史，summary 仍保留去重后的 sourceEventKeys；
+这两个载体在极长历史下可能增长，不能把它们描述成已证明的 O(1) 状态。T14 的
+入口/规模门必须继续测量并在超过行大小或预算时稳定停车，后续可再引入按成员的
+分段历史行，但不能静默截断。
+
+## 7. 迁移 0007
 
 `rds2_projection_rows` 已含 `member_key` 列（0006）；0007 仅增量添加索引：
 `(user_id, namespace, projection_name, generation, row_kind, member_key, sort_key, row_key)`
 —— 满足规格中的索引页查询（scope + member_key + 排序键 + LIMIT 50）。
 
-## 7. 拒绝与错误（全部稳定码，不得静默吞错）
+## 8. 拒绝与错误（全部稳定码，不得静默吞错）
 
 `invalid_identity` / `invalid_domain` / `event_key_conflict` / `invalid_profile_event` /
 `target_event_not_found` / `target_event_inactive` — 与 V1 同码同语义。

@@ -2,8 +2,8 @@
 
 ## Scope
 
-T13 复用 `src/resume-knowledge-model.js` 作为业务 Oracle，V2 只增加服务端
-业务去重键和有界的题目/掌握点读计划。
+T13 本地分页实现复用 `src/resume-knowledge-model.js` 作为业务 Oracle，V2 增加
+服务端业务去重键和题目/掌握点读计划；真实远程消费者与全量规模门仍待 T14/T16。
 
 ## Oracle 映射
 
@@ -28,12 +28,12 @@ T13 复用 `src/resume-knowledge-model.js` 作为业务 Oracle，V2 只增加服
 
 ## V2 读计划
 
-每页按去重后的 `questionKey` 声明 `question` 与 `mastery` 两类 point read，
-不读取全量历史。题库/掌握点的 staged paginator 和真实 D1 build 接线仍由后续
-集成门完成；当前测试只证明 Oracle 与读计划契约，不宣称完整发布链路。
+每页按去重后的 `questionKey` 声明 `question`、`mastery`、`first_score` 与
+`question_bank` 行读取；`buildPage` 将题库、首评和 mastery 变化写入 staging。
+当前 continuation 仍携带折叠所需的题库/评分状态，长度与远程 build 的上界需由
+T14 的状态大小门持续约束；不静默截断，也不宣称已完成生产规模证明。
 
 ## 测试证据
 
 `test/rds2-resume-knowledge.test.js` 覆盖首评/次日加权、业务键、untested、
-`resume_required`、版本绑定与有界读计划。
-
+`resume_required`、版本绑定、分页 `buildPage` 与有界读计划。
