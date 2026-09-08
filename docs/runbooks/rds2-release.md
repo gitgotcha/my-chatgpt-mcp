@@ -77,6 +77,7 @@ node tools/reliable-drive-sync-mcp/rds2-canary.mjs --local
 $env:RDS2_CANARY_CONFIRM = 'YES'
 $env:RDS2_CANARY_CREDENTIAL = $env:CANARY_CREDENTIAL_FROM_SECRET_STORE
 $env:RDS2_CANARY_URL = $env:CANARY_WORKER_URL_FROM_SECRET_STORE
+$env:RDS2_ALLOWED_USER_IDS = 'synthetic-canary-user'
 $canaryUserId = 'synthetic-canary-user'
 node tools/reliable-drive-sync-mcp/rds2-canary.mjs --remote --user-id $canaryUserId --event-file '.\canary\algorithm-event.json' --confirm-remote
 ```

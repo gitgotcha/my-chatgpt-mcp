@@ -140,6 +140,22 @@ test("T16 local canary rejects missing credentials or an empty allowlist", async
   );
 });
 
+test("T16 remote canary refuses a user outside the explicit allowlist", async () => {
+  const canary = await import("../../../tools/reliable-drive-sync-mcp/rds2-canary.mjs");
+  await assert.rejects(
+    () => canary.runCanary({
+      argv: ["--remote"],
+      env: {
+        RDS2_CANARY_CREDENTIAL: "credential",
+        RDS2_CANARY_URL: "https://worker.example",
+        RDS2_CANARY_USER_ID: "user-a",
+        RDS2_ALLOWED_USER_IDS: "user-b"
+      }
+    }),
+    (error) => error?.code === "canary_user_not_allowed"
+  );
+});
+
 test("T16 accepted V2 writes have no implicit V1 fallback", async () => {
   const canary = await import("../../../tools/reliable-drive-sync-mcp/rds2-canary.mjs");
   assert.equal(canary.resolveWritePath({ writeVersion: "v2", accepted: true }), "/v2/events");

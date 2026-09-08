@@ -72,13 +72,16 @@ function remoteOptions(parsed, env) {
   if (!nonEmpty(credential) || !nonEmpty(userId) || !nonEmpty(url)) {
     throw canaryError("remote_canary_arguments_required");
   }
+  const allowedUserIds = parseAllowlist(env.RDS2_ALLOWED_USER_IDS);
+  if (allowedUserIds.length === 0) throw canaryError("canary_allowlist_required");
+  if (!allowedUserIds.includes(userId.trim())) throw canaryError("canary_user_not_allowed");
   if (!parsed.confirmRemote && env.RDS2_CANARY_CONFIRM !== "YES") {
     throw canaryError("remote_canary_confirmation_required");
   }
   if (!nonEmpty(parsed.event_file ?? env.RDS2_CANARY_EVENT_FILE)) {
     throw canaryError("remote_canary_event_file_required");
   }
-  return { credential: credential.trim(), userId: userId.trim(), url: url.trim(),
+  return { credential: credential.trim(), userId: userId.trim(), url: url.trim(), allowedUserIds,
     eventFile: parsed.event_file ?? env.RDS2_CANARY_EVENT_FILE };
 }
 
@@ -145,4 +148,3 @@ async function main() {
 }
 
 if (process.argv[1]?.endsWith("rds2-canary.mjs")) await main();
-
