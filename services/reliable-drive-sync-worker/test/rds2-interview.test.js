@@ -104,3 +104,36 @@ test("T12 reducer declares session/review reads without unbounded history", () =
   assert.ok(plan.reads.every((item) => Array.isArray(item.rowKeys) && item.rowKeys.length <= 2));
 });
 
+test("T12 buildPage persists selected review and contribution rows", () => {
+  const current = review({ reviewVersion: 1, eventKey: "review:page:1" });
+  const result = interviewReducer.buildPage({
+    events: [session("S-1"), current],
+    staged: { session: new Map(), review: new Map(), selected_review: new Map(), contribution: new Map() },
+    continuation: { nextEventSeq: 1, page: 1 }
+  });
+  assert.equal(result.continuation.nextEventSeq, 3);
+  assert.equal(result.summary.domainProfiles.java_backend.weaknesses["W-1"].status, "open");
+  assert.ok(result.rowChanges.some((row) => row.rowKind === "selected_review"));
+  assert.ok(result.rowChanges.some((row) => row.rowKind === "contribution"));
+});
+
+test("T12 a later review version replaces the selected contribution across pages", () => {
+  const first = review({ reviewVersion: 1, eventKey: "review:page:1" });
+  const firstPage = interviewReducer.buildPage({
+    events: [first], staged: { session: new Map(), review: new Map(), selected_review: new Map(), contribution: new Map() },
+    continuation: { nextEventSeq: 1, page: 1 }
+  });
+  const staged = { session: new Map(), review: new Map(), selected_review: new Map(), contribution: new Map() };
+  for (const row of firstPage.rowChanges) {
+    if (row.rowKind === "selected_review") staged.selected_review.set(row.rowKey, row.value);
+    if (row.rowKind === "review") staged.review.set(row.rowKey, row.value);
+  }
+  const newer = review({ reviewVersion: 2, eventKey: "review:page:2", completedAt: "2026-09-02T10:00:00.000Z",
+    profileChanges: [{ domain: "java_backend", weaknessId: "W-1", status: "passed", variantId: "v-a" }] });
+  const second = interviewReducer.buildPage({
+    events: [newer], staged,
+    continuation: { ...firstPage.continuation, reviewEvents: [first] }
+  });
+  assert.equal(second.summary.domainProfiles.java_backend.weaknesses["W-1"].status, "improving");
+  assert.deepEqual(second.summary.domainProfiles.java_backend.weaknesses["W-1"].evidenceRefs, []);
+});

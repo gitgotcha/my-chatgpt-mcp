@@ -21,7 +21,10 @@ export const STAGING_READ_MAX_KEYS_PER_KIND = 50;
 // Incremental algorithm updates use topic/problem keys. Generic-profile
 // rebuilds additionally point-read the bounded member and event-activity
 // rows; historical observation/source-signal rows use the indexed paginator.
-const ALLOWED_ROW_KINDS = new Set(["topic", "problem", "member", "event_activity", "profile_summary"]);
+const ALLOWED_ROW_KINDS = new Set([
+  "topic", "problem", "member", "event_activity", "profile_summary",
+  "session", "review", "selected_review", "contribution", "weakness"
+]);
 
 function fail(code, detail) {
   const error = new Error(code);
@@ -125,7 +128,12 @@ export async function readStagedWithinBudget({
     problem: new Map(),
     member: new Map(),
     event_activity: new Map(),
-    profile_summary: new Map()
+    profile_summary: new Map(),
+    session: new Map(),
+    review: new Map(),
+    selected_review: new Map(),
+    contribution: new Map(),
+    weakness: new Map()
   };
 
   // Validate the shapes, merge, dedupe, judge the per-kind key bounds and

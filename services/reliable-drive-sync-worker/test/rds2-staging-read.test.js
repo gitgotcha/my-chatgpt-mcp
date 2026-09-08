@@ -54,6 +54,19 @@ test("F1 planReadCost prices chunks synchronously and rejects bad plans", () => 
   );
 });
 
+test("T12 staging reads expose interview row kinds through the same bounded adapter", async () => {
+  await withD1(async (binding, rawDb) => {
+    await applySchema(rawDb, MIGRATION_SQL);
+    const io = createInvocationIo({ db: rawDb, limit: 24 });
+    await seedRow(rawDb, { rowKind: "session", rowKey: "S-1", value: { sessionId: "S-1" } });
+    const staged = await readStagedWithinBudget({
+      io, scope: SCOPE, stagingGeneration: 1, eventCount: 1,
+      plan: { reads: [{ rowKind: "session", rowKeys: ["S-1"] }] }
+    });
+    assert.deepEqual(staged.session.get("S-1"), { sessionId: "S-1" }, `(${binding}) session row is available`);
+  });
+});
+
 test("F1 a plan priced over the cap is refused before any query goes out", async () => {
   await withD1(async (binding, rawDb) => {
     await applySchema(rawDb, MIGRATION_SQL);
