@@ -4,23 +4,34 @@
 //   every operation authenticated against rds2_credentials, domains
 //   fail-closed on the configured whitelist, and every response field
 //   constructed here (never a raw payload passthrough).
-// handleV2Queue    the queue consumers: one message per invocation, a fresh
-//   budgeted io per task type (projection 24, archive 16), the rest of the
-//   batch asked to retry.
+// handleV2Write    POST /v2/events — a bounded body, credential-bound
+//   principal, classifySubmission allowing WRITES only, then acceptEvent and
+//   the real WriteReceipt.
+// handleV2Queue    the queue CONSUMERS: one message per invocation, the
+//   message type only selects the business entry point (projectOne /
+//   continueBuild / archiveOne) while the real task content and type are
+//   loaded from D1 and cross-checked; a fresh budgeted io per task type.
 // handleV2Scheduled the recovery wake: expired leases come back, due tasks
 //   are dispatched under the recovery budget (32).
 import { createV2QueryExecutor, OPERATIONS } from "./query.js";
 import { authenticate } from "./identity/auth.js";
 import { createInvocationIo } from "./io/invocation-io.js";
-import { splitQueueBatch, dispatchOne } from "./tasks/dispatcher.js";
+import { splitQueueBatch } from "./tasks/dispatcher.js";
+import { getTask } from "./tasks/repository.js";
 import { recoverOnce } from "./tasks/recovery.js";
 import { continueBuild } from "./projection/builds.js";
+import { projectOne } from "./projection/engine.js";
 import { archiveOne } from "./archive/archiver.js";
 import { algorithmReducer } from "./projection/algorithm.js";
+import { classifySubmission, SUBMISSION_REJECTION_CODES } from "../../../../shared/rds2-protocol.mjs";
+import { acceptEvent } from "./events/accept.js";
+import { createDriveRepository } from "../google-drive.js";
 
 export const PROJECTION_BUDGET = 24;
 export const ARCHIVE_BUDGET = 16;
 export const RECOVERY_BUDGET = 32;
+export const WRITE_BUDGET = 20;
+export const MAX_ENVELOPE_BYTES = 256 * 1024;
 
 const STATUS_BY_CODE = {
   invalid_params: 400,
@@ -38,7 +49,11 @@ const STATUS_BY_CODE = {
   projection_changed: 409,
   projection_not_found: 404,
   event_not_found: 404,
-  response_too_large: 413
+  response_too_large: 413,
+  envelope_too_large: 413,
+  read_only_event: 400,
+  unsupported_write_type: 400,
+  migration_disabled: 400
 };
 
 function jsonResponse(body, status = 200) {
@@ -48,8 +63,8 @@ function jsonResponse(body, status = 200) {
   });
 }
 
-function errorResponse(code) {
-  const status = STATUS_BY_CODE[code] ?? 500;
+function errorResponse(code, statusOverride) {
+  const status = statusOverride ?? STATUS_BY_CODE[code] ?? 500;
   return jsonResponse({ error: { code } }, status);
 }
 
@@ -84,7 +99,47 @@ export async function handleV2Request(request, env, ctx, deps = {}) {
     return jsonResponse(data, 200);
   } catch (error) {
     const code = error?.code ?? "internal_error";
-    return errorResponse(code);
+    return errorResponse(code, error?.status);
+  }
+}
+
+export async function handleV2Write(request, env, ctx, deps = {}) {
+  const db = deps.db ?? env?.DB;
+  const now = deps.now ?? (() => new Date().toISOString());
+  try {
+    // Bounded read BEFORE parsing: an oversized body is refused on its size,
+    // never parsed.
+    const raw = await request.text();
+    if (Buffer.byteLength(raw, "utf8") > MAX_ENVELOPE_BYTES) {
+      return errorResponse("envelope_too_large");
+    }
+    let envelope;
+    try {
+      envelope = JSON.parse(raw);
+    } catch {
+      return errorResponse("invalid_params");
+    }
+    const credential = credentialFrom(request);
+    const principal = deps.principal ?? await authenticate({ db, credential });
+    // Only writes pass here: read, admin-only and disabled types keep their
+    // stable rejection codes instead of being silently accepted.
+    const submission = classifySubmission(envelope);
+    if (submission.kind !== "write") {
+      return errorResponse(SUBMISSION_REJECTION_CODES[submission.kind]);
+    }
+    const io = createInvocationIo({
+      db,
+      queues: {
+        RDS2_PROJECTION_QUEUE: env?.RDS2_PROJECTION_QUEUE,
+        RDS2_ARCHIVE_QUEUE: env?.RDS2_ARCHIVE_QUEUE
+      },
+      limit: WRITE_BUDGET
+    });
+    const receipt = await acceptEvent({ io, principal, envelope: submission.envelope, now: now() });
+    return jsonResponse(receipt, 200);
+  } catch (error) {
+    const code = error?.code ?? "internal_error";
+    return errorResponse(code, error?.status);
   }
 }
 
@@ -113,11 +168,43 @@ export async function handleV2Queue(batch, env, ctx, deps = {}) {
     return { outcome: "noop" };
   }
   const io = budgetedIoFor(first.type, env);
-  const result = await dispatchOne({ io, taskId: first.taskId, owner: `v2-queue-${first.type}`, now: deps.now });
-  // Ack the processed message; the rest are retried exactly as they came, so
-  // a later invocation picks them up one at a time.
+  const now = deps.now ?? (() => new Date().toISOString());
+  const owner = `v2-consumer-${first.type}`;
+
+  // The message only SELECTS the entry point; the real task content and type
+  // come from D1 and are cross-checked — a stale or lying message is acked,
+  // never spun on.
+  const task = await getTask(io.db, first.taskId);
+  let result;
+  if (!task || task.type !== first.type) {
+    result = { outcome: "noop", taskId: first.taskId, code: "task_type_mismatch" };
+  } else if (first.type === "projection") {
+    result = await projectOne({
+      io, taskId: first.taskId, owner, now: now(),
+      reducer: deps.reducer ?? algorithmReducer
+    });
+  } else if (first.type === "projection_build") {
+    result = await continueBuild({
+      io, taskId: first.taskId, owner, now: now(),
+      reducer: deps.reducer ?? algorithmReducer
+    });
+  } else {
+    result = await archiveOne({
+      io, taskId: first.taskId, owner, now: now(),
+      client: deps.archiveClient ?? createDriveRepository(env)
+    });
+  }
+
+  // Success and a deterministic parking (needs_attention is already recorded
+  // in the task state) are acked; a retryable failure asks for the message
+  // again. The queue never re-dispatches: dispatchOne is the producer side.
+  const settled = result.outcome !== "retry";
   const rawMessages = batch.messages;
-  if (typeof rawMessages[0]?.ack === "function") rawMessages[0].ack();
+  if (settled) {
+    if (typeof rawMessages[0]?.ack === "function") rawMessages[0].ack();
+  } else if (typeof rawMessages[0]?.retry === "function") {
+    rawMessages[0].retry();
+  }
   for (const message of rawMessages.slice(1)) {
     if (typeof message.retry === "function") message.retry();
   }
@@ -137,8 +224,16 @@ export async function handleV2Scheduled(controller, env, ctx, deps = {}) {
   const recovery = await recoverOnce({ io, now: now(), limit: 4 });
   let dispatched = 0;
   for (const taskId of recovery.taskIds ?? []) {
-    const result = await dispatchOne({ io, taskId, owner: "v2-recovery", now: now() });
+    const result = await dispatchOneForRecovery({ io, taskId, owner: "v2-recovery", now: now() });
     if (result.outcome === "continued") dispatched += 1;
   }
   return { recovered: recovery.recovered ?? 0, dispatched };
+}
+
+// The recovery wake hands expired leases back to their queues — this is the
+// one place dispatchOne belongs (it is the producer side), unlike the queue
+// consumers above.
+async function dispatchOneForRecovery({ io, taskId, owner, now }) {
+  const { dispatchOne } = await import("./tasks/dispatcher.js");
+  return dispatchOne({ io, taskId, owner, now });
 }

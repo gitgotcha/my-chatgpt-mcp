@@ -8,7 +8,7 @@ import { Reconciler } from "./reconciler.js";
 import { createDriveRepository } from "./google-drive.js";
 import { createStorageLayout } from "./storage-layout.js";
 import { createUserStore } from "./user-store.js";
-import { handleV2Request, handleV2Queue, handleV2Scheduled } from "./rds2/routes.js";
+import { handleV2Request, handleV2Write, handleV2Queue, handleV2Scheduled } from "./rds2/routes.js";
 
 export function createWorker(env, deps = {}) {
   const repository = deps.repository ?? new D1JobRepository(env.DB);
@@ -59,6 +59,11 @@ export function createWorker(env, deps = {}) {
       if (request.method === "POST" && path === "/v2/query") {
         return handleV2Request(request, runtimeEnv ?? env, context);
       }
+      // V2 write surface: the durable receipt endpoint the local outbox
+      // delivers to.
+      if (request.method === "POST" && path === "/v2/events") {
+        return handleV2Write(request, runtimeEnv ?? env, context);
+      }
       return ingress(request, context);
     },
     async queue(batch, runtimeEnv, context) {
@@ -83,6 +88,11 @@ export function createWorker(env, deps = {}) {
 export default {
   fetch(request, env, context) {
     return createWorker(env).fetch(request, env, context);
+  },
+  // The production runtime reads THIS export for queue consumption — without
+  // it no queue message would ever reach the consumers.
+  queue(batch, env, context) {
+    return createWorker(env).queue(batch, env, context);
   },
   scheduled(controller, env, context) {
     return createWorker(env).scheduled(controller, env, context);
