@@ -18,6 +18,7 @@ import { authenticate } from "./identity/auth.js";
 import { createInvocationIo } from "./io/invocation-io.js";
 import { splitQueueBatch } from "./tasks/dispatcher.js";
 import { getTask } from "./tasks/repository.js";
+import { handleDlq } from "./tasks/dlq.js";
 import { recoverOnce } from "./tasks/recovery.js";
 import { continueBuild } from "./projection/builds.js";
 import { projectOne } from "./projection/engine.js";
@@ -162,6 +163,33 @@ function budgetedIoFor(type, env) {
 
 export async function handleV2Queue(batch, env, ctx, deps = {}) {
   const messages = Array.isArray(batch?.messages) ? batch.messages : [];
+  const queueName = batch?.queue;
+  const isDlq = queueName === "rds2-projection-dlq" || queueName === "rds2-archive-dlq";
+
+  // DLQ consumers are real consumers, not ordinary task producers. They use
+  // the queue name (rather than a forgeable message type) to enter the
+  // authoritative D1 DLQ handler; that handler is idempotent for completed or
+  // already parked tasks and only re-dispatches a still-live task.
+  if (isDlq) {
+    const bodies = messages.map((message) => message.body ?? message);
+    const [firstBody, ...restBodies] = bodies;
+    const taskId = typeof firstBody === "string" ? firstBody : firstBody?.taskId;
+    const io = budgetedIoFor(queueName === "rds2-archive-dlq" ? "archive_event" : "projection", env);
+    const now = deps.now ?? (() => new Date().toISOString());
+    const result = taskId
+      ? await handleDlq({ io, taskId, now: now() })
+      : { outcome: "noop", taskId: null, code: "invalid_dlq_message" };
+    if (result.outcome === "retry") {
+      if (typeof messages[0]?.retry === "function") messages[0].retry();
+    } else if (typeof messages[0]?.ack === "function") {
+      messages[0].ack();
+    }
+    for (const message of messages.slice(1)) {
+      if (typeof message.retry === "function") message.retry();
+    }
+    return { outcome: result.outcome, taskId: result.taskId, code: result.code ?? null, pending: restBodies.length };
+  }
+
   const { first, rest } = splitQueueBatch(messages.map((message) => message.body ?? message));
   if (!first) {
     if (typeof batch?.ackAll === "function") batch.ackAll();

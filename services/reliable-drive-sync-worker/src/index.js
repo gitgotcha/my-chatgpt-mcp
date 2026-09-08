@@ -10,6 +10,14 @@ import { createStorageLayout } from "./storage-layout.js";
 import { createUserStore } from "./user-store.js";
 import { handleV2Request, handleV2Write, handleV2Queue, handleV2Scheduled } from "./rds2/routes.js";
 
+export const V2_RECOVERY_CRON = "2-57/5 * * * *";
+
+function featureEnabled(runtimeEnv, name) {
+  // Configuration is deliberately string based: missing values and every
+  // spelling other than the literal "true" are disabled.
+  return runtimeEnv?.[name] === "true";
+}
+
 export function createWorker(env, deps = {}) {
   const repository = deps.repository ?? new D1JobRepository(env.DB);
   const publisher = deps.publisher ?? createQStashPublisher(
@@ -70,9 +78,13 @@ export function createWorker(env, deps = {}) {
       return handleV2Queue(batch, runtimeEnv ?? env, context);
     },
     scheduled(controller, _runtimeEnv, context) {
+      const runtimeEnv = _runtimeEnv ?? env;
       // The V2 recovery wake on its own reserved cron expression.
-      if (controller?.cron === "*/7 * * * *") {
-        context.waitUntil(handleV2Scheduled(controller, _runtimeEnv, context));
+      if (controller?.cron === V2_RECOVERY_CRON) {
+        const work = featureEnabled(runtimeEnv, "RDS2_RECOVERY_ENABLED")
+          ? handleV2Scheduled(controller, runtimeEnv, context)
+          : Promise.resolve({ outcome: "disabled", code: "recovery_disabled" });
+        context.waitUntil(work);
         return;
       }
       const work = controller?.cron === "0 * * * *"
