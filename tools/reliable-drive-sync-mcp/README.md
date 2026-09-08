@@ -14,7 +14,8 @@ The event is written to SQLite before any network call. A row is removed only
 after `/v1/jobs` returns HTTP 202 with a non-empty `jobId`. Rows left in
 `pending` or interrupted in `sending` are retried automatically. Read-only
 interview session queries and legacy migration dry-runs use `/v1/query` and do
-not enter either Outbox.
+not enter either Outbox. When `RELIABLE_DRIVE_SYNC_WRITE_VERSION=v2`, the
+same read-only operations use `/v2/query`, while writes use `/v2/events`.
 
 ## Windows setup
 
@@ -55,6 +56,12 @@ Restart ChatGPT desktop, Codex, and WorkBuddy. `tools/list` must return only:
 Neither receipt claims that Google Drive has already finished. Drive delivery
 is completed asynchronously by QStash and the Worker.
 
+For V2 receipts, `persistence.localOutbox: "pending"` means the envelope is
+durable locally but D1 has not acknowledged it yet; `cloudPersistence:
+"d1_committed"` means D1 accepted it. Drive archival remains asynchronous and
+must be checked separately; no V2 receipt claims a Drive file id or completed
+archival until the archive worker has verified it.
+
 Environment variables read by `start.cmd`:
 
 - `RELIABLE_DRIVE_SYNC_INGRESS_URL`
@@ -71,16 +78,16 @@ The local server also routes the opt-in generic profile protocol over the same
 `submit_event` tool. `tools/list` still exposes exactly one tool.
 
 - `system.capabilities.read`, `system.user.resolve` and `profile.snapshot.read`
-  flow directly to `/v1/query` and never enter the SQLite Outbox. Capability
+  flow directly to `/v2/query` in V2 mode and never enter the SQLite Outbox. Capability
   discovery works without `identity` or `displayName`.
-- `profile.evidence.recorded` is a durable write. Before enqueue, the local
+- `profile.evidence.recorded` is a durable write to `/v2/events`. Before enqueue, the local
   delivery service validates the caller event shape and domain, requires an
   explicit `identity.userId`/`identity.username`, and resolves an existing
   identity through `/v1/identity`. A `404` returns `identity_not_found` before
   any enqueue and never fabricates a local UUID; the old timeout/404 fallback
   that auto-registers strangers remains untouched for legacy event types.
 - Bound identity and domain are written into `payload.event` before the
-  envelope is sent to `/v1/jobs`, matching the shape the Worker ingress
+  envelope is sent to `/v2/events`, matching the shape the Worker ingress
   validates.
 - `unsupported_capability`, `invalid_domain`, `invalid_profile_event` and
   `identity_not_found` are permanent (non-retryable) local results.
