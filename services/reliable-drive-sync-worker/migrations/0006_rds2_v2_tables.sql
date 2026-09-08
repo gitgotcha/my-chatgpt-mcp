@@ -190,14 +190,14 @@ END;
 CREATE TRIGGER rds2_guard_task
 BEFORE INSERT ON rds2_commit_guards
 BEGIN
-  SELECT CASE WHEN NOT EXISTS (
+  SELECT (CASE WHEN NOT EXISTS (
     SELECT 1 FROM rds2_tasks t
     WHERE t.task_id = NEW.task_id
       AND t.state = 'processing'
       AND t.lease_owner = NEW.owner
       AND t.lease_epoch = NEW.expected_epoch
       AND t.lease_until > NEW.now_utc
-  ) THEN RAISE(ABORT, 'stale_task_write') END;
+  ) THEN RAISE(ABORT, 'stale_task_write') END);
 END;
 
 -- Projection guards must carry the base revision and it must still equal the
@@ -217,7 +217,7 @@ CREATE TRIGGER rds2_guard_projection_revision
 BEFORE INSERT ON rds2_commit_guards
 WHEN NEW.expected_revision IS NOT NULL
 BEGIN
-  SELECT CASE WHEN NOT EXISTS (
+  SELECT (CASE WHEN NOT EXISTS (
     SELECT 1
     FROM rds2_tasks t
     JOIN rds2_projections p
@@ -226,5 +226,5 @@ BEGIN
      AND p.projection_name = t.projection_name
     WHERE t.task_id = NEW.task_id
       AND p.revision = NEW.expected_revision
-  ) THEN RAISE(ABORT, 'stale_projection_revision') END;
+   ) THEN RAISE(ABORT, 'stale_projection_revision') END);
 END;

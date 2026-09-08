@@ -24,6 +24,11 @@ function credentialHash(seed) {
   return out;
 }
 
+test("migration trigger CASE guards are parenthesized for remote D1 parsing", () => {
+  assert.doesNotMatch(MIGRATION_SQL, /SELECT CASE WHEN/);
+  assert.match(MIGRATION_SQL, /SELECT \(CASE WHEN/);
+});
+
 async function seedUser(db, { userId, name, hash }) {
   await db.batch([
     db.prepare(
