@@ -54,7 +54,9 @@ const STATUS_BY_CODE = {
   envelope_too_large: 413,
   read_only_event: 400,
   unsupported_write_type: 400,
-  migration_disabled: 400
+  migration_disabled: 400,
+  v2_query_disabled: 503,
+  v2_write_disabled: 503
 };
 
 function jsonResponse(body, status = 200) {
@@ -75,10 +77,29 @@ function credentialFrom(request) {
   return match ? match[1].trim() : null;
 }
 
+function featureEnabled(env, name) {
+  return env?.[name] === "true";
+}
+
+function allowedUserIds(env) {
+  const raw = typeof env?.RDS2_ALLOWED_USER_IDS === "string" ? env.RDS2_ALLOWED_USER_IDS : "";
+  return raw.split(",").map((value) => value.trim()).filter(Boolean);
+}
+
+function domainEnabled(env, namespace) {
+  const raw = typeof env?.RDS2_ENABLED_DOMAINS === "string"
+    ? env.RDS2_ENABLED_DOMAINS
+    : typeof env?.RDS2_V2_DOMAINS === "string" ? env.RDS2_V2_DOMAINS : "";
+  return raw.split(",").map((value) => value.trim()).filter(Boolean).includes(namespace);
+}
+
 export async function handleV2Request(request, env, ctx, deps = {}) {
   const db = deps.db ?? env?.DB;
   const now = deps.now ?? (() => new Date().toISOString());
   try {
+    if (!featureEnabled(env, "RDS2_QUERY_ENABLED")) {
+      return errorResponse("v2_query_disabled");
+    }
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== "object" || body.storageVersion !== 2
       || typeof body.operation !== "string") {
@@ -127,6 +148,16 @@ export async function handleV2Write(request, env, ctx, deps = {}) {
     const submission = classifySubmission(envelope);
     if (submission.kind !== "write") {
       return errorResponse(SUBMISSION_REJECTION_CODES[submission.kind]);
+    }
+    if (!featureEnabled(env, "RDS2_WRITE_ENABLED")) {
+      return errorResponse("v2_write_disabled");
+    }
+    if (!domainEnabled(env, submission.envelope.namespace)) {
+      return errorResponse("domain_disabled", 403);
+    }
+    const allowed = allowedUserIds(env);
+    if (allowed.length === 0 || !allowed.includes(principal.userId)) {
+      return errorResponse("user_disabled", 401);
     }
     const io = createInvocationIo({
       db,

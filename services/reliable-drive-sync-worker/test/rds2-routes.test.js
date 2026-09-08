@@ -27,7 +27,8 @@ const EVENT_ID = "a0000000-0000-4000-8000-000000000001";
 
 const ENV = {
   RDS2_CURSOR_SECRET: "cursor-secret-t10",
-  RDS2_V2_DOMAINS: "algorithm,interview"
+  RDS2_V2_DOMAINS: "algorithm,interview",
+  RDS2_QUERY_ENABLED: "true"
 };
 
 const envelopeBody = (overrides = {}) => ({

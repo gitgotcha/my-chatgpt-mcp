@@ -52,7 +52,9 @@ function requireFields(params, allowed, required) {
 }
 
 function domains(env) {
-  const raw = typeof env?.RDS2_V2_DOMAINS === "string" ? env.RDS2_V2_DOMAINS : "";
+  const raw = typeof env?.RDS2_ENABLED_DOMAINS === "string"
+    ? env.RDS2_ENABLED_DOMAINS
+    : typeof env?.RDS2_V2_DOMAINS === "string" ? env.RDS2_V2_DOMAINS : "";
   return raw.split(",").map((value) => value.trim()).filter(Boolean);
 }
 

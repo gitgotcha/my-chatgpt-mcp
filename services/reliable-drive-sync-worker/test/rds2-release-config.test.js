@@ -77,6 +77,21 @@ test("T16 disabled recovery cron is a no-op and does not invoke the recovery han
   assert.deepEqual(await scheduledWork, { outcome: "disabled", code: "recovery_disabled" });
 });
 
+test("T16 disabling new V2 query traffic does not alter the legacy surface", async () => {
+  const { handleV2Request } = await import("../src/rds2/routes.js");
+  const response = await handleV2Request(
+    new Request("https://worker.example/v2/query", {
+      method: "POST",
+      body: JSON.stringify({ storageVersion: 2, operation: "capabilities", params: {} })
+    }),
+    { RDS2_QUERY_ENABLED: "false", RDS2_CURSOR_SECRET: "release-test-secret" },
+    null,
+    { principal: { userId: "11111111-1111-4111-8111-111111111111", username: "synthetic" } }
+  );
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error.code, "v2_query_disabled");
+});
+
 test("T16 local setup exposes an explicit v1/v2 write switch and never embeds credentials", () => {
   assert.match(SETUP, /ValidateSet\('v1',\s*'v2'\)/);
   assert.match(SETUP, /RELIABLE_DRIVE_SYNC_WRITE_VERSION/);
