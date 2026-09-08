@@ -2,6 +2,8 @@ import readline from "node:readline";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { DeliveryService } from "./delivery-service.mjs";
+import { randomUUID } from "node:crypto";
+import { classifySubmission } from "../../shared/rds2-protocol.mjs";
 import { isV2ReadMessage, toV2Query, parseV2StatusInput } from "./v2-routing.mjs";
 
 const TOOL = {
@@ -10,8 +12,14 @@ const TOOL = {
   inputSchema: {
     type: "object",
     additionalProperties: false,
-    required: ["schemaVersion", "namespace", "eventType", "requestId"],
+    anyOf: [
+      { required: ["schemaVersion", "namespace", "eventType", "requestId"] },
+      { required: ["storageVersion", "operation", "params"] }
+    ],
     properties: {
+      storageVersion: { type: "integer", const: 2 },
+      operation: { type: "string", enum: ["capabilities", "user.resolve", "projection.read", "interview.session.list", "interview.session.load", "event.status"] },
+      params: { type: "object" },
       schemaVersion: { type: "string" },
       namespace: { type: "string" },
       eventType: { type: "string" },
@@ -38,11 +46,11 @@ export function deriveWorkerUrl(configuredUrl) {
 const reply = (id, result) => ({ jsonrpc: "2.0", id, result });
 const failure = (id, code, message) => ({ jsonrpc: "2.0", id, error: { code, message } });
 
-function defaultOutboxPath() {
+function defaultOutboxPath(version = "v1") {
   const base = process.env.LOCALAPPDATA
     ?? process.env.XDG_DATA_HOME
     ?? join(homedir(), ".local", "share");
-  return join(base, "ReliableDriveSync", "outbox.sqlite");
+  return join(base, "ReliableDriveSync", version === "v2" ? "outbox-v2.sqlite" : "outbox.sqlite");
 }
 
 async function createService(options) {
@@ -73,15 +81,15 @@ async function createV2Service(options) {
   const { LocalOutboxV2 } = await import("./local-outbox-v2.mjs");
   const { createDeliveryServiceV2 } = await import("./delivery-service-v2.mjs");
   const outbox = options.outbox ?? new LocalOutboxV2({
-    path: options.outboxPath ?? defaultOutboxPath(),
+    path: options.outboxPath ?? defaultOutboxPath("v2"),
     clock: () => new Date().toISOString(),
-    owner: "stdio-bridge"
+    owner: `stdio-bridge-${randomUUID()}`
   });
   return createDeliveryServiceV2({
     outbox,
     clock: () => new Date().toISOString(),
     send: async (envelope) => {
-      const response = await fetch(`${deriveWorkerUrl(options.workerUrl)}/v2/events`, {
+      const response = await (options.fetchImpl ?? fetch)(`${deriveWorkerUrl(options.workerUrl)}/v2/events`, {
         method: "POST",
         headers: {
           authorization: `Bearer ${options.token}`,
@@ -101,7 +109,7 @@ async function createV2Service(options) {
 }
 
 async function v2QueryCall(payload, options) {
-  const response = await fetch(`${deriveWorkerUrl(options.workerUrl)}/v2/query`, {
+  const response = await (options.fetchImpl ?? fetch)(`${deriveWorkerUrl(options.workerUrl)}/v2/query`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${options.token}`,
@@ -124,16 +132,21 @@ async function submitEvent(id, args, options) {
     // writes go through the local durable outbox; explicit V2 status inputs
     // keep their own schema.
     if ((options.writeVersion ?? "v1") === "v2") {
-      if (args?.storageVersion === 2 && args?.operation === "event.status") {
-        const status = parseV2StatusInput(args);
-        const result = await v2QueryCall(status, options);
+      if (args?.storageVersion === 2) {
+        const query = args.operation === "event.status" ? parseV2StatusInput(args) : args;
+        if (!TOOL.inputSchema.properties.operation.enum.includes(query.operation)
+          || !query.params || typeof query.params !== "object" || Array.isArray(query.params)) {
+          throw new Error("invalid_v2_query");
+        }
+        const result = await v2QueryCall(query, options);
         return reply(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
       }
       if (isV2ReadMessage(args)) {
         const result = await v2QueryCall(toV2Query(args), options);
         return reply(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
       }
-      const service = await (options.v2Service ?? createV2Service(options));
+      if (classifySubmission(args).kind !== "write") throw new Error("unsupported_write_type");
+      const service = await (options.v2Service ?? getV2Service(options));
       const result = await service.submit(args);
       return reply(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
     }
@@ -146,6 +159,18 @@ async function submitEvent(id, args, options) {
   } catch (cause) {
     return failure(id, -32603, cause instanceof Error ? cause.message : String(cause));
   }
+}
+
+const v2Services = new WeakMap();
+function getV2Service(options) {
+  if (!v2Services.has(options)) {
+    const pending = createV2Service(options).catch((error) => {
+      v2Services.delete(options);
+      throw error;
+    });
+    v2Services.set(options, pending);
+  }
+  return v2Services.get(options);
 }
 
 export async function handleRequest(request, options = {}) {

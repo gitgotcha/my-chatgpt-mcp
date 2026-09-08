@@ -31,6 +31,33 @@ const ENV = {
   RDS2_QUERY_ENABLED: "true"
 };
 
+test("V2 native interview reads and cross-domain event status use persisted data", async () => {
+  await runRoutesTest(async ({ rawDb, deps }) => {
+    await rawDb.prepare(`INSERT INTO rds2_projections (user_id,namespace,projection_name,revision,last_event_seq,active_generation,building,summary_json,updated_at)
+      VALUES (?, 'interview','interview',1,1,1,0,'{}',?)`).bind(USER_ID,NOW).run();
+    await rawDb.prepare(`INSERT INTO rds2_projection_rows (user_id,namespace,projection_name,generation,row_kind,row_key,sort_key,value_json,updated_at)
+      VALUES (?, 'interview','interview',1,'session','s1','1',?,?)`).bind(USER_ID,JSON.stringify({sessionId:'s1',status:'review_pending',questions:[{originalAnswer:'evidence'}]}),NOW).run();
+    const query = async (operation, params) => {
+      const response = await handleV2Request(new Request('https://test/v2/query', {method:'POST',headers:{authorization:`Bearer ${CREDENTIAL}`},body:JSON.stringify({storageVersion:2,operation,params})}), ENV, null, {db:rawDb,now:deps.now});
+      assert.equal(response.status,200,await response.clone().text());
+      return response.json();
+    };
+    assert.equal((await query('interview.session.list',{})).sessions[0].sessionId,'s1');
+    assert.equal((await query('interview.session.load',{sessionId:'s1'})).session.questions[0].originalAnswer,'evidence');
+    await rawDb.prepare("UPDATE rds2_events SET namespace='interview',projection_name='interview' WHERE event_id=?").bind(EVENT_ID).run();
+    const status = await query('event.status',{targetRequestId:'req-1'});
+    assert.equal(status.projection,'projected');
+    assert.equal(status.archive,'pending');
+    const { deriveTaskId } = await import('../src/rds2/events/repository.js');
+    const artifact = await deriveTaskId({userId:USER_ID,namespace:'interview',projectionName:'interview'},EVENT_ID,'artifact-event');
+    await rawDb.prepare(`INSERT INTO rds2_archive_deliveries (artifact_id,user_id,namespace,projection_name,object_type,object_name,frozen_json,artifact_hash,created_at)
+      VALUES (?,?,'interview','interview','event','e.json','{}','hash',?)`).bind(artifact,USER_ID,NOW).run();
+    assert.equal((await query('event.status',{targetEventId:EVENT_ID})).archive,'pending');
+    await rawDb.prepare('UPDATE rds2_archive_deliveries SET drive_file_id=?,delivered_at=? WHERE artifact_id=?').bind('drive-id',NOW,artifact).run();
+    assert.equal((await query('event.status',{targetEventId:EVENT_ID})).archive,'archived');
+  });
+});
+
 const envelopeBody = (overrides = {}) => ({
   eventId: EVENT_ID,
   eventKey: "k-1",

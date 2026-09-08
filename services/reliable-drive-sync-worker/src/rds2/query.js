@@ -5,6 +5,7 @@
 // here writes a task, a request row or an outbox entry.
 import { authenticate } from "./identity/auth.js";
 import { canonicalJson } from "../../../../shared/rds2-protocol.mjs";
+import { deriveTaskId } from "./events/repository.js";
 
 export const MAX_PAGE_LIMIT = 50;
 export const DEFAULT_PAGE_LIMIT = 20;
@@ -121,7 +122,7 @@ export function createV2QueryExecutor({ db, principal, env, deps = {} }) {
     }
   };
 
-  const readProjectionPage = async ({ namespace, projectionName, limit, cursorPayload }) => {
+  const readProjectionPage = async ({ namespace, projectionName, limit, cursorPayload, rowKind }) => {
     const head = await db.prepare(
       `SELECT revision, last_event_seq, active_generation, summary_json, building
        FROM rds2_projections WHERE user_id = ? AND namespace = ? AND projection_name = ?`
@@ -135,54 +136,54 @@ export function createV2QueryExecutor({ db, principal, env, deps = {} }) {
     const limitClamped = Math.min(Math.max(limit ?? DEFAULT_PAGE_LIMIT, 1), MAX_PAGE_LIMIT);
     const statement = cursorPayload
       ? db.prepare(
-          `SELECT row_key, value_json, sort_key FROM rds2_projection_rows
+          `SELECT row_kind, row_key, value_json, COALESCE(sort_key, '') AS sort_key FROM rds2_projection_rows
            WHERE user_id = ? AND namespace = ? AND projection_name = ?
-             AND generation = ? AND (sort_key, row_key) > (?, ?)
-           ORDER BY sort_key, row_key LIMIT ?`
+             AND generation = ? AND (? IS NULL OR row_kind = ?)
+             AND (row_kind, COALESCE(sort_key, ''), row_key) > (?, ?, ?)
+           ORDER BY row_kind, COALESCE(sort_key, ''), row_key LIMIT ?`
         ).bind(principal.userId, namespace, projectionName,
-          Number(head.active_generation), cursorPayload.s, cursorPayload.r, limitClamped + 1)
+          Number(head.active_generation), rowKind ?? null, rowKind ?? null, cursorPayload.k, cursorPayload.s, cursorPayload.r, limitClamped + 1)
       : db.prepare(
-          `SELECT row_key, value_json, sort_key FROM rds2_projection_rows
+          `SELECT row_kind, row_key, value_json, COALESCE(sort_key, '') AS sort_key FROM rds2_projection_rows
            WHERE user_id = ? AND namespace = ? AND projection_name = ? AND generation = ?
-           ORDER BY sort_key, row_key LIMIT ?`
+             AND (? IS NULL OR row_kind = ?)
+           ORDER BY row_kind, COALESCE(sort_key, ''), row_key LIMIT ?`
         ).bind(principal.userId, namespace, projectionName,
-          Number(head.active_generation), limitClamped + 1);
+          Number(head.active_generation), rowKind ?? null, rowKind ?? null, limitClamped + 1);
 
     const rows = (await statement.all()).results ?? [];
     // Byte cap: a row that would push the response past 256 KiB ends the page
     // here instead of being truncated mid-entry.
     const entries = [];
-    let bytes = 0;
+    let bytes = Buffer.byteLength(head.summary_json ?? "null", "utf8") + 2048;
     let exhausted = rows.length <= limitClamped;
     const page = rows.slice(0, limitClamped);
     for (const row of page) {
-      const entry = { rowKey: row.row_key, sortKey: row.sort_key, value: JSON.parse(row.value_json) };
+      const entry = { rowKind: row.row_kind, rowKey: row.row_key, sortKey: row.sort_key, value: JSON.parse(row.value_json) };
       bytes += Buffer.byteLength(canonicalJson(entry), "utf8");
       if (bytes > MAX_RESPONSE_BYTES) {
-        return {
-          revision: Number(head.revision),
-          summary: JSON.parse(head.summary_json ?? "null"),
-          entries,
-          nextCursor: null,
-          exhausted: false
-        };
+        if (entries.length === 0) throw fail("response_too_large", 413);
+        exhausted = false;
+        break;
       }
       entries.push(entry);
     }
     let nextCursor = null;
-    if (!exhausted && page.length > 0) {
-      const last = page[page.length - 1];
+    if (!exhausted && entries.length > 0) {
+      const last = entries[entries.length - 1];
       nextCursor = await encodeCursor({
         secret,
         payload: {
           u: principal.userId, o: "projection.read", n: namespace, p: projectionName,
-          s: last.sort_key, r: last.row_key, v: Number(head.revision),
+          k: last.rowKind, s: last.sortKey, r: last.rowKey, f: rowKind ?? null, v: Number(head.revision),
           e: Date.parse(now()) + CURSOR_TTL_MS
         }
       });
     }
     return {
       revision: Number(head.revision),
+      building: Boolean(head.building),
+      lastEventSeq: Number(head.last_event_seq),
       summary: JSON.parse(head.summary_json ?? "null"),
       entries,
       nextCursor
@@ -220,7 +221,7 @@ export function createV2QueryExecutor({ db, principal, env, deps = {} }) {
         if (cursorPayload.u !== principal.userId
           || cursorPayload.o !== "projection.read"
           || cursorPayload.n !== params.namespace
-          || cursorPayload.p !== params.projectionName) {
+          || cursorPayload.p !== params.projectionName || cursorPayload.f != null) {
           throw fail("cursor_scope_mismatch", 403);
         }
       }
@@ -235,15 +236,36 @@ export function createV2QueryExecutor({ db, principal, env, deps = {} }) {
     async interviewSessionList(params, extras) {
       requireFields(params, ["limit", "cursor"], []);
       requireDomain(env, "interview");
-      if (typeof extras?.interviewRead !== "function") throw fail("domain_disabled", 403);
-      return extras.interviewRead({ kind: "interview.session.list", params, principal });
+      if (typeof extras?.interviewRead === "function") return extras.interviewRead({ kind: "interview.session.list", params, principal });
+      if (params.limit !== undefined && (!Number.isSafeInteger(params.limit) || params.limit < 1)) throw fail("invalid_params", 400);
+      const cursorPayload = params.cursor ? await decodeCursor({ secret, cursor: params.cursor, now }) : null;
+      if (cursorPayload && (cursorPayload.u !== principal.userId || cursorPayload.o !== "projection.read"
+        || cursorPayload.n !== "interview" || cursorPayload.p !== "interview" || cursorPayload.f !== "session")) throw fail("cursor_scope_mismatch", 403);
+      let page;
+      try {
+        page = await readProjectionPage({ namespace: "interview", projectionName: "interview", limit: params.limit, cursorPayload, rowKind: "session" });
+      } catch (error) {
+        if (error.code === "projection_not_found" && !cursorPayload) return { sessions: [], nextCursor: null };
+        throw error;
+      }
+      return { ...page, entries: undefined, sessions: page.entries.map(({ value }) => ({
+        sessionId: value.sessionId, completedAt: value.completedAt, sourceType: value.sourceType,
+        status: value.status, questionCount: value.questions?.length ?? 0
+      })) };
     },
 
     async interviewSessionLoad(params, extras) {
       requireFields(params, ["sessionId"], ["sessionId"]);
       requireDomain(env, "interview");
-      if (typeof extras?.interviewRead !== "function") throw fail("domain_disabled", 403);
-      return extras.interviewRead({ kind: "interview.session.load", params, principal });
+      if (typeof extras?.interviewRead === "function") return extras.interviewRead({ kind: "interview.session.load", params, principal });
+      if (typeof params.sessionId !== "string" || !params.sessionId.trim()) throw fail("invalid_params", 400);
+      const row = await db.prepare(`SELECT r.value_json FROM rds2_projection_rows r
+        JOIN rds2_projections p ON p.user_id=r.user_id AND p.namespace=r.namespace
+          AND p.projection_name=r.projection_name AND p.active_generation=r.generation
+        WHERE r.user_id=? AND r.namespace='interview' AND r.projection_name='interview'
+          AND r.row_kind='session' AND r.row_key=?`).bind(principal.userId, params.sessionId).first();
+      if (!row) throw fail("session_not_found", 404);
+      return { session: JSON.parse(row.value_json) };
     },
 
     async eventStatus(params) {
@@ -260,20 +282,24 @@ export function createV2QueryExecutor({ db, principal, env, deps = {} }) {
            FROM rds2_requests WHERE user_id = ? AND request_id = ?`
         ).bind(principal.userId, params.targetRequestId).first();
         if (!request) throw fail("event_not_found", 404);
+        const event = await db.prepare(
+          `SELECT event_seq, namespace, projection_name FROM rds2_events WHERE user_id=? AND event_id=?`
+        ).bind(principal.userId, request.canonical_event_id).first();
+        if (!event) throw fail("event_not_found", 404);
         const projection = await db.prepare(
           `SELECT revision FROM rds2_projections WHERE user_id = ? AND namespace = ? AND projection_name = ?
            AND last_event_seq >= (SELECT event_seq FROM rds2_events WHERE user_id = ? AND event_id = ?)`
-        ).bind(principal.userId, "algorithm", "learning", principal.userId, request.canonical_event_id).first();
+        ).bind(principal.userId, event.namespace, event.projection_name, principal.userId, request.canonical_event_id).first();
+        const artifactId = await deriveTaskId({ userId: principal.userId, namespace: event.namespace, projectionName: event.projection_name }, request.canonical_event_id, "artifact-event");
         const archive = await db.prepare(
-          `SELECT object_name FROM rds2_archive_deliveries WHERE user_id = ? AND artifact_id = (
-             SELECT artifact_id FROM rds2_events WHERE user_id = ? AND event_id = ?)`
-        ).bind(principal.userId, principal.userId, request.canonical_event_id).first();
+          `SELECT object_name, drive_file_id, delivered_at FROM rds2_archive_deliveries WHERE user_id = ? AND artifact_id = ?`
+        ).bind(principal.userId, artifactId).first();
         return {
           target: { requestId: request.request_id },
           eventId: request.canonical_event_id,
           receipt: JSON.parse(request.receipt_json ?? "null"),
           projection: projection ? "projected" : "pending",
-          archive: archive ? "archived" : "pending"
+          archive: archive?.delivered_at && archive?.drive_file_id ? "archived" : "pending"
         };
       }
       if (typeof params.targetEventId !== "string" || !params.targetEventId.trim()) {
@@ -287,11 +313,9 @@ export function createV2QueryExecutor({ db, principal, env, deps = {} }) {
         `SELECT request_id, receipt_json FROM rds2_requests
          WHERE user_id = ? AND canonical_event_id = ? ORDER BY created_at LIMIT 1`
       ).bind(principal.userId, params.targetEventId).first();
-      return {
-        target: { eventId: event.event_id },
-        eventId: event.event_id,
-        receipt: request ? JSON.parse(request.receipt_json ?? "null") : null
-      };
+      if (!request) throw fail("event_not_found", 404);
+      const result = await this.eventStatus({ targetRequestId: request.request_id });
+      return { ...result, target: { eventId: event.event_id } };
     }
   };
 }

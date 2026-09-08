@@ -280,3 +280,15 @@ test("V1 sync callback remains reachable to drain accepted work after ingress cl
   }), env, null);
   assert.equal(response.status, 489, "the callback still reaches signature validation");
 });
+
+test("full V1 retirement blocks all legacy routes and skips legacy cron", async () => {
+  const { createWorker } = await import('../src/index.js');
+  const env = { V1_RETIRED:'true' };
+  const worker = createWorker(env,{repository:{},publisher:{}});
+  for(const path of ['/v1/jobs','/v1/sync','/v1/identity','/v1/qstash/failure']) {
+    const response = await worker.fetch(new Request(`https://test${path}`,{method:'POST',body:'{}'}),env,null);
+    assert.equal(response.status,410);
+    assert.deepEqual(await response.json(),{error:'v1_retired'});
+  }
+  worker.scheduled({cron:'*/5 * * * *'},env,{waitUntil(){throw new Error('legacy_cron_must_not_run');}});
+});

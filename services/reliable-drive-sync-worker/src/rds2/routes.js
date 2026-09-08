@@ -165,12 +165,12 @@ function domainEnabled(env, namespace) {
 }
 
 export async function handleV2Request(request, env, ctx, deps = {}) {
-  const db = deps.db ?? env?.DB;
   const now = deps.now ?? (() => new Date().toISOString());
   try {
     if (!featureEnabled(env, "RDS2_QUERY_ENABLED")) {
       return errorResponse("v2_query_disabled");
     }
+    const db = createInvocationIo({ db: deps.db ?? env?.DB, limit: 20 }).db;
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== "object" || body.storageVersion !== 2
       || typeof body.operation !== "string") {

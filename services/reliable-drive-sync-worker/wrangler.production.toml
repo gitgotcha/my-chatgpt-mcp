@@ -1,0 +1,59 @@
+name = "reliable-drive-sync"
+main = "src/index.js"
+compatibility_date = "2026-08-13"
+
+[vars]
+SYNC_WORKER_URL = "https://reliable-drive-sync.qiaobingyuan886.workers.dev/v1/sync"
+QSTASH_FAILURE_CALLBACK_URL = "https://reliable-drive-sync.qiaobingyuan886.workers.dev/v1/qstash/failure"
+QSTASH_URL = "https://qstash-us-east-1.upstash.io"
+GENERIC_PROFILE_ENABLED = "false"
+V1_WRITE_ENABLED = "false"
+V1_RETIRED = "true"
+RDS2_WRITE_ENABLED = "true"
+RDS2_QUERY_ENABLED = "true"
+RDS2_PROJECTION_ENABLED = "true"
+RDS2_ARCHIVE_ENABLED = "true"
+RDS2_RECOVERY_ENABLED = "true"
+RDS2_INIT_ENABLED = "false"
+RDS2_ENABLED_DOMAINS = "algorithm,interview,resume-knowledge,profile"
+RDS2_ALLOWED_USER_IDS = "00000000-0000-4000-8000-000000000001,3837e7fa-cbe5-4ad9-afa7-064b7f0fe089"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "reliable-drive-sync"
+database_id = "64e7d63f-9275-45d3-be73-9e8cd4908ccd"
+
+[[queues.producers]]
+queue = "rds2-projection"
+binding = "RDS2_PROJECTION_QUEUE"
+
+[[queues.producers]]
+queue = "rds2-archive"
+binding = "RDS2_ARCHIVE_QUEUE"
+
+[[queues.consumers]]
+queue = "rds2-projection"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 5
+dead_letter_queue = "rds2-projection-dlq"
+
+[[queues.consumers]]
+queue = "rds2-archive"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 5
+dead_letter_queue = "rds2-archive-dlq"
+
+[[queues.consumers]]
+queue = "rds2-projection-dlq"
+max_batch_size = 1
+max_batch_timeout = 5
+
+[[queues.consumers]]
+queue = "rds2-archive-dlq"
+max_batch_size = 1
+max_batch_timeout = 5
+
+[triggers]
+crons = ["2-57/5 * * * *"]

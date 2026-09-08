@@ -73,6 +73,9 @@ export function createWorker(env, deps = {}) {
     async fetch(request, runtimeEnv, context) {
       const path = new URL(request.url).pathname;
       const activeEnv = runtimeEnv ?? env;
+      if (activeEnv?.V1_RETIRED === "true" && path.startsWith("/v1/")) {
+        return Response.json({ error: "v1_retired" }, { status: 410 });
+      }
       if (request.method === "POST" && path === "/v1/sync") return sync(request);
       if (request.method === "POST" && path === "/v1/qstash/failure") return failure(request);
       // V2 read surface: a separate DTO and route, the V1 routes above stay
@@ -107,6 +110,7 @@ export function createWorker(env, deps = {}) {
         context.waitUntil(work);
         return;
       }
+      if (runtimeEnv?.V1_RETIRED === "true") return;
       const work = controller?.cron === "0 * * * *"
         ? reconciler.runHourly()
         : controller?.cron === "0 */6 * * *"
