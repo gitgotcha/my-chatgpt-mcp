@@ -195,23 +195,23 @@ export async function handleV2Queue(batch, env, ctx, deps = {}) {
     if (typeof batch?.ackAll === "function") batch.ackAll();
     return { outcome: "noop" };
   }
-  const io = budgetedIoFor(first.type, env);
+  const io = budgetedIoFor(first.taskType, env);
   const now = deps.now ?? (() => new Date().toISOString());
-  const owner = `v2-consumer-${first.type}`;
+  const owner = `v2-consumer-${first.taskType}`;
 
   // The message only SELECTS the entry point; the real task content and type
   // come from D1 and are cross-checked — a stale or lying message is acked,
   // never spun on.
   const task = await getTask(io.db, first.taskId);
   let result;
-  if (!task || task.type !== first.type) {
+  if (!task || task.type !== first.taskType) {
     result = { outcome: "noop", taskId: first.taskId, code: "task_type_mismatch" };
-  } else if (first.type === "projection") {
+  } else if (first.taskType === "projection") {
     result = await projectOne({
       io, taskId: first.taskId, owner, now: now(),
       reducer: deps.reducer ?? algorithmReducer
     });
-  } else if (first.type === "projection_build") {
+  } else if (first.taskType === "projection_build") {
     result = await continueBuild({
       io, taskId: first.taskId, owner, now: now(),
       reducer: deps.reducer ?? algorithmReducer

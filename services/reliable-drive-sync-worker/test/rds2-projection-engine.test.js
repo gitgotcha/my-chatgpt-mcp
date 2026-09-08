@@ -189,7 +189,7 @@ test("projectOne applies the minimal unprocessed event and completes its task at
       "SELECT state FROM rds2_tasks WHERE task_id = ?"
     ).bind(taskId).first("state");
     assert.equal(taskRow, "completed");
-    assert.deepEqual(sent, [{ taskId, type: "projection" }], `(${binding}) only the dispatch send happens`);
+    assert.deepEqual(sent, [{ taskId, taskType: "projection", attempt: 1 }], `(${binding}) only the dispatch send happens`);
   });
 });
 

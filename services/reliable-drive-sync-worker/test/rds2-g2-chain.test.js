@@ -119,7 +119,7 @@ async function drainTasks({ rawDb, makeIo, sent, rounds = 10 }) {
     for (const message of messages) {
       const lease = await claimForProcessing({ db: rawDb, taskId: message.taskId, owner: `consumer-${round}`, now: NOW });
       if (!lease) continue;
-      if (message.type === "projection") {
+      if (message.taskType === "projection") {
         await projectOne({ io: makeIo(), taskId: message.taskId, owner: "consumer", now: NOW, reducer: algorithmReducer, lease });
       } else {
         const io = makeIo(16);

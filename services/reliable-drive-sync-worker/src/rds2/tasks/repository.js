@@ -39,7 +39,7 @@ export async function claimForDispatch({ db, taskId, owner, now, leaseSeconds = 
      SET state = 'dispatching', lease_owner = ?, lease_until = ?,
          lease_epoch = lease_epoch + 1, attempt = attempt + 1, updated_at = ?
      WHERE task_id = ? AND state = 'pending' AND available_at <= ?
-     RETURNING task_id, type, lease_owner, lease_until, lease_epoch`
+     RETURNING task_id, type, attempt, lease_owner, lease_until, lease_epoch`
   ).bind(owner, leaseUntil(now, leaseSeconds), now, taskId, now).all();
   const row = result.results[0];
   if (!row) return null;
@@ -48,7 +48,8 @@ export async function claimForDispatch({ db, taskId, owner, now, leaseSeconds = 
     type: row.type,
     owner: row.lease_owner,
     leaseUntil: row.lease_until,
-    epoch: Number(row.lease_epoch)
+    epoch: Number(row.lease_epoch),
+    attempt: Number(row.attempt)
   };
 }
 

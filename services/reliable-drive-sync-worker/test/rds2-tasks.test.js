@@ -86,14 +86,14 @@ test("a pending task before available_at is never sent", async () => {
   });
 });
 
-test("dispatchOne claims with a lease, sends only taskId and type, then marks queued", async () => {
+test("dispatchOne claims with a lease, sends taskId, taskType and attempt, then marks queued", async () => {
   await runTaskTest(async ({ binding, rawDb, io, sent }) => {
     const task = await seedTask(rawDb);
     const result = await dispatchOne({ io, taskId: task.taskId, owner: "worker-a", now: NOW });
     assert.equal(result.outcome, "continued");
     assert.equal(result.code, "queued");
-    assert.deepEqual(sent.map((entry) => entry.message), [{ taskId: task.taskId, type: "projection" }],
-      `(${binding}) queue messages carry only taskId and type`);
+    assert.deepEqual(sent.map((entry) => entry.message), [{ taskId: task.taskId, taskType: "projection", attempt: 1 }],
+      `(${binding}) queue messages carry only the frozen locator fields`);
     assert.equal(sent[0].queue, "projection");
     const row = await getTask(rawDb, task.taskId);
     assert.equal(row.state, "queued");
@@ -251,7 +251,7 @@ test("recovery reclaims expired tasks, dispatches them and never touches active 
     const activeRow = await getTask(rawDb, active.taskId);
     assert.equal(activeRow.state, "processing", `(${binding}) the active lease is untouched`);
     assert.equal(activeRow.lease_owner, "w3");
-    const reclaimedIds = sent.filter((entry) => entry.message.type === "projection").map((entry) => entry.message.taskId);
+    const reclaimedIds = sent.filter((entry) => entry.message.taskType === "projection").map((entry) => entry.message.taskId);
     assert.deepEqual(reclaimedIds.sort(), [expiredDispatching.taskId, expiredQueued.taskId].sort());
   });
 });
@@ -283,17 +283,21 @@ test("recovery stops before starting a task without worst-case budget headroom",
 
 test("splitQueueBatch processes the first message and retries the rest", () => {
   const batch = [
-    { taskId: "t-1", type: "projection" },
-    { taskId: "t-2", type: "projection" },
-    { taskId: "t-3", type: "archive_event" }
+    { taskId: "t-1", taskType: "projection", attempt: 1 },
+    { taskId: "t-2", taskType: "projection", attempt: 2 },
+    { taskId: "t-3", taskType: "archive_event", attempt: 1 }
   ];
   const split = splitQueueBatch(batch);
-  assert.deepEqual(split.first, { taskId: "t-1", type: "projection" });
-  assert.deepEqual(split.rest, [{ taskId: "t-2", type: "projection" }, { taskId: "t-3", type: "archive_event" }]);
+  assert.deepEqual(split.first, { taskId: "t-1", taskType: "projection", attempt: 1 });
+  assert.deepEqual(split.rest, [{ taskId: "t-2", taskType: "projection", attempt: 2 }, { taskId: "t-3", taskType: "archive_event", attempt: 1 }]);
   assert.deepEqual(splitQueueBatch([]), { first: null, rest: [] });
-  const invalid = splitQueueBatch([{ bogus: true }, { taskId: "t-9", type: "projection" }]);
+  const invalid = splitQueueBatch([{ bogus: true }, { taskId: "t-9", taskType: "projection", attempt: 1 }]);
   assert.equal(invalid.first, null, "an invalid first message is not processed");
-  assert.deepEqual(invalid.rest, [{ bogus: true }, { taskId: "t-9", type: "projection" }]);
+  assert.deepEqual(invalid.rest, [{ bogus: true }, { taskId: "t-9", taskType: "projection", attempt: 1 }]);
+  assert.equal(splitQueueBatch([{ taskId: "legacy", type: "projection" }]).first, null,
+    "the pre-v2 type field is not accepted as a V2 queue message");
+  assert.equal(splitQueueBatch([{ taskId: "bad-attempt", taskType: "projection", attempt: 0 }]).first, null,
+    "attempt must be a positive safe integer");
   assert.equal(QUEUE_BY_TASK_TYPE.projection, "RDS2_PROJECTION_QUEUE");
   assert.equal(QUEUE_BY_TASK_TYPE.archive_event, "RDS2_ARCHIVE_QUEUE");
   assert.equal(QUEUE_BY_TASK_TYPE.archive_delta, "RDS2_ARCHIVE_QUEUE");
@@ -326,6 +330,22 @@ test("DLQ handling only trusts the taskId and loads the task from D1", async () 
     const unknown = await handleDlq({ io, taskId: "task-does-not-exist", now: NOW });
     assert.equal(unknown.outcome, "noop");
     assert.equal(unknown.code, "unknown_task", `(${binding}) an unknown DLQ taskId is a safe no-op`);
+  });
+});
+
+test("contract: queue messages use taskType and the claimed attempt number", async () => {
+  await runTaskTest(async ({ rawDb, io, sent }) => {
+    const task = await seedTask(rawDb);
+    await dispatchOne({ io, taskId: task.taskId, owner: "worker-contract", now: NOW });
+    assert.deepEqual(sent[0].message, {
+      taskId: task.taskId,
+      taskType: "projection",
+      attempt: 1
+    });
+    assert.deepEqual(splitQueueBatch([sent[0].message]), {
+      first: sent[0].message,
+      rest: []
+    });
   });
 });
 

@@ -341,7 +341,7 @@ WHERE task_id=? AND state='pending' AND available_at<=?
 RETURNING task_id, lease_owner, lease_until, lease_epoch;
 ```
 
-RETURNING results长度0表示没认领，不凭success:true判断。发布失败只由当前owner/epoch条件更新为pending或needs_attention。consumer认领接受dispatching/queued并递增epoch，但不再加attempt；cron回收超时任务不覆盖活跃租约。DDL另存failure_count，用连续真实故障而不是累计派发次数判断5次阈值；等待前序事件、正常续页、预算暂缓不得增加该计数。恢复最多4项，开始一项前预留该项最坏完成/失败收尾预算；没有余量就结束。DLQ不依赖queue_message_id。Queue消息只含taskId/type，内容从D1加载。
+RETURNING results长度0表示没认领，不凭success:true判断。发布失败只由当前owner/epoch条件更新为pending或needs_attention。consumer认领接受dispatching/queued并递增epoch，但不再加attempt；cron回收超时任务不覆盖活跃租约。DDL另存failure_count，用连续真实故障而不是累计派发次数判断5次阈值；等待前序事件、正常续页、预算暂缓不得增加该计数。恢复最多4项，开始一项前预留该项最坏完成/失败收尾预算；没有余量就结束。DLQ不依赖queue_message_id。Queue消息固定为`{taskId, taskType, attempt}`，内容从D1加载。
 
 - [ ] 重新运行 `node --test services/reliable-drive-sync-worker/test/rds2-tasks.test.js`，预期所有本任务断言通过；涉及D1任务同时跑sqlite和真实binding两套用例，不得跳过后者。
 - [ ] 运行 `npm test`，确认既有Worker/Bridge测试无回归。记录实际Node版本、测试数量及命令退出码，不复制历史380/47作为本次结果。

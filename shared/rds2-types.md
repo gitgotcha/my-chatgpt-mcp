@@ -144,14 +144,27 @@ type TaskLease = {
   taskId: string; owner: string; epoch: number; leaseUntil: string;
 };
 
+type DispatchLease = TaskLease & { attempt: number };
+
+type QueueMessage = {
+  taskId: string;
+  taskType: "projection" | "projection_build" | "archive_event" | "archive_delta";
+  attempt: number;
+};
+
 type StepResult = {
   outcome: "completed" | "continued" | "retry" | "needs_attention" | "noop";
   taskId: string; code: string | null;
 };
 ```
 
-`TaskLease` is what a successful conditional claim returns; the epoch and the
+`TaskLease` is what a successful consumer claim returns; the epoch and the
 `rds2_commit_guards` triggers are the only authority for writes under a lease.
+The dispatcher claim returns the same fields plus `attempt` as a
+`DispatchLease`, which is copied into the queue wake-up message.
+`QueueMessage` is a locator-only wake-up payload. `taskType` selects the
+consumer entry point and `attempt` records the dispatch claim that produced
+the message; neither field is business truth, which is loaded from D1.
 `StepResult` is the outcome type returned by one dispatch/projection/archive
 step (T05+).
 

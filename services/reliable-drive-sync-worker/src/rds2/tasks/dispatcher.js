@@ -1,5 +1,5 @@
 // RDS V2 dispatcher (Rev 6 plan T05). dispatchOne claims a pending task,
-// sends exactly {taskId, type} to the task-type's queue, and writes the
+// sends exactly {taskId, taskType, attempt} to the task-type's queue, and writes the
 // queued state back conditionally. Task content is loaded by the consumer
 // from D1 — queue messages never carry user or event payloads.
 import { claimForDispatch, markQueued, failTask } from "./repository.js";
@@ -28,7 +28,7 @@ export async function dispatchOne({ io, taskId, owner, now }) {
       taskId, "queue_binding_missing");
   }
   try {
-    await queue.send({ taskId, type: lease.type });
+    await queue.send({ taskId, taskType: lease.type, attempt: lease.attempt });
   } catch {
     // The budgeted send already counted the failed attempt. Release the
     // lease through the owner-scoped failure close.
@@ -47,8 +47,9 @@ export async function dispatchOne({ io, taskId, owner, now }) {
 export function splitQueueBatch(messages) {
   if (!Array.isArray(messages)) return { first: null, rest: [] };
   const first = messages[0];
-  if (first && typeof first.taskId === "string" && typeof first.type === "string"
-    && QUEUE_BY_TASK_TYPE[first.type] !== undefined) {
+  if (first && typeof first.taskId === "string" && typeof first.taskType === "string"
+    && Number.isSafeInteger(first.attempt) && first.attempt >= 1
+    && QUEUE_BY_TASK_TYPE[first.taskType] !== undefined) {
     return { first, rest: messages.slice(1) };
   }
   return { first: null, rest: [...messages] };
