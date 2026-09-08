@@ -18,7 +18,10 @@ export const STAGING_READ_CHUNK = 32;
 // distinct keys of one kind, and never more than 50 even on a larger page.
 export const STAGING_READ_MAX_KEYS_PER_KIND = 50;
 
-const ALLOWED_ROW_KINDS = new Set(["topic", "problem"]);
+// Incremental algorithm updates use topic/problem keys. Generic-profile
+// rebuilds additionally point-read the bounded member and event-activity
+// rows; historical observation/source-signal rows use the indexed paginator.
+const ALLOWED_ROW_KINDS = new Set(["topic", "problem", "member", "event_activity"]);
 
 function fail(code, detail) {
   const error = new Error(code);
@@ -71,12 +74,19 @@ function normalizeReadPlan(plan, eventCount) {
   let cost = 0;
   for (const [rowKind, keys] of merged) {
     if (!keys.size) continue;
-    if (keys.size > eventCount || keys.size > STAGING_READ_MAX_KEYS_PER_KIND) {
+    // A member aggregate can be touched by several observations in one
+    // event, so its key count is bounded by the absolute cap rather than the
+    // number of events. Other point-read kinds have one logical key per event.
+    const maxKeys = rowKind === "member"
+      ? (eventCount === 0 ? 0 : STAGING_READ_MAX_KEYS_PER_KIND)
+      : Math.min(eventCount, STAGING_READ_MAX_KEYS_PER_KIND);
+    if (keys.size > maxKeys) {
       throw fail("build_read_limit_exceeded", {
         rowKind,
         keys: keys.size,
         eventCount,
-        maxKeysPerKind: STAGING_READ_MAX_KEYS_PER_KIND
+        maxKeysPerKind: maxKeys,
+        absoluteMaxKeysPerKind: STAGING_READ_MAX_KEYS_PER_KIND
       });
     }
     cost += Math.ceil(keys.size / STAGING_READ_CHUNK);
@@ -110,7 +120,12 @@ export async function readStagedWithinBudget({
   eventCount,
   maxCalls = STAGING_READ_MAX_CALLS
 }) {
-  const result = { topic: new Map(), problem: new Map() };
+  const result = {
+    topic: new Map(),
+    problem: new Map(),
+    member: new Map(),
+    event_activity: new Map()
+  };
 
   // Validate the shapes, merge, dedupe, judge the per-kind key bounds and
   // price the WHOLE plan BEFORE any query goes out: discovering on the fourth

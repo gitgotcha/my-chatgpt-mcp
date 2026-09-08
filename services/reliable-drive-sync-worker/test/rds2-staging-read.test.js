@@ -45,7 +45,7 @@ test("F1 planReadCost prices chunks synchronously and rejects bad plans", () => 
   assert.throws(
     () => planReadCost({ reads: [{ rowKind: "evidence", rowKeys: ["x"] }] }, 5),
     (error) => error.code === "build_read_kind_rejected",
-    "only topic/problem may be read back"
+    "unsupported row kinds are rejected; T11 member/event_activity are explicit exceptions"
   );
   assert.throws(
     () => planReadCost({ reads: [{ rowKind: "topic", rowKeys: [7] }] }, 5),
@@ -324,6 +324,39 @@ test("F1 the hard call cap is a separate guard from the per-kind key cap", async
     );
     assert.equal(io.budget.snapshot().used, 0, `(${binding}) nothing was queried`);
     assert.equal(planReadCost(plan, 40), 2, "the same plan is two chunks under the default cap");
+  });
+});
+
+test("T11 member reads may exceed event count but remain bounded at 50 keys", async () => {
+  await withD1(async (binding, rawDb) => {
+    await applySchema(rawDb, MIGRATION_SQL);
+    const io = createInvocationIo({ db: rawDb, limit: 24 });
+    const keys = Array.from({ length: 50 }, (_, i) => `member-${i}`);
+    const plan = { reads: [{ rowKind: "member", rowKeys: keys }] };
+    assert.equal(planReadCost(plan, 1), 2,
+      `(${binding}) one event may legitimately touch up to 50 member keys`);
+    const staged = await readStagedWithinBudget({
+      io, scope: SCOPE, stagingGeneration: 1, eventCount: 1, plan
+    });
+    assert.equal(staged.member.size, 0,
+      `(${binding}) missing member rows are still a valid bounded read`);
+    assert.equal(io.budget.snapshot().used, 2,
+      `(${binding}) 50 member keys are two chunks, within the four-call cap`);
+  });
+});
+
+test("T11 member reads over 50 keys are rejected before querying", async () => {
+  await withD1(async (binding, rawDb) => {
+    await applySchema(rawDb, MIGRATION_SQL);
+    const io = createInvocationIo({ db: rawDb, limit: 24 });
+    const plan = { reads: [{ rowKind: "member", rowKeys: Array.from({ length: 51 }, (_, i) => `m-${i}`) }] };
+    await assert.rejects(
+      () => readStagedWithinBudget({ io, scope: SCOPE, stagingGeneration: 1, eventCount: 1, plan }),
+      (error) => error.code === "build_read_limit_exceeded",
+      `(${binding}) member keys above the absolute cap are refused`
+    );
+    assert.equal(io.budget.snapshot().used, 0,
+      `(${binding}) the refusal happens before the first query`);
   });
 });
 
