@@ -194,10 +194,23 @@ test("T16 routes both DLQ queue names through the authoritative DLQ handler", as
     queue: "rds2-projection-dlq",
     messages: [{ body: { taskId: "dlq-completed" }, ack() { acknowledgements.push("ack"); } }]
   }, {
+    RDS2_PROJECTION_ENABLED: "true",
     DB: db,
     RDS2_PROJECTION_QUEUE: { send: async () => {} },
     RDS2_ARCHIVE_QUEUE: { send: async () => {} }
   });
   assert.equal(result.outcome, "noop");
   assert.deepEqual(acknowledgements, ["ack"]);
+});
+
+test("T16 queue consumers fail closed while their domain switch is disabled", async () => {
+  const { handleV2Queue } = await import("../src/rds2/routes.js");
+  const retries = [];
+  const result = await handleV2Queue({
+    queue: "rds2-projection",
+    messages: [{ body: { taskId: "disabled" }, retry() { retries.push("retry"); } }]
+  }, { RDS2_PROJECTION_ENABLED: "false" });
+  assert.equal(result.outcome, "retry");
+  assert.equal(result.code, "rds2_projection_enabled_disabled");
+  assert.deepEqual(retries, ["retry"]);
 });

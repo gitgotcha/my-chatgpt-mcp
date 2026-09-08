@@ -266,6 +266,18 @@ export async function handleV2Queue(batch, env, ctx, deps = {}) {
   const messages = Array.isArray(batch?.messages) ? batch.messages : [];
   const queueName = batch?.queue;
   const isDlq = queueName === "rds2-projection-dlq" || queueName === "rds2-archive-dlq";
+  const requiredSwitch = queueName === "rds2-archive" || queueName === "rds2-archive-dlq"
+    ? "RDS2_ARCHIVE_ENABLED" : "RDS2_PROJECTION_ENABLED";
+
+  // Queue bindings remain present during a staged rollout, but consumers are
+  // fail-closed while their domain switch is off. Messages are retried rather
+  // than acked or mutated, so enabling the switch later resumes work safely.
+  if (!featureEnabled(env, requiredSwitch)) {
+    for (const message of messages) {
+      if (typeof message?.retry === "function") message.retry();
+    }
+    return { outcome: "retry", code: `${requiredSwitch.toLowerCase()}_disabled`, pending: messages.length };
+  }
 
   // DLQ consumers are real consumers, not ordinary task producers. They use
   // the queue name (rather than a forgeable message type) to enter the
