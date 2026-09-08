@@ -214,3 +214,9 @@ test("T16 queue consumers fail closed while their domain switch is disabled", as
   assert.equal(result.code, "rds2_projection_enabled_disabled");
   assert.deepEqual(retries, ["retry"]);
 });
+
+test("T16 production archive consumers construct the budgeted V2 Drive client", () => {
+  assert.match(ROUTES, /createArchiveClient/);
+  assert.match(ROUTES, /RDS2_ARCHIVE_FOLDER_ID/);
+  assert.match(ROUTES, /accessToken\(env, io\.fetch\)/);
+});

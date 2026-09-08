@@ -40,7 +40,7 @@ async function oauthAccessToken(env, fetchImpl = fetch) {
   return payload.access_token;
 }
 
-async function accessToken(env, fetchImpl = fetch) {
+export async function accessToken(env, fetchImpl = fetch) {
   if (env.GOOGLE_OAUTH_CLIENT_ID && env.GOOGLE_OAUTH_CLIENT_SECRET && env.GOOGLE_OAUTH_REFRESH_TOKEN) {
     return oauthAccessToken(env, fetchImpl);
   }

@@ -28,7 +28,8 @@ import { archiveOne } from "./archive/archiver.js";
 import { reducerForScope } from "./projection/registry.js";
 import { classifySubmission, SUBMISSION_REJECTION_CODES } from "../../../../shared/rds2-protocol.mjs";
 import { acceptEvent } from "./events/accept.js";
-import { createDriveRepository } from "../google-drive.js";
+import { accessToken } from "../google-drive.js";
+import { createArchiveClient } from "./archive/drive-client.js";
 
 export const PROJECTION_BUDGET = 24;
 export const ARCHIVE_BUDGET = 16;
@@ -332,7 +333,12 @@ export async function handleV2Queue(batch, env, ctx, deps = {}) {
   } else {
     result = await archiveOne({
       io, taskId: first.taskId, owner, now: now(),
-      client: deps.archiveClient ?? createDriveRepository(env)
+      client: deps.archiveClient ?? createArchiveClient({
+        env,
+        io,
+        folderId: env.RDS2_ARCHIVE_FOLDER_ID ?? env.GOOGLE_DRIVE_FOLDER_ID,
+        tokenProvider: () => accessToken(env, io.fetch)
+      })
     });
   }
 
