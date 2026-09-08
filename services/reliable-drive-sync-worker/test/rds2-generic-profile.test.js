@@ -5,6 +5,7 @@ import {
   reduceGenericProfile,
   selectMemberReadPrefix
 } from "../src/rds2/projection/generic-profile.js";
+import { reducerForScope } from "../src/rds2/projection/registry.js";
 
 const USER_ID = "11111111-1111-4111-8111-111111111111";
 const IDENTITY = { userId: USER_ID, username: "乔炳源" };
@@ -171,4 +172,95 @@ test("T11 member-read planning consumes a complete event prefix at the 50-key bo
   assert.equal(selected.consumedCount, 1);
   assert.equal(selected.keys.length, 50);
   assert.equal(genericProfileReducer.planPageReads({ events: [many, next] }).consumedCount, 1);
+});
+
+test("T11 buildPage emits bounded audit/member rows and a resumable continuation", () => {
+  const input = event({ eventSeq: 1 });
+  const result = genericProfileReducer.buildPage({
+    events: [input],
+    staged: { member: new Map(), event_activity: new Map() },
+    continuation: { nextEventSeq: 1, page: 1 }
+  });
+  assert.equal(result.continuation.nextEventSeq, 2);
+  assert.equal(result.rowChanges.some((row) => row.rowKind === "event_activity"), true);
+  assert.equal(result.rowChanges.some((row) => row.rowKind === "observation"), true);
+  assert.equal(result.rowChanges.some((row) => row.rowKind === "member"), true);
+  assert.equal(result.summary.openWeaknesses.length, 1);
+});
+
+test("T11 correction planning expands target activity into bounded member reads", () => {
+  const original = event({ eventKey: "original", eventSeq: 1 });
+  const correction = event({
+    eventKey: "correction", eventSeq: 2, action: "invalidate",
+    targetEventKey: original.eventKey, observations: []
+  });
+  const initial = genericProfileReducer.planPageReads({ events: [correction] });
+  assert.deepEqual(initial.reads, [{ rowKind: "event_activity", rowKeys: ["original"] }]);
+  const expanded = genericProfileReducer.expandPageReads({
+    events: [correction],
+    staged: {
+      event_activity: new Map([["original", {
+        memberKeys: ["topic\u0000arrays"]
+      }]]),
+      member: new Map()
+    }
+  });
+  assert.deepEqual(expanded.reads, [{ rowKind: "member", rowKeys: ["topic\u0000arrays"] }]);
+});
+
+test("T11 queue reducer registry selects generic profile by authoritative scope", () => {
+  assert.equal(reducerForScope({ namespace: "profile", projectionName: "english-learning" }), genericProfileReducer);
+  assert.notEqual(reducerForScope({ namespace: "algorithm", projectionName: "learning" }), genericProfileReducer);
+  assert.throws(() => reducerForScope({ namespace: "profile", projectionName: "english-learning" }).plan({}),
+    (error) => error.code === "unsupported_generic_profile_event");
+});
+
+test("T11 buildPage resolves a correction whose target is earlier in the same page", () => {
+  const original = event({ eventSeq: 1, eventKey: "original", observedAt: at(1) });
+  const correction = event({
+    eventSeq: 2, eventKey: "correction", action: "invalidate",
+    targetEventKey: original.eventKey, observations: []
+  });
+  const result = genericProfileReducer.buildPage({
+    events: [original, correction],
+    staged: { member: new Map(), event_activity: new Map() },
+    continuation: { nextEventSeq: 1, page: 1 }
+  });
+  assert.equal(result.summary.openWeaknesses.length, 0);
+  assert.equal(result.summary.observations.length, 0);
+  assert.equal(result.rowChanges.filter((row) => row.rowKind === "event_activity").length, 2);
+});
+
+test("T11 two-page fold preserves V1 classification when a correction crosses pages", () => {
+  const original = event({ eventSeq: 1, eventKey: "original", observedAt: at(1) });
+  const positive = event({
+    eventSeq: 2, eventKey: "positive", observedAt: at(10),
+    observations: [{ dimensionKey: "topic", subjectKey: "arrays", outcome: "correct",
+      evidence: "完成", confidence: "high", sourceRef: "quiz:1" }]
+  });
+  const correction = event({
+    eventSeq: 3, eventKey: "correction", observedAt: at(20), action: "invalidate",
+    targetEventKey: original.eventKey, observations: []
+  });
+  const first = genericProfileReducer.buildPage({
+    events: [original, positive],
+    staged: { member: new Map(), event_activity: new Map() },
+    continuation: { nextEventSeq: 1, page: 1 }
+  });
+  const staged = { member: new Map(), event_activity: new Map() };
+  for (const row of first.rowChanges) {
+    if (row.rowKind === "member") staged.member.set(row.rowKey, row.value);
+    if (row.rowKind === "event_activity") staged.event_activity.set(row.rowKey, row.value);
+  }
+  const second = genericProfileReducer.buildPage({
+    events: [correction], staged,
+    continuation: { ...first.continuation, summary: first.summary }
+  });
+  const expected = reduceGenericProfile(
+    [original, positive, correction].map(({ eventSeq, ...domainEvent }) => domainEvent),
+    { identity: IDENTITY, domain: DOMAIN }
+  );
+  assert.deepEqual(second.summary.openWeaknesses, expected.openWeaknesses);
+  assert.deepEqual(second.summary.observations, expected.observations);
+  assert.deepEqual(second.summary.sourceEventKeys, expected.sourceEventKeys);
 });

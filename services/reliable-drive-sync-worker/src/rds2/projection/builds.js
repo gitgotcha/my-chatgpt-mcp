@@ -9,7 +9,7 @@ import { commitActivation, buildDelta, assertRowChangesBounded, MAX_COMMIT_STATE
 import { canonicalJson } from "../../../../../shared/rds2-protocol.mjs";
 import { closeOutFailure } from "../errors/close-out.js";
 import { canAffordStage } from "../io/budget.js";
-import { readStagedWithinBudget } from "./staging-read.js";
+import { readStagedWithinBudget, planReadCost, STAGING_READ_MAX_CALLS } from "./staging-read.js";
 import { deriveTaskId } from "../events/repository.js";
 import { hashText } from "../identity/hashing.js";
 
@@ -312,18 +312,47 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
     // G2-F1: the reducer declares the staged rows this page needs; the engine
     // validates the plan, dedupes it, prices it and executes it under a hard
     // call cap — so the accumulated state never rides in the continuation.
-    const readPlan = reducer.planPageReads ? reducer.planPageReads({ events }) : { reads: [] };
+    const readPlan = reducer.planPageReads
+      ? reducer.planPageReads({ events, continuation }) : { reads: [] };
     let staged = null;
+    let stagedReadCost = 0;
     if (readPlan.reads?.length) {
       if (!canAffordStage(io.budget, STAGE_COST.stagedReads)) {
         return releaseForBudget({ db: io.db, lease, now, taskId });
       }
+      stagedReadCost = planReadCost(readPlan, events.length);
       staged = await readStagedWithinBudget({
         io, scope, stagingGeneration: build.staging_generation, plan: readPlan,
         // Plan §2.2: the page's own event count bounds how many unique keys
         // one rowKind may declare, no matter what the reducer asks for.
-        eventCount: events.length
+        eventCount: events.length,
+        maxCalls: STAGING_READ_MAX_CALLS
       });
+    }
+    // Some domains (notably generic-profile corrections) need one bounded
+    // dependent lookup after the first plan reveals the affected keys.  The
+    // reducer remains pure: it returns a declaration, and the engine prices
+    // and executes it before buildPage.  The combined plans share the hard
+    // four-call staging cap and the same invocation budget.
+    if (reducer.expandPageReads) {
+      const expandedPlan = reducer.expandPageReads({ events, staged, continuation }) ?? { reads: [] };
+      if (expandedPlan.reads?.length) {
+        const expandedCost = planReadCost(expandedPlan, events.length);
+        if (stagedReadCost + expandedCost > STAGING_READ_MAX_CALLS) {
+          const error = new Error("build_read_limit_exceeded");
+          error.code = "build_read_limit_exceeded";
+          throw error;
+        }
+        const extra = await readStagedWithinBudget({
+          io, scope, stagingGeneration: build.staging_generation, plan: expandedPlan,
+          eventCount: events.length,
+          maxCalls: STAGING_READ_MAX_CALLS - stagedReadCost
+        });
+        staged = staged ?? { topic: new Map(), problem: new Map(), member: new Map(), event_activity: new Map() };
+        for (const kind of ["topic", "problem", "member", "event_activity"]) {
+          for (const [key, value] of extra[kind] ?? []) staged[kind].set(key, value);
+        }
+      }
     }
     pageResult = reducer.buildPage({
       scope, events, head, staged,

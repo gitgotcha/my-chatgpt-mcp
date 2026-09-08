@@ -23,7 +23,7 @@ import { recoverOnce } from "./tasks/recovery.js";
 import { continueBuild } from "./projection/builds.js";
 import { projectOne } from "./projection/engine.js";
 import { archiveOne } from "./archive/archiver.js";
-import { algorithmReducer } from "./projection/algorithm.js";
+import { reducerForScope } from "./projection/registry.js";
 import { classifySubmission, SUBMISSION_REJECTION_CODES } from "../../../../shared/rds2-protocol.mjs";
 import { acceptEvent } from "./events/accept.js";
 import { createDriveRepository } from "../google-drive.js";
@@ -240,12 +240,12 @@ export async function handleV2Queue(batch, env, ctx, deps = {}) {
   } else if (first.taskType === "projection") {
     result = await projectOne({
       io, taskId: first.taskId, owner, now: now(),
-      reducer: deps.reducer ?? algorithmReducer
+      reducer: deps.reducer ?? reducerForScope(task, deps)
     });
   } else if (first.taskType === "projection_build") {
     result = await continueBuild({
       io, taskId: first.taskId, owner, now: now(),
-      reducer: deps.reducer ?? algorithmReducer
+      reducer: deps.reducer ?? reducerForScope(task, deps)
     });
   } else {
     result = await archiveOne({
