@@ -37,6 +37,9 @@ test("T01 tools/list publishes closed V2 account, query, and business input bran
   assert.ok(storage.properties.operation.enum.includes("event.status"));
   assert.ok(Object.hasOwn(storage.properties, "bindingContext"));
   assert.ok(Object.hasOwn(business.properties, "bindingContext"));
+  assert.equal(schema.properties.bindingContext.properties.userId.anyOf[1].type, "null");
+  assert.equal(business.properties.bindingContext.properties.userId.type, "string");
+  assert.equal(storage.properties.bindingContext.properties.userId.anyOf[1].type, "null");
   assert.equal(business.required.includes("bindingContext"), true);
 });
 

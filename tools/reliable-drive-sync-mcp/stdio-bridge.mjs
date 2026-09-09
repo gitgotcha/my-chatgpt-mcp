@@ -33,6 +33,14 @@ const BINDING_CONTEXT_SCHEMA = {
   }
 };
 
+const BUSINESS_BINDING_CONTEXT_SCHEMA = {
+  ...BINDING_CONTEXT_SCHEMA,
+  properties: {
+    ...BINDING_CONTEXT_SCHEMA.properties,
+    userId: { type: "string" }
+  }
+};
+
 const IDENTITY_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -60,7 +68,7 @@ const BUSINESS_PROPERTIES = {
   identity: IDENTITY_SCHEMA,
   payload: { type: "object" },
   requestId: { type: "string" },
-  bindingContext: BINDING_CONTEXT_SCHEMA
+  bindingContext: BUSINESS_BINDING_CONTEXT_SCHEMA
 };
 
 // Keep the public MCP schema closed and mutually exclusive. Runtime parsing
@@ -89,7 +97,11 @@ const TOOL = {
     ],
     properties: {
       ...STORAGE_PROPERTIES,
-      ...BUSINESS_PROPERTIES
+      ...BUSINESS_PROPERTIES,
+      // The root union must stay broad enough for both branches. In
+      // particular, account.find may carry an unbound context with userId:null;
+      // branch-level schemas still apply the stricter business requirement.
+      bindingContext: BINDING_CONTEXT_SCHEMA
     }
   }
 };
