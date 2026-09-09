@@ -33,7 +33,7 @@ openDeviceStore({path}) -> { current(), exclusive(fn), close() }
 node --test tools/reliable-drive-sync-mcp/test/device-store.test.mjs
 ```
 
-结果：**6/6 通过**。
+结果：**8/8 通过**。
 
 覆盖内容：
 
@@ -43,6 +43,8 @@ node --test tools/reliable-drive-sync-mcp/test/device-store.test.mjs
 4. 两个真实 Node 子进程不能同时进入临界区；
 5. 终止持锁进程后，SQLite 由操作系统释放锁，后续进程可立即取得；
 6. 启动器从相对工作目录打开控制库时，路径解析与父目录创建稳定。
+7. 异步回调在 `await` 后尝试写入时被失效事务句柄拒绝，且没有延迟副作用。
+8. 未提交事务被终止后保留旧绑定，已提交绑定在进程终止后仍可读回。
 
 完整工具回归：
 
@@ -50,7 +52,7 @@ node --test tools/reliable-drive-sync-mcp/test/device-store.test.mjs
 node --test tools/reliable-drive-sync-mcp/test/*.test.mjs
 ```
 
-结果：**82/82 通过**（包含既有 V2 工具与本任务新增 5 例）。
+结果：**113/113 通过**（包含既有 V2 工具与本任务新增回归）。
 
 ## 安全证据边界
 
@@ -59,6 +61,8 @@ node --test tools/reliable-drive-sync-mcp/test/*.test.mjs
 - 锁不是带到期时间的文件锁，活跃进程不会被另一个进程夺取；
 - 进程被终止时 SQLite 文件锁由操作系统释放；
 - 事务失败不产生半条绑定；
+- 被拒绝的异步事务句柄在回调恢复后不可继续访问数据库；
+- 进程终止时未提交修改回滚，已提交绑定保持可读；
 - 测试输出只包含状态码和测试结果，不打印任何合成秘密；
 - 控制库 schema 不包含业务正文或明文凭据字段。
 

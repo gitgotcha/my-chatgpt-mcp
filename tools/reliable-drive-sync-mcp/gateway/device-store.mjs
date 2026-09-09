@@ -23,6 +23,35 @@ function rollbackQuietly(db) {
   try { db.exec("ROLLBACK"); } catch { /* preserve the original failure */ }
 }
 
+function guardedTransactionDb(db) {
+  let active = true;
+  const ensureActive = () => {
+    if (!active) throw errorWithCode("device_lock_closed");
+  };
+  const wrapStatement = (statement) => new Proxy(statement, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (typeof value !== "function") return value;
+      return (...args) => {
+        ensureActive();
+        return Reflect.apply(value, target, args);
+      };
+    }
+  });
+  const guarded = new Proxy(db, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (typeof value !== "function") return value;
+      return (...args) => {
+        ensureActive();
+        const result = Reflect.apply(value, target, args);
+        return property === "prepare" ? wrapStatement(result) : result;
+      };
+    }
+  });
+  return { db: guarded, close: () => { active = false; } };
+}
+
 function normalizeRow(row) {
   if (!row) return null;
   const rawEpoch = row.binding_epoch;
@@ -137,19 +166,23 @@ class DeviceStore {
       throw error;
     }
 
+    const guarded = guardedTransactionDb(db);
     try {
-      const result = action({ db });
+      const result = action({ db: guarded.db });
       if (result && typeof result.then === "function") {
         // Do not leave an asynchronously resumed callback attached to an open
         // transaction. Attach a no-op rejection handler before rolling back so
         // a rejected Promise cannot become an unhandled process error.
         result.catch?.(() => {});
+        guarded.close();
         rollbackQuietly(db);
         throw errorWithCode("async_in_device_lock");
       }
       db.exec("COMMIT");
+      guarded.close();
       return result;
     } catch (error) {
+      guarded.close();
       rollbackQuietly(db);
       if (error?.code === "async_in_device_lock") throw error;
       if (isBusy(error)) throw errorWithCode("device_busy");
