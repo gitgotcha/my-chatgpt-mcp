@@ -121,3 +121,15 @@ test("T05 find is local metadata only and caps pages at twenty", async (t) => {
   assert.equal(result.nextCursor, null);
   assert.equal(f.calls.length, 0);
 });
+
+test("T05 pairing code is high entropy, shown only through the secure dialog, and absent from the MCP result", async (t) => {
+  const f = await fixture(t);
+  f.store.exclusive(({ db }) => db.prepare("INSERT INTO device_binding(singleton, installation_id, binding_epoch, binding_revision, user_id, credential_ref) VALUES(1, ?, ?, 0, ?, ?)").run("11111111-1111-4111-8111-111111111111", "88888888-8888-4888-8888-888888888888", A, "credential." + A));
+  f.secureStore.set("credential." + A, CRED_A);
+  let shown = null;
+  f.dialog.showPairingCode = async (code) => { shown = code; };
+  const result = await f.accounts.transferCreate(f.accounts.context());
+  assert.equal(result.state, "pairing_created");
+  assert.equal(new TextEncoder().encode(shown).byteLength >= 22, true);
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(shown));
+});

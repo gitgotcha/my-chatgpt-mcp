@@ -250,8 +250,9 @@ export function createAccounts({ deviceStore, secureStore, client, dialog, root 
   async function transferCreate(expected) {
     const authorized = await authorizeCurrent(expected);
     if (typeof client.pairingCreate !== "function") throw fail("verification_unavailable");
-    const result = await client.pairingCreate({ credential: authorized.credential, userId: authorized.userId });
-    if (result?.code && typeof dialog.showPairingCode === "function") await dialog.showPairingCode(result.code, { expiresAt: result.expiresAt });
+    const code = randomBytes(16).toString("base64url");
+    const result = await client.pairingCreate({ credential: authorized.credential, userId: authorized.userId, code });
+    if (typeof dialog.showPairingCode === "function") await dialog.showPairingCode(code, { expiresAt: result?.expiresAt });
     return { state: "pairing_created", userId: authorized.userId, expiresAt: result?.expiresAt ?? null };
   }
   async function transferRedeem({ requestId } = {}) {

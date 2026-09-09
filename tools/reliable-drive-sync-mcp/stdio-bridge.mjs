@@ -1,11 +1,21 @@
 import readline from "node:readline";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { DeliveryService } from "./delivery-service.mjs";
 import { randomUUID } from "node:crypto";
 import { classifySubmission } from "../../shared/rds2-protocol.mjs";
 import { isV2ReadMessage, toV2Query, parseV2StatusInput } from "./v2-routing.mjs";
 import { parseSubmission } from "../../shared/device-binding-protocol.mjs";
+import { openDeviceStore } from "./gateway/device-store.mjs";
+import { createSecureStore, createWindowsDpapiProtector } from "./gateway/secure-store.mjs";
+import { createAccounts } from "./gateway/accounts.mjs";
+import { createBusinessTransport } from "./gateway/business-transport.mjs";
+import { LocalOutboxV2 } from "./local-outbox-v2.mjs";
+import { createDeliveryServiceV2 } from "./delivery-service-v2.mjs";
 
 const TOOL = {
   name: "submit_event",
@@ -127,16 +137,102 @@ async function v2QueryCall(payload, options) {
   return body;
 }
 
+function defaultDialog(deviceRoot) {
+  const script = fileURLToPath(new URL("./gateway/secure-dialog.ps1", import.meta.url));
+  function run(action, prompt) {
+    const directory = mkdtempSync(join(tmpdir(), "rds2-dialog-"));
+    const output = join(directory, "result.txt");
+    try {
+      const result = spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-Action", action, "-OutputPath", output, "-Prompt", prompt], { encoding: "utf8", windowsHide: false, timeout: 120_000 });
+      if (result.status !== 0) return null;
+      return readFileSync(output, "utf8").trim();
+    } finally { try { rmSync(directory, { recursive: true, force: true }); } catch { /* best effort */ } }
+  }
+  const protector = createWindowsDpapiProtector();
+  return {
+    async secret({ purpose = "secret" } = {}) { const encrypted = run("secret", `Reliable Drive Sync ${purpose}`); return encrypted ? protector.unprotect(encrypted) : null; },
+    async pairingCode() { const encrypted = run("secret", "输入配对码"); return encrypted ? protector.unprotect(encrypted) : null; },
+    async confirm({ purpose = "confirm" } = {}) { return run("confirm", `Reliable Drive Sync ${purpose}`) !== null; },
+    async showPairingCode(code) {
+      if (typeof code !== "string" || !code) return;
+      spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-Command", "param($c); Write-Host ('配对码（仅本机显示）：' + $c); Read-Host '按回车关闭'", "-c", code], { windowsHide: false, timeout: 120_000 });
+    }
+  };
+}
+
+function accountHttpClient(options) {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const endpoint = () => `${deriveWorkerUrl(options.workerUrl)}/v2/account`;
+  async function call(operation, params, credential) {
+    const response = await fetchImpl(endpoint(), {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential}`, "content-type": "application/json", "CF-Connecting-IP": "127.0.0.1" },
+      body: JSON.stringify({ storageVersion: 2, operation, params })
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw Object.assign(new Error(body?.error?.code ?? `account_${response.status}`), { code: body?.error?.code ?? `account_${response.status}` });
+    return body;
+  }
+  return {
+    current: ({ credential }) => call("account.current", {}, credential),
+    register: ({ displayName, requestId, secret }) => call("account.register", { displayName, requestId }, secret),
+    verify: ({ accountHandle, credential }) => call("account.current", {}, credential).then((body) => ({ ...body, accountHandle })),
+    pairingCreate: ({ credential, code }) => call("account.transfer.create", { code }, credential),
+    pairingRedeem: ({ requestId, code, secret }) => call("account.transfer.redeem", { requestId, code }, secret)
+  };
+}
+
+async function createGatewayRuntime(options) {
+  if (typeof options.deviceRoot !== "string" || !options.deviceRoot.trim()) return null;
+  if (typeof options.workerUrl !== "string" || !options.workerUrl.trim()) throw new Error("Bridge Worker URL is invalid");
+  const root = options.deviceRoot;
+  const deviceStore = openDeviceStore({ path: join(root, "control.sqlite") });
+  const secureStore = createSecureStore({ root: join(root, "secure") });
+  const client = accountHttpClient(options);
+  const dialog = options.dialog ?? defaultDialog(root);
+  const accounts = createAccounts({ deviceStore, secureStore, client, dialog, root: join(root, "accounts") });
+  const resources = new Map();
+  const outboxFactory = ({ userId, credentialRef }) => {
+    if (resources.has(userId)) return resources.get(userId);
+    const outbox = new LocalOutboxV2({ path: join(root, "outbox", userId, "outbox-v2.sqlite"), clock: () => new Date().toISOString(), owner: `stdio-${randomUUID()}` });
+    const delivery = createDeliveryServiceV2({ outbox, clock: () => new Date().toISOString(), send: async (envelope) => {
+      const credential = secureStore.get(credentialRef);
+      if (!credential) throw Object.assign(new Error("reauth_required"), { code: "reauth_required" });
+      const response = await (options.fetchImpl ?? fetch)(`${deriveWorkerUrl(options.workerUrl)}/v2/events`, { method: "POST", headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" }, body: JSON.stringify(envelope) });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw Object.assign(new Error(body?.error?.code ?? `http_${response.status}`), { code: body?.error?.code ?? `http_${response.status}` });
+      return body;
+    } });
+    const resource = { outbox, delivery };
+    resources.set(userId, resource);
+    return resource;
+  };
+  const businessTransport = createBusinessTransport({ deviceStore, accounts, outboxFactory, workerUrl: options.workerUrl, token: options.token, fetchImpl: options.fetchImpl });
+  return { accounts, businessTransport, close() { businessTransport.close(); deviceStore.close(); } };
+}
+
+const gatewayServices = new WeakMap();
+function getGatewayRuntime(options) {
+  if (!gatewayServices.has(options)) {
+    const pending = createGatewayRuntime(options).catch((error) => { gatewayServices.delete(options); throw error; });
+    gatewayServices.set(options, pending);
+  }
+  return gatewayServices.get(options);
+}
+
 async function submitEvent(id, args, options) {
   try {
     // WriteVersion v2: reads route to /v2/query and never touch the outbox;
     // writes go through the local durable outbox; explicit V2 status inputs
     // keep their own schema.
     if ((options.writeVersion ?? "v1") === "v2") {
+      const gateway = options.accounts || options.businessTransport ? null : await getGatewayRuntime(options);
+      const accountsGateway = options.accounts ?? gateway?.accounts;
+      const businessGateway = options.businessTransport ?? gateway?.businessTransport;
       if (args?.storageVersion === 2) {
         const parsed = parseSubmission(args);
         if (parsed.kind === "account") {
-          const accounts = options.accounts;
+          const accounts = accountsGateway;
           if (!accounts) throw new Error("account_gateway_unavailable");
           const op = parsed.body.operation;
           const method = op === "account.current" ? "current"
@@ -153,12 +249,12 @@ async function submitEvent(id, args, options) {
             : await accounts[method](params);
           return reply(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
         }
-        if (parsed.kind === "query" && options.businessTransport) {
-          const result = await options.businessTransport.query(args);
+        if (parsed.kind === "query" && businessGateway) {
+          const result = await businessGateway.query(args);
           return reply(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
         }
-        if (parsed.kind === "write" && options.businessTransport) {
-          const result = await options.businessTransport.submit(args);
+        if (parsed.kind === "write" && businessGateway) {
+          const result = await businessGateway.submit(args);
           return reply(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
         }
         if (parsed.kind !== "query") throw new Error("business_transport_unavailable");
@@ -173,14 +269,14 @@ async function submitEvent(id, args, options) {
       // Business envelopes carry schemaVersion rather than storageVersion;
       // the unified gateway must parse them before the legacy V2 classifier
       // sees the top-level bindingContext field.
-      if (options.businessTransport && args && (Object.hasOwn(args, "schemaVersion") || Object.hasOwn(args, "bindingContext"))) {
+      if (businessGateway && args && (Object.hasOwn(args, "schemaVersion") || Object.hasOwn(args, "bindingContext"))) {
         const parsed = parseSubmission(args);
         if (parsed.kind === "write") {
-          const result = await options.businessTransport.submit(args);
+          const result = await businessGateway.submit(args);
           return reply(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
         }
         if (parsed.kind === "query") {
-          const result = await options.businessTransport.query(args);
+          const result = await businessGateway.query(args);
           return reply(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
         }
       }
@@ -239,6 +335,7 @@ function configurationFromEnvironment() {
   return {
     workerUrl: configuredUrl,
     token: process.env.RELIABLE_DRIVE_SYNC_INGRESS_SHARED_SECRET,
+    deviceRoot: process.env.RELIABLE_DRIVE_SYNC_DEVICE_ROOT,
     outboxPath: process.env.RELIABLE_DRIVE_SYNC_OUTBOX_PATH,
     writeVersion: process.env.RELIABLE_DRIVE_SYNC_WRITE_VERSION
   };

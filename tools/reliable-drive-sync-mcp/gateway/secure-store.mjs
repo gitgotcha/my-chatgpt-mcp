@@ -39,7 +39,7 @@ function runPowerShell(script, input) {
   }
 }
 
-function dpapiProtector() {
+export function createWindowsDpapiProtector() {
   return {
     protect(value) {
       if (typeof value !== "string") throw fail("invalid_secure_value");
@@ -73,7 +73,7 @@ function atomicWrite(path, value) {
 export function createSecureStore({ root, protector } = {}) {
   if (typeof root !== "string" || !root.trim()) throw fail("invalid_secure_root");
   mkdirSync(root, { recursive: true });
-  const crypto = protector ?? dpapiProtector();
+  const crypto = protector ?? createWindowsDpapiProtector();
   if (typeof crypto?.protect !== "function" || typeof crypto?.unprotect !== "function") throw fail("invalid_secure_protector");
 
   const pathFor = (key) => join(root, ensureKey(key));
@@ -108,4 +108,3 @@ export function createSecureStore({ root, protector } = {}) {
     }
   };
 }
-
