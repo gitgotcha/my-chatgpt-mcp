@@ -25,10 +25,14 @@ function rollbackQuietly(db) {
 
 function normalizeRow(row) {
   if (!row) return null;
+  const rawEpoch = row.binding_epoch;
+  const bindingEpoch = typeof rawEpoch === "number" || /^\d+$/.test(String(rawEpoch))
+    ? Number(rawEpoch)
+    : String(rawEpoch);
   return {
     singleton: Number(row.singleton),
     installationId: row.installation_id,
-    bindingEpoch: Number(row.binding_epoch),
+    bindingEpoch,
     bindingRevision: Number(row.binding_revision),
     userId: row.user_id,
     credentialRef: row.credential_ref
@@ -53,7 +57,7 @@ class DeviceStore {
         CREATE TABLE IF NOT EXISTS device_binding (
           singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
           installation_id TEXT NOT NULL,
-          binding_epoch INTEGER NOT NULL CHECK (binding_epoch >= 0),
+          binding_epoch TEXT NOT NULL,
           binding_revision INTEGER NOT NULL CHECK (binding_revision >= 0),
           user_id TEXT,
           credential_ref TEXT,
@@ -61,6 +65,42 @@ class DeviceStore {
               OR (user_id IS NOT NULL AND credential_ref IS NOT NULL))
         );
       `);
+      // T00 shipped an INTEGER epoch. Rebuild that tiny control table once so
+      // the V2 UUID epoch can be represented without changing user data. A
+      // legacy numeric epoch is intentionally treated as stale by T05 and is
+      // replaced with a fresh UUID before it becomes an authorization context.
+      const epochColumn = this.#db.prepare("PRAGMA table_info(device_binding)").all()
+        .find((column) => column.name === "binding_epoch");
+      if (String(epochColumn?.type ?? "").toUpperCase() === "INTEGER") {
+        this.#db.exec("BEGIN IMMEDIATE");
+        try {
+          this.#db.exec("ALTER TABLE device_binding RENAME TO device_binding_legacy");
+          this.#db.exec(`
+            CREATE TABLE device_binding (
+              singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+              installation_id TEXT NOT NULL,
+              binding_epoch TEXT NOT NULL,
+              binding_revision INTEGER NOT NULL CHECK (binding_revision >= 0),
+              user_id TEXT,
+              credential_ref TEXT,
+              CHECK ((user_id IS NULL AND credential_ref IS NULL)
+                  OR (user_id IS NOT NULL AND credential_ref IS NOT NULL))
+            );
+          `);
+          this.#db.exec(`
+            INSERT INTO device_binding(singleton, installation_id, binding_epoch,
+                                       binding_revision, user_id, credential_ref)
+            SELECT singleton, installation_id, CAST(binding_epoch AS TEXT),
+                   binding_revision, user_id, credential_ref
+              FROM device_binding_legacy;
+          `);
+          this.#db.exec("DROP TABLE device_binding_legacy");
+          this.#db.exec("COMMIT");
+        } catch (error) {
+          rollbackQuietly(this.#db);
+          throw error;
+        }
+      }
     } catch (error) {
       try { this.#db?.close(); } catch { /* best effort */ }
       if (isBusy(error)) throw errorWithCode("device_busy");
