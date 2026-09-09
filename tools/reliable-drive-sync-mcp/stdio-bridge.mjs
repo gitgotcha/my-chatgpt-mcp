@@ -7,9 +7,13 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { DeliveryService } from "./delivery-service.mjs";
 import { randomUUID } from "node:crypto";
-import { classifySubmission } from "../../shared/rds2-protocol.mjs";
+import { classifySubmission, SCHEMA_VERSION } from "../../shared/rds2-protocol.mjs";
 import { isV2ReadMessage, toV2Query, parseV2StatusInput } from "./v2-routing.mjs";
-import { parseSubmission } from "../../shared/device-binding-protocol.mjs";
+import {
+  parseSubmission,
+  ACCOUNT_OPERATIONS_LIST,
+  QUERY_OPERATIONS_LIST
+} from "../../shared/device-binding-protocol.mjs";
 import { openDeviceStore } from "./gateway/device-store.mjs";
 import { createSecureStore, createWindowsDpapiProtector } from "./gateway/secure-store.mjs";
 import { createAccounts } from "./gateway/accounts.mjs";
@@ -17,34 +21,75 @@ import { createBusinessTransport } from "./gateway/business-transport.mjs";
 import { LocalOutboxV2 } from "./local-outbox-v2.mjs";
 import { createDeliveryServiceV2 } from "./delivery-service-v2.mjs";
 
+const BINDING_CONTEXT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["installationId", "bindingEpoch", "bindingRevision", "userId"],
+  properties: {
+    installationId: { type: "string" },
+    bindingEpoch: { type: "string" },
+    bindingRevision: { type: "integer", minimum: 0 },
+    userId: { anyOf: [{ type: "string" }, { type: "null" }] }
+  }
+};
+
+const IDENTITY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["username"],
+  properties: {
+    userId: { type: "string" },
+    username: { type: "string" }
+  }
+};
+
+const STORAGE_PROPERTIES = {
+  storageVersion: { type: "integer", const: 2 },
+  operation: {
+    type: "string",
+    enum: [...ACCOUNT_OPERATIONS_LIST, ...QUERY_OPERATIONS_LIST]
+  },
+  params: { type: "object" },
+  bindingContext: BINDING_CONTEXT_SCHEMA
+};
+
+const BUSINESS_PROPERTIES = {
+  schemaVersion: { type: "string", const: SCHEMA_VERSION },
+  namespace: { type: "string" },
+  eventType: { type: "string" },
+  identity: IDENTITY_SCHEMA,
+  payload: { type: "object" },
+  requestId: { type: "string" },
+  bindingContext: BINDING_CONTEXT_SCHEMA
+};
+
+// Keep the public MCP schema closed and mutually exclusive. Runtime parsing
+// remains authoritative for operation-specific params and UUID validation;
+// this declaration must nevertheless expose every supported V2 gateway shape
+// so hosts can construct account, query, and business requests.
 const TOOL = {
   name: "submit_event",
   description: "Discover generic profile capabilities, read profiles, or durably queue a validated system, interview, algorithm, resume-knowledge or profile evidence event in the local SQLite Outbox before cloud delivery.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
-    anyOf: [
-      { required: ["schemaVersion", "namespace", "eventType", "requestId"] },
-      { required: ["storageVersion", "operation", "params"] }
-    ],
-    properties: {
-      storageVersion: { type: "integer", const: 2 },
-      operation: { type: "string", enum: ["capabilities", "user.resolve", "projection.read", "interview.session.list", "interview.session.load", "event.status"] },
-      params: { type: "object" },
-      schemaVersion: { type: "string" },
-      namespace: { type: "string" },
-      eventType: { type: "string" },
-      identity: {
+    oneOf: [
+      {
         type: "object",
         additionalProperties: false,
-        required: ["username"],
-        properties: {
-          userId: { type: "string" },
-          username: { type: "string" }
-        }
+        required: ["schemaVersion", "namespace", "eventType", "requestId", "bindingContext"],
+        properties: BUSINESS_PROPERTIES
       },
-      payload: { type: "object" },
-      requestId: { type: "string" }
+      {
+        type: "object",
+        additionalProperties: false,
+        required: ["storageVersion", "operation", "params"],
+        properties: STORAGE_PROPERTIES
+      }
+    ],
+    properties: {
+      ...STORAGE_PROPERTIES,
+      ...BUSINESS_PROPERTIES
     }
   }
 };
@@ -259,7 +304,7 @@ async function submitEvent(id, args, options) {
         }
         if (parsed.kind !== "query") throw new Error("business_transport_unavailable");
         const query = args.operation === "event.status" ? parseV2StatusInput(args) : parsed.body;
-        if (!TOOL.inputSchema.properties.operation.enum.includes(query.operation)
+        if (!QUERY_OPERATIONS_LIST.includes(query.operation)
           || !query.params || typeof query.params !== "object" || Array.isArray(query.params)) {
           throw new Error("invalid_v2_query");
         }

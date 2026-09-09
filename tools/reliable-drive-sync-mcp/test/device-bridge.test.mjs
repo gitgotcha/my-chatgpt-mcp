@@ -20,6 +20,26 @@ test("T07 tools/list exposes only submit_event", async () => {
   assert.deepEqual(result.result.tools.map((tool) => tool.name), ["submit_event"]);
 });
 
+test("T01 tools/list publishes closed V2 account, query, and business input branches", async () => {
+  const result = await handleRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" }, {});
+  const schema = result.result.tools[0].inputSchema;
+  assert.equal(schema.anyOf, undefined);
+  assert.ok(Array.isArray(schema.oneOf));
+  const storage = schema.oneOf.find((branch) => branch.required.includes("storageVersion"));
+  const business = schema.oneOf.find((branch) => branch.required.includes("schemaVersion"));
+  assert.ok(storage);
+  assert.ok(business);
+  assert.equal(storage.additionalProperties, false);
+  assert.equal(business.additionalProperties, false);
+  assert.ok(storage.properties.operation.enum.includes("account.current"));
+  assert.ok(storage.properties.operation.enum.includes("account.register"));
+  assert.ok(storage.properties.operation.enum.includes("account.transfer.redeem"));
+  assert.ok(storage.properties.operation.enum.includes("event.status"));
+  assert.ok(Object.hasOwn(storage.properties, "bindingContext"));
+  assert.ok(Object.hasOwn(business.properties, "bindingContext"));
+  assert.equal(business.required.includes("bindingContext"), true);
+});
+
 test("T07 account operations route through the account registry", async () => {
   const calls = [];
   const accounts = { current: async () => { calls.push("current"); return { state: "unbound", bindingContext: { ...context, userId: null } }; } };
