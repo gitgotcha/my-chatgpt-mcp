@@ -45,7 +45,7 @@ test("T15 source skills keep evidence and incomplete-state guardrails", async ()
 
   assert.match(algorithm, /没有掌握度证据时记录中性的 `consulted`/);
   assert.match(algorithm, /未完成题在下一日优先/);
-  assert.match(interviewer, /身份解析或注册失败时[\s\S]*不绕过解析继续读取历史/);
+  assert.match(interviewer, /账户授权失败时[\s\S]*不绕过授权继续读取历史/);
   assert.match(backend, /默认只读学习/);
   assert.match(backend, /源码事实/);
   assert.match(interviewer, /一次只问一道主问题/);
