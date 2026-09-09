@@ -28,6 +28,9 @@ export async function authenticate({ db, credential }) {
   return {
     userId: row.user_id,
     username: row.display_name,
-    status: row.user_status
+    status: row.user_status,
+    // The hash is an internal association key for pairing. The plaintext
+    // bearer token is never returned or persisted by this function.
+    credentialHash: hash
   };
 }
