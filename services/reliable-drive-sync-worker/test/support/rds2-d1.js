@@ -4,7 +4,9 @@
 // real binding run (Rev 6 global constraints); every D1 task executes both.
 // This module holds no business logic.
 import { DatabaseSync } from "node:sqlite";
+import { readFileSync } from "node:fs";
 import { Miniflare } from "miniflare";
+import { fileURLToPath } from "node:url";
 
 // Miniflare version is pinned exactly in the root package.json
 // (miniflare 4.20260730.0 / workerd 1.20260730.1 at the time of writing).
@@ -193,4 +195,18 @@ export async function withD1(callback) {
   } finally {
     await mf.dispose();
   }
+}
+
+const BASE_RDS2_SQL = readFileSync(fileURLToPath(new URL("../../migrations/0006_rds2_v2_tables.sql", import.meta.url)), "utf8");
+const DEVICE_ACCOUNTS_SQL = readFileSync(fileURLToPath(new URL("../../migrations/0008_rds2_device_accounts.sql", import.meta.url)), "utf8");
+
+// Fresh V2 fixture for account-management tests. The helper intentionally
+// keeps withD1 unchanged so existing 0006/0007 tests retain their exact
+// setup; this path applies 0006 then 0008 on both bindings.
+export async function withDeviceAccountsD1(callback) {
+  await withD1(async (binding, db) => {
+    await applySchema(db, BASE_RDS2_SQL);
+    await applySchema(db, DEVICE_ACCOUNTS_SQL);
+    await callback(binding, db);
+  });
 }
