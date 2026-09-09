@@ -13,3 +13,4 @@ ACCOUNT_SELF_REGISTER_ENABLED=false
 
 远程动作（Queue、迁移、部署、公开开关）不属于本任务自动执行范围。
 
+本轮本地候选验证：`npx wrangler deploy --dry-run --config services/reliable-drive-sync-worker/wrangler.production.toml` 成功打包（348.49 KiB，退出前未上传）；生产配置仍保持 V1 写入关闭、账户操作关闭、自助注册关闭。
