@@ -359,6 +359,40 @@ export class LocalOutboxV2 {
     ).all().map(rowOf);
   }
 
+  // Migration-only import: copy a legacy row without sending it or changing
+  // its durable state. This is intentionally separate from enqueue so a
+  // restored blocked/sending row cannot be mistaken for a fresh submission.
+  restore(record) {
+    const db = this.#require();
+    if (!record || typeof record.requestId !== "string" || !record.requestId.trim()
+      || !record.envelope || !["pending", "sending", "acknowledged", "blocked"].includes(record.state)) {
+      throw fail("invalid_migration_row");
+    }
+    const hash = envelopeHash(record.envelope);
+    const now = this.clock();
+    return transaction(db, () => {
+      const existing = db.prepare("SELECT envelope_hash, state FROM local_outbox_rows WHERE request_id = ?").get(record.requestId);
+      if (existing) {
+        if (existing.envelope_hash !== hash) throw fail("migration_conflict");
+        return { requestId: record.requestId, duplicate: true, state: existing.state };
+      }
+      db.prepare(`
+        INSERT INTO local_outbox_rows (
+          request_id, envelope_json, envelope_hash, state, attempt_count,
+          available_at, lease_owner, lease_until, last_attempt_at,
+          last_error_code, receipt_json, acknowledged_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        record.requestId, JSON.stringify(record.envelope), hash, record.state,
+        Number(record.attemptCount ?? 0), record.availableAt ?? now,
+        record.leaseOwner ?? null, record.leaseUntil ?? null, record.lastAttemptAt ?? null,
+        record.lastErrorCode ?? null, record.receipt ? JSON.stringify(record.receipt) : null,
+        record.acknowledgedAt ?? null, record.createdAt ?? now, record.updatedAt ?? now
+      );
+      return { requestId: record.requestId, duplicate: false, state: record.state };
+    });
+  }
+
   close() {
     if (this.#closed) return;
     this.#closed = true;
