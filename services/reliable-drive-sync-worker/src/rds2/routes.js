@@ -157,6 +157,19 @@ function allowedUserIds(env) {
   return raw.split(",").map((value) => value.trim()).filter(Boolean);
 }
 
+function writeUserAuthorized(env, principal) {
+  // During the staged rollout the allowlist remains the default. Once the
+  // explicit dynamic gate is enabled, authentication is the authority: it
+  // already joined the credential to an active user row, so every active
+  // self-registered account may use the V2 write surface without a config
+  // redeploy for each new UUID.
+  if (featureEnabled(env, "RDS2_DYNAMIC_USER_AUTH_ENABLED")) {
+    return principal?.status === "active";
+  }
+  const allowed = allowedUserIds(env);
+  return allowed.length > 0 && allowed.includes(principal?.userId);
+}
+
 function domainEnabled(env, namespace) {
   const raw = typeof env?.RDS2_ENABLED_DOMAINS === "string"
     ? env.RDS2_ENABLED_DOMAINS
@@ -226,8 +239,7 @@ export async function handleV2Write(request, env, ctx, deps = {}) {
     if (!domainEnabled(env, submission.envelope.namespace)) {
       return errorResponse("domain_disabled", 403);
     }
-    const allowed = allowedUserIds(env);
-    if (allowed.length === 0 || !allowed.includes(principal.userId)) {
+    if (!writeUserAuthorized(env, principal)) {
       return errorResponse("user_disabled", 401);
     }
     const io = createInvocationIo({

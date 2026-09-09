@@ -34,6 +34,11 @@ const FLAGS = [
   "RDS2_ARCHIVE_ENABLED",
   "RDS2_RECOVERY_ENABLED"
 ];
+const ACCOUNT_FLAGS = [
+  "RDS2_DYNAMIC_USER_AUTH_ENABLED",
+  "ACCOUNT_OPERATIONS_ENABLED",
+  "ACCOUNT_SELF_REGISTER_ENABLED"
+];
 
 test("T16 declares both V2 queue producers and four single-message consumers", () => {
   assert.match(WRANGLER, /\[\[queues\.producers\]\]/);
@@ -54,6 +59,7 @@ test("T16 preserves all V1 cron expressions and adds the frozen V2 recovery cron
 
 test("T16 keeps every V2 feature switch explicitly false by default", () => {
   for (const flag of FLAGS) assert.match(WRANGLER, new RegExp(`${flag}\\s*=\\s*"false"`));
+  for (const flag of ACCOUNT_FLAGS) assert.match(WRANGLER, new RegExp(`${flag}\\s*=\\s*"false"`));
 });
 
 test("T16 wires the recovery switch to the scheduled entry point", () => {

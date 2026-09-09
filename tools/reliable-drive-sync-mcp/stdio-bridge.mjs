@@ -247,7 +247,17 @@ async function createGatewayRuntime(options) {
   const secureStore = createSecureStore({ root: join(root, "secure") });
   const client = accountHttpClient(options);
   const dialog = options.dialog ?? defaultDialog(root);
-  const accounts = createAccounts({ deviceStore, secureStore, client, dialog, root: join(root, "accounts") });
+  const accounts = createAccounts({
+    deviceStore,
+    secureStore,
+    client,
+    dialog,
+    root: join(root, "accounts"),
+    // Registration is self-service: the gateway creates a high-entropy
+    // credential locally, stores it through the platform secure store, and
+    // sends it only as the one-time bearer proof to the Worker.
+    secretFactory: async () => `rds2_${randomBytes(32).toString("base64url")}`
+  });
   const resources = new Map();
   const outboxFactory = ({ userId, credentialRef }) => {
     if (resources.has(userId)) return resources.get(userId);

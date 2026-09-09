@@ -12,7 +12,7 @@ const B = "22222222-2222-4222-8222-222222222222";
 const CRED_A = "credential-a";
 const CRED_B = "credential-b";
 
-async function fixture(t, { currentUser = null } = {}) {
+async function fixture(t, { currentUser = null, secretFactory = null } = {}) {
   const root = await mkdtemp(join(tmpdir(), "rds2-device-accounts-"));
   const store = openDeviceStore({ path: join(root, "control.sqlite") });
   const values = new Map();
@@ -35,10 +35,18 @@ async function fixture(t, { currentUser = null } = {}) {
     async confirm() { return values.get("confirm") !== false; },
     async pairingCode() { return values.get("pairingCode") ?? null; }
   };
-  const accounts = createAccounts({ deviceStore: store, secureStore, client, dialog, root });
+  const accounts = createAccounts({ deviceStore: store, secureStore, client, dialog, root, secretFactory });
   t.after(async () => { store.close(); await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); });
   return { root, store, secureStore, client, dialog, accounts, calls, values };
 }
+
+test("T05 self-service registration may generate a local credential without prompting the user", async (t) => {
+  const f = await fixture(t, { secretFactory: async () => "generated-local-secret" });
+  const result = await f.accounts.register({ displayName: "乔", requestId: "register-generated" });
+  assert.equal(result.state, "bound");
+  assert.equal(f.secureStore.get("credential." + A), "generated-local-secret");
+  assert.equal(f.calls[0][1].secret, "generated-local-secret");
+});
 
 test("T05 canceled registration makes no network call and leaves no durable intent", async (t) => {
   const f = await fixture(t);

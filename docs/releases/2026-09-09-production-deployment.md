@@ -24,8 +24,15 @@ Wrangler：4.130.0
 - `RDS2_PROJECTION_ENABLED=true`
 - `RDS2_ARCHIVE_ENABLED=true`
 - `RDS2_RECOVERY_ENABLED=true`
-- `ACCOUNT_OPERATIONS_ENABLED=false`
-- `ACCOUNT_SELF_REGISTER_ENABLED=false`
+- `RDS2_DYNAMIC_USER_AUTH_ENABLED=true`
+- `ACCOUNT_OPERATIONS_ENABLED=true`
+- `ACCOUNT_SELF_REGISTER_ENABLED=true`
+
+`ACCOUNT_RATE_LIMIT_SALT` is a Wrangler secret and must be present before
+deployment. It is intentionally absent from the production TOML and from
+all logs. New active users are authorized from the credential-to-user row;
+the static allowlist remains only as the fail-closed fallback when the
+dynamic flag is disabled.
 
 ## 部署后无凭据健康检查
 

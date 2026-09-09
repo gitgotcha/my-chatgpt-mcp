@@ -11,12 +11,12 @@ async function text(url) {
 
 test("T15 all four source skills use the single submit_event handoff", async () => {
   const algorithm = await text(new URL("algorithm-learning/SKILL.md", ROOT));
-  const backend = await text(new URL("backend-project-learning/SKILL.md", ROOT));
+  const backend = await text(new URL("software-project-learning/SKILL.md", ROOT));
   const interviewer = await text(new URL("conducting-java-backend-mock-interviews/SKILL.md", ROOT));
   const reviewer = await text(new URL("reviewing-java-backend-interviews/SKILL.md", ROOT));
   assert.match(algorithm, /submit_event/);
   assert.match(algorithm, /consulted/);
-  assert.match(backend, /默认只读学习/);
+  assert.match(backend, /默认只读|项目学习模式/);
   assert.match(interviewer, /submit_event/);
   assert.match(interviewer, /review_pending/);
   assert.match(reviewer, /submit_event/);
@@ -39,14 +39,14 @@ test("T15 the only exposed MCP tool remains submit_event", async () => {
 
 test("T15 source skills keep evidence and incomplete-state guardrails", async () => {
   const algorithm = await text(new URL("algorithm-learning/SKILL.md", ROOT));
-  const backend = await text(new URL("backend-project-learning/SKILL.md", ROOT));
+  const backend = await text(new URL("software-project-learning/SKILL.md", ROOT));
   const interviewer = await text(new URL("conducting-java-backend-mock-interviews/SKILL.md", ROOT));
   const reviewer = await text(new URL("reviewing-java-backend-interviews/SKILL.md", ROOT));
 
   assert.match(algorithm, /没有掌握度证据时记录中性的 `consulted`/);
   assert.match(algorithm, /未完成题在下一日优先/);
   assert.match(interviewer, /账户授权失败时[\s\S]*不绕过授权继续读取历史/);
-  assert.match(backend, /默认只读学习/);
+  assert.match(backend, /默认只读|项目学习模式/);
   assert.match(backend, /源码事实/);
   assert.match(interviewer, /一次只问一道主问题/);
   assert.match(interviewer, /原回答永远不被事后改写/);

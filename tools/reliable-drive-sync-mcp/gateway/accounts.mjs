@@ -80,7 +80,7 @@ function decodeCursor(cursor, version) {
   } catch { throw fail("cursor_expired"); }
 }
 
-export function createAccounts({ deviceStore, secureStore, client, dialog, root } = {}) {
+export function createAccounts({ deviceStore, secureStore, client, dialog, root, secretFactory = null } = {}) {
   if (!deviceStore || typeof deviceStore.current !== "function" || typeof deviceStore.exclusive !== "function") throw fail("invalid_device_store");
   if (!secureStore || typeof secureStore.get !== "function" || typeof secureStore.set !== "function") throw fail("invalid_secure_store");
   if (!client || typeof client !== "object") throw fail("invalid_account_client");
@@ -165,7 +165,9 @@ export function createAccounts({ deviceStore, secureStore, client, dialog, root 
     if (intent && intent.displayName !== name) throw fail("registration_conflict");
     if (intent?.status === "completed" && intent.result) return { ...intent.result, state: intent.selected ? "bound" : "created_not_selected", replayed: true };
     if (!secret) {
-      secret = await dialog.secret({ purpose: "register", displayName: name });
+      secret = typeof secretFactory === "function"
+        ? await secretFactory({ purpose: "register", displayName: name })
+        : await dialog.secret({ purpose: "register", displayName: name });
       if (typeof secret !== "string" || !secret) throw fail("registration_cancelled");
       secureStore.set(intentKey, JSON.stringify({ operation: "register", requestId, displayName: name, secret, status: "pending" }));
     }
