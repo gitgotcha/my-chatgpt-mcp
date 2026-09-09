@@ -5,6 +5,7 @@ import { DeliveryService } from "./delivery-service.mjs";
 import { randomUUID } from "node:crypto";
 import { classifySubmission } from "../../shared/rds2-protocol.mjs";
 import { isV2ReadMessage, toV2Query, parseV2StatusInput } from "./v2-routing.mjs";
+import { parseSubmission } from "../../shared/device-binding-protocol.mjs";
 
 const TOOL = {
   name: "submit_event",
@@ -133,13 +134,55 @@ async function submitEvent(id, args, options) {
     // keep their own schema.
     if ((options.writeVersion ?? "v1") === "v2") {
       if (args?.storageVersion === 2) {
-        const query = args.operation === "event.status" ? parseV2StatusInput(args) : args;
+        const parsed = parseSubmission(args);
+        if (parsed.kind === "account") {
+          const accounts = options.accounts;
+          if (!accounts) throw new Error("account_gateway_unavailable");
+          const op = parsed.body.operation;
+          const method = op === "account.current" ? "current"
+            : op === "account.find" ? "find"
+            : op === "account.register" ? "register"
+            : op === "account.bind" ? "bind"
+            : op === "account.switch" ? "switch"
+            : op === "account.unbind" ? "unbind"
+            : op === "account.transfer.create" ? "transferCreate" : "transferRedeem";
+          if (typeof accounts[method] !== "function") throw new Error("account_gateway_unavailable");
+          const params = parsed.body.params;
+          const result = op === "account.transfer.create"
+            ? await accounts[method](parsed.bindingContext)
+            : await accounts[method](params);
+          return reply(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
+        }
+        if (parsed.kind === "query" && options.businessTransport) {
+          const result = await options.businessTransport.query(args);
+          return reply(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
+        }
+        if (parsed.kind === "write" && options.businessTransport) {
+          const result = await options.businessTransport.submit(args);
+          return reply(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
+        }
+        if (parsed.kind !== "query") throw new Error("business_transport_unavailable");
+        const query = args.operation === "event.status" ? parseV2StatusInput(args) : parsed.body;
         if (!TOOL.inputSchema.properties.operation.enum.includes(query.operation)
           || !query.params || typeof query.params !== "object" || Array.isArray(query.params)) {
           throw new Error("invalid_v2_query");
         }
         const result = await v2QueryCall(query, options);
         return reply(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
+      }
+      // Business envelopes carry schemaVersion rather than storageVersion;
+      // the unified gateway must parse them before the legacy V2 classifier
+      // sees the top-level bindingContext field.
+      if (options.businessTransport && args && (Object.hasOwn(args, "schemaVersion") || Object.hasOwn(args, "bindingContext"))) {
+        const parsed = parseSubmission(args);
+        if (parsed.kind === "write") {
+          const result = await options.businessTransport.submit(args);
+          return reply(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
+        }
+        if (parsed.kind === "query") {
+          const result = await options.businessTransport.query(args);
+          return reply(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result });
+        }
       }
       if (isV2ReadMessage(args)) {
         const result = await v2QueryCall(toV2Query(args), options);
