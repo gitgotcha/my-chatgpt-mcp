@@ -120,6 +120,7 @@ export async function fetchEventBySeq(db, scope, eventSeq) {
     eventType: row.event_type,
     userId: row.user_id,
     username: envelope.payload?.event?.username ?? envelope.identity?.username ?? null,
+    domain: envelope.payload?.domain ?? null,
     payload: envelope.payload ?? {}
   };
 }
@@ -293,6 +294,7 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
         eventType: row.event_type,
         userId: row.user_id,
         username: envelope.payload?.event?.username ?? envelope.identity?.username ?? null,
+        domain: envelope.payload?.domain ?? null,
         payload: envelope.payload ?? {}
       });
     }
@@ -600,6 +602,7 @@ export async function continueBuild({ io, taskId, owner, now, reducer, pageSize 
       now,
       taskId,
       error,
+      context: { stage: build?.stage ?? "projection_build" },
       verifyAuthoritative: build ? () => verifyBuildActivated({ db: io.db, scope, build }) : null
     });
   }

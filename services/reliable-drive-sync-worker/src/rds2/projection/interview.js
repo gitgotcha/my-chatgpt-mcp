@@ -88,7 +88,7 @@ export const interviewReducer = Object.freeze({
     return planInterviewPageReads(events);
   },
 
-  buildPage({ events = [], continuation = {} } = {}) {
+  buildPage({ scope = {}, events = [], continuation = {} } = {}) {
     const history = Array.isArray(continuation.reviewEvents)
       ? structuredClone(continuation.reviewEvents) : [];
     const known = new Set(history.map((item) => item.eventKey));
@@ -96,7 +96,14 @@ export const interviewReducer = Object.freeze({
     let processed = 0;
     let nextEventSeq = continuation.nextEventSeq;
     for (const candidate of events) {
-      const source = structuredClone(sourceEventOf(candidate));
+      const rawSource = sourceEventOf(candidate);
+      const source = rawSource && typeof rawSource === "object"
+        ? {
+          ...structuredClone(rawSource),
+          userId: rawSource.userId ?? candidate?.userId ?? scope.userId ?? null,
+          username: rawSource.username ?? candidate?.username ?? null
+        }
+        : structuredClone(rawSource);
       if (!source || typeof source !== "object") continue;
       if (source.eventKey && !known.has(source.eventKey)) {
         history.push(source);
@@ -148,6 +155,12 @@ export const interviewReducer = Object.freeze({
       throw error;
     }
     const summary = reduceInterviewProfile(history);
+    // The legacy reducer derives identity from review events, but a valid
+    // interview scope may contain only completed sessions. Bind every build
+    // summary to the authenticated scope and recover its display name from
+    // the validated event wrapper so strict package JSON never sees undefined.
+    summary.userId ??= scope.userId ?? events[0]?.userId ?? null;
+    summary.username ??= events[0]?.username ?? history.find((item) => item?.username)?.username ?? null;
     return {
       rowChanges,
       summary,

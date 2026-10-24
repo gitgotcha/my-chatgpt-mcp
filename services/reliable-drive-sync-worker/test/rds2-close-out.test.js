@@ -182,7 +182,7 @@ test("F2-R1 each successful persisted transition emits exactly one sanitized log
     const entry = JSON.parse(loggedC[0]);
     assert.deepEqual(
       Object.keys(entry).sort(),
-      ["at", "class", "code", "event", "outcome", "taskId"],
+      ["at", "class", "code", "diagnostic", "event", "outcome", "taskId"],
       `(${binding}) closed-set fields only: ${loggedC[0]}`
     );
     assert.equal(entry.event, "rds2_task_closeout");
@@ -191,6 +191,40 @@ test("F2-R1 each successful persisted transition emits exactly one sanitized log
     assert.equal(entry.outcome, resultC.outcome);
     assert.ok(!loggedC[0].includes("synthetic_private_detail"), `(${binding}) user-visible fault text leaked`);
     assert.ok(!loggedC[0].includes("rds2_secret_table"), `(${binding}) raw SQL leaked`);
+  });
+});
+
+test("diagnostic close-out keeps a safe SQLite failure category without raw D1 text", async () => {
+  await runCloseOutTest(async ({ rawDb }) => {
+    const lease = await seedProcessingTask(rawDb);
+    const logged = [];
+    const io = createInvocationIo({ db: rawDb, limit: 12, log: (line) => logged.push(line) });
+    const result = await closeOutFailure({
+      io, lease, now: NOW, taskId: TASK_ID,
+      error: {
+        name: "Error",
+        message: "D1 wrapper error",
+        cause: {
+          message: "D1_ERROR: no such column: private_column_name: SQLITE_ERROR",
+          code: "ERR_SQLITE_ERROR",
+          errcode: 1
+        }
+      },
+      context: { stage: "projection_build" }
+    });
+    assert.equal(result.class, "C");
+    assert.equal(logged.length, 1);
+    const entry = JSON.parse(logged[0]);
+    assert.deepEqual(entry.diagnostic, {
+      stage: "projection_build",
+      errorName: "Error",
+      driverCode: "ERR_SQLITE_ERROR",
+      sqliteCode: 1,
+      sqliteType: "ERROR",
+      category: "no_such_column"
+    });
+    assert.ok(!logged[0].includes("private_column_name"));
+    assert.ok(!logged[0].includes("D1_ERROR"));
   });
 });
 

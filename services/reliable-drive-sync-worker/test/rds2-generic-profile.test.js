@@ -6,6 +6,7 @@ import {
   selectMemberReadPrefix
 } from "../src/rds2/projection/generic-profile.js";
 import { reducerForScope } from "../src/rds2/projection/registry.js";
+import { fetchEventBySeq } from "../src/rds2/projection/builds.js";
 
 const USER_ID = "11111111-1111-4111-8111-111111111111";
 const IDENTITY = { userId: USER_ID, username: "乔炳源" };
@@ -56,6 +57,27 @@ test("T11 generic reducer accepts multiple observations and declares bounded mem
   const snapshot = reduceGenericProfile([input], { identity: IDENTITY, domain: DOMAIN });
   assert.equal(snapshot.openWeaknesses.length, 1);
   assert.equal(snapshot.observations.length, 1);
+});
+
+test("T11 fetched generic-profile events preserve the envelope domain for rebuilds", async () => {
+  const input = event({ domain: undefined });
+  const envelope = { identity: IDENTITY, payload: { domain: DOMAIN, event: { ...input, domain: undefined } } };
+  const db = {
+    prepare() {
+      return { bind: () => ({ first: async () => ({
+        event_seq: 1, event_id: input.eventId, event_key: input.eventKey,
+        event_type: "profile.signal.recorded", user_id: USER_ID,
+        envelope_json: JSON.stringify(envelope)
+      }) }) };
+    }
+  };
+  const fetched = await fetchEventBySeq(db, { userId: USER_ID, namespace: "profile", projectionName: DOMAIN }, 1);
+  const result = genericProfileReducer.buildPage({
+    events: [fetched], staged: { member: new Map(), event_activity: new Map() },
+    continuation: { nextEventSeq: 1, page: 1 }
+  });
+  assert.equal(result.summary.domain, DOMAIN);
+  assert.equal(result.summary.userId, USER_ID);
 });
 
 test("T11 observe, supersede and invalidate preserve the V1 active-event semantics", () => {

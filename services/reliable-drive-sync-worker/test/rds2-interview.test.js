@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { interviewReducer, reduceInterviewProfile } from "../src/rds2/projection/interview.js";
+import { canonicalJson } from "../../../shared/rds2-protocol.mjs";
 
 const USER_ID = "00000000-0000-4000-8000-000000000001";
 const IDENTITY = { userId: USER_ID, username: "乔炳源" };
@@ -115,6 +116,34 @@ test("T12 buildPage persists selected review and contribution rows", () => {
   assert.equal(result.summary.domainProfiles.java_backend.weaknesses["W-1"].status, "open");
   assert.ok(result.rowChanges.some((row) => row.rowKind === "selected_review"));
   assert.ok(result.rowChanges.some((row) => row.rowKind === "contribution"));
+});
+
+test("T12 buildPage binds the rebuilt summary to the authenticated scope identity", () => {
+  const current = review({ reviewVersion: 1, eventKey: "review:identity" });
+  const { userId: _userId, username: _username, ...domainReview } = current;
+  const result = interviewReducer.buildPage({
+    scope: { userId: USER_ID },
+    events: [{ eventSeq: 1, userId: USER_ID, username: IDENTITY.username, payload: { event: domainReview } }],
+    staged: { session: new Map(), review: new Map(), selected_review: new Map(), contribution: new Map() },
+    continuation: { nextEventSeq: 1, page: 1 }
+  });
+  assert.equal(result.summary.userId, USER_ID);
+  assert.equal(result.summary.username, IDENTITY.username);
+});
+
+test("T12 a session-only build still emits a serializable identity-bound summary", () => {
+  const first = session("S-1");
+  const second = session("S-2", "2026-09-02T09:00:00.000Z");
+  const result = interviewReducer.buildPage({
+    scope: { userId: USER_ID },
+    events: [first, second].map((event, index) => ({
+      eventSeq: index + 1, userId: USER_ID, username: IDENTITY.username, payload: { event }
+    })),
+    continuation: { nextEventSeq: 1, page: 1 }
+  });
+  assert.equal(result.summary.userId, USER_ID);
+  assert.equal(result.summary.username, IDENTITY.username);
+  assert.doesNotThrow(() => canonicalJson(result));
 });
 
 test("T12 a later review version replaces the selected contribution across pages", () => {

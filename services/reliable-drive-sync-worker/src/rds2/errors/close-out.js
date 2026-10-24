@@ -37,8 +37,59 @@ function remainingBudget(io) {
 
 // The sanitized structured log line. Fields are a closed set; values are
 // closed-set tokens. Never the original message, SQL, cause or scope.
-function logLine({ taskId, outcome, class: klass, code, at }) {
-  return JSON.stringify({ event: "rds2_task_closeout", taskId, outcome, class: klass, code, at });
+function safeDiagnostic(error, context) {
+  const chain = [];
+  const seen = new Set();
+  let current = error;
+  while (current && typeof current === "object" && !seen.has(current) && chain.length < 4) {
+    seen.add(current);
+    chain.push(current);
+    current = current.cause;
+  }
+  const text = chain.flatMap((item) => [item.message, item.errstr])
+    .filter((value) => typeof value === "string")
+    .join(" ")
+    .toLowerCase();
+  const categories = [
+    ["no_such_column", /no such column/],
+    ["no_such_table", /no such table/],
+    ["not_null_constraint", /not null constraint failed/],
+    ["check_constraint", /check constraint failed/],
+    ["unique_constraint", /unique constraint failed/],
+    ["foreign_key_constraint", /foreign key constraint failed/],
+    ["datatype_mismatch", /datatype mismatch/],
+    ["database_busy", /database is locked|database is busy/],
+    ["incomplete_sql", /incomplete input/],
+    ["malformed_json", /malformed json|invalid json/],
+    ["too_many_sql_variables", /too many sql variables/],
+    ["syntax_error", /syntax error/]
+  ];
+  const category = categories.find(([, pattern]) => pattern.test(text))?.[0]
+    ?? (text.includes("invalid_domain") ? "invalid_domain" : null)
+    ?? (text.includes("unrepresentable_undefined") ? "unrepresentable_undefined" : null)
+    ?? (text.includes("sqlite_error") ? "sqlite_error" : null)
+    ?? (text.includes("sqlite_constraint") ? "sqlite_constraint" : null)
+    ?? (text.includes("d1_error") ? "d1_error" : "unclassified_storage_error");
+  const rawName = typeof error?.name === "string" ? error.name : "";
+  const rawCode = chain.map((item) => item.code).find((value) => typeof value === "string") ?? "";
+  const rawStage = typeof context?.stage === "string" ? context.stage : "unknown";
+  const rawSqliteCode = chain.map((item) => item.errcode).find((value) => Number.isSafeInteger(value));
+  const sqliteCode = Number.isSafeInteger(rawSqliteCode) && rawSqliteCode >= 0 && rawSqliteCode <= 9999
+    ? rawSqliteCode
+    : null;
+  const sqliteType = /\bSQLITE_(ERROR|CONSTRAINT|BUSY|MISMATCH|CORRUPT|NOTADB|FULL|IOERR|NOMEM|READONLY|CANTOPEN|TOOBIG|ABORT|INTERRUPT)\b/i.exec(text)?.[1]?.toUpperCase() ?? null;
+  return {
+    stage: /^[a-z_]{1,40}$/.test(rawStage) ? rawStage : "unknown",
+    errorName: ["Error", "TypeError", "RangeError", "SyntaxError"].includes(rawName) ? rawName : "Error",
+    driverCode: /^[A-Z][A-Z0-9_]{0,47}$/.test(rawCode) ? rawCode : "unknown",
+    sqliteCode,
+    sqliteType,
+    category
+  };
+}
+
+function logLine({ taskId, outcome, class: klass, code, at, diagnostic }) {
+  return JSON.stringify({ event: "rds2_task_closeout", taskId, outcome, class: klass, code, at, diagnostic });
 }
 
 // Only called after a SUCCESSFUL persisted transition. An unconfigured sink
@@ -100,7 +151,7 @@ export async function closeOutFailure({
       return classEResult(taskId, E_RESULTS.budget);
     }
     if (!deferred.rowsWritten) return { outcome: "noop", taskId, code: "lease_lost", class: "B" };
-    emitCloseOutLog(io, { taskId, outcome: "retry", class: "A", code: classified.code, at: now });
+    emitCloseOutLog(io, { taskId, outcome: "retry", class: "A", code: classified.code, at: now, diagnostic: safeDiagnostic(error, context) });
     return { outcome: "retry", taskId, code: classified.code, class: "A" };
   }
 
@@ -136,7 +187,7 @@ export async function closeOutFailure({
     // Zero rows means our lease was taken over — we wrote nothing, so we must
     // not claim to have parked anything.
     if (!parked.rowsWritten) return { outcome: "noop", taskId, code: "lease_lost", class: "B" };
-    emitCloseOutLog(io, { taskId, outcome: "needs_attention", class: "D", code: classified.code, at: now });
+    emitCloseOutLog(io, { taskId, outcome: "needs_attention", class: "D", code: classified.code, at: now, diagnostic: safeDiagnostic(error, context) });
     return { outcome: "needs_attention", taskId, code: classified.code, class: "D" };
   }
 
@@ -152,7 +203,7 @@ export async function closeOutFailure({
   }
   if (!failure.rowsWritten) return { outcome: "noop", taskId, code: "lease_lost", class: "B" };
   const outcome = failure.state === "needs_attention" ? "needs_attention" : "retry";
-  emitCloseOutLog(io, { taskId, outcome, class: "C", code: "deferred_commit_failed", at: now });
+  emitCloseOutLog(io, { taskId, outcome, class: "C", code: "deferred_commit_failed", at: now, diagnostic: safeDiagnostic(error, context) });
   return {
     outcome,
     taskId,

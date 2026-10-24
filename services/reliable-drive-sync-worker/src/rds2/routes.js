@@ -255,6 +255,7 @@ function budgetedIoFor(type, env) {
     : PROJECTION_BUDGET;
   return createInvocationIo({
     db: env.DB,
+    log: (line) => console.log(line),
     queues: {
       RDS2_PROJECTION_QUEUE: env.RDS2_PROJECTION_QUEUE,
       RDS2_ARCHIVE_QUEUE: env.RDS2_ARCHIVE_QUEUE
