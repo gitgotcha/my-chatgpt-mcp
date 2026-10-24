@@ -26,7 +26,7 @@ npx wrangler queues create rds2-archive-dlq
 npx wrangler d1 migrations apply reliable-drive-sync --remote --config services/reliable-drive-sync-worker/wrangler.toml
 ```
 
-确认 `wrangler.toml` 中的两个主队列分别指向自己的 DLQ，四个 consumer 的 `max_batch_size = 1`，并确认 V1 原有三条 cron 逐字节保留，V2 使用 `2-57/5 * * * *`。资源创建成功不等于业务已同步；仍需完成后续 canary。
+确认 `wrangler.toml` 中的两个主队列分别指向自己的 DLQ，四个 consumer 的 `max_batch_size = 1`，并确认 V1 原有三条 cron 逐字节保留，V2 使用 `* * * * *` 每分钟恢复一次。资源创建成功不等于业务已同步；仍需完成后续 canary。
 
 ## 2. 本地验证（无远程副作用）
 

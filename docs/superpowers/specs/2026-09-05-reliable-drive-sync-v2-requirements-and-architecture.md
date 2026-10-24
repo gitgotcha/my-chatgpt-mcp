@@ -25,7 +25,7 @@
 > 5. §11/§12：本地 Outbox V2 冻结 `pending→sending→confirmed|pending(backoff)|blocked` 状态流与 confirmed 重放；fingerprint 为完整 envelope 的 canonical JSON SHA-256；投影 `state_json` 改为最小充分状态（聚合 + 去重索引 + 关系），禁止保存完整事件数组，设 2 MiB 上限。
 > 6. §13：Outbox 认领使用单条条件 `UPDATE … RETURNING`（真实 D1 可验证的原子认领）；新增陈旧 `queued` 回收规则；Dispatcher 六条状态机规则（自认领、检查 `meta.changes`、拒绝直发 `processing/needs_attention/completed`）。
 > 7. §14：归档改为 invocation/batch 级处理（Queue handler 根部单预算器、按本批消息精确 taskId 认领、按 `(userId, namespace)` 分组、逐对象更新自身 delivery 与 task、未执行对象释放租约并 `message.retry()`、已处理对象逐条 `message.ack()`、同名多文件 `needs_attention`）；哈希针对冻结规范字节计算。
-> 8. §15：冻结精确归档成本模型（8 个全新对象 = 38 ≤ 40，明细见表）；D1/Queue/Drive/fetch/redirect 全部经预算化封装；**V2 恢复器改用独立 cron invocation**（`2-57/5 * * * *`），V1 三条 cron 表达式逐字节保留、行为不变，废除"同一 invocation 内 V2 预留 15"的共存方式。
+> 8. §15：冻结精确归档成本模型（8 个全新对象 = 38 ≤ 40，明细见表）；D1/Queue/Drive/fetch/redirect 全部经预算化封装；**V2 恢复器改用独立 cron invocation**（`* * * * *`，每分钟），V1 三条 cron 表达式逐字节保留、行为不变，废除"同一 invocation 内 V2 预留 15"的共存方式。
 > 9. §17：admin token 作为期望值依赖注入（禁止与字符串字面量比较）；凭据生成使用 Web Crypto（`crypto.getRandomValues`）；凭据语义锁定为**追加签发**（旧凭据保留有效），`status/revoked_at` 为未来轮换预留，轮换必须与签发同事务。
 > 10. §21：新增十六条 Revision 4 验收门（真实 Miniflare 异步 D1、四唯一作用域并发、每类型一正一反样本、身份初始化零残留、10 事件 10+1 归档、精确任务完成、发布-回写失败全链路、queued 恢复、全通道预算、并发认领、状态上限、本地 Outbox 重启/超时/退避/阻塞/重放、无 Content-Length 413、暗部署全闭、逐 cron 预算、全绿门）。
 > 11. D1 接口模型：全部 Repository/Service/Dispatcher/Recovery/Projection/Archiver 调用链 async/await；`batch()` 接收绑定后的语句对象数组；UPDATE 影响行数读取 `result.meta.changes`；`src/rds2/*.js` 到仓库根 `shared/` 的相对路径为 `../../../../shared/…`。
@@ -90,7 +90,7 @@ Workbuddy 应基于本文件另行生成可执行实施计划，不能直接实�
 13. 用户身份先在 D1 明确注册或解析；事件接收热路径不得扫描 Drive 来判断身份。
 14. 旧数据不迁移。V1 冻结为历史只读数据源，V2 从显式初始化后的新状态开始。
 15. D1 接口模型与真实 Cloudflare D1 一致：`first/all/run/batch` 全部异步；`batch()` 接收绑定后的语句对象数组；`all()` 返回 `{ results: [...] }` 形状；`run()` 返回含 `meta.changes` 的对象；UPDATE 影响行数读 `result.meta.changes`。本地 SQLite 适配器模拟同一套 D1 API，不创造第二套接口：适配器为每次 `prepare` 生成私有包装语句对象（持有 sql 文本与绑定参数，绑定后不可再绑定），`batch` 顺序执行并返回逐语句结果数组；同一套接口断言套件（形状、异步、`meta.changes`、batch 回滚）必须同时通过 node:sqlite 适配器与 Miniflare 真 binding。
-16. V2 恢复器使用独立 cron invocation（`2-57/5 * * * *`），与 V1 三条 cron 无共享预算；V1 cron 表达式与行为逐字节保留。
+16. V2 恢复器使用独立 cron invocation（`* * * * *`，每分钟），与 V1 三条 cron 无共享预算；V1 cron 表达式与行为逐字节保留。
 
 ## 4. 当前 V1 基线和受保护内容
 
@@ -597,7 +597,7 @@ Drive 原语的真实成本以 `google-drive.js` 源码为准：OAuth token 一�
 
 ### 15.2 Cron 布局：V1 与 V2 独立 invocation
 
-V2 恢复器**不与 V1 cron 共享 invocation**。`wrangler.toml` 的 crons 数组在 V1 三条表达式逐字节保留之外，新增一条 V2 专用表达式 `2-57/5 * * * *`（错峰 2 分钟、每 5 分钟）。`scheduled()` 按 `controller.cron` 精确匹配分流：V1 表达式走既有 V1 逻辑（零改动）；V2 表达式走 V2 恢复器（预算 15）。每条 cron 的 invocation 各自独立证明 ≤40：V1 invocation 由现状基线测试保证，V2 invocation 用预算器断言。禁止再声称“V1 逐字节不变 + 同 invocation + V2 自带 15”能够证明总量 ≤40。
+V2 恢复器**不与 V1 cron 共享 invocation**。`wrangler.toml` 的 crons 数组在 V1 三条表达式逐字节保留之外，新增一条 V2 专用表达式 `* * * * *`（每分钟）。`scheduled()` 按 `controller.cron` 精确匹配分流：V1 表达式走既有 V1 逻辑（零改动）；V2 表达式走 V2 恢复器（预算 15）。每条 cron 的 invocation 各自独立证明 ≤40：V1 invocation 由现状基线测试保证，V2 invocation 用预算器断言。禁止再声称“V1 逐字节不变 + 同 invocation + V2 自带 15”能够证明总量 ≤40。
 
 ### 15.3 Drive 归档精确成本模型（先冻结，再实现）
 

@@ -10,7 +10,7 @@ import { createStorageLayout } from "./storage-layout.js";
 import { createUserStore } from "./user-store.js";
 import { handleV2Request, handleV2Write, handleV2Init, handleV2Queue, handleV2Scheduled } from "./rds2/routes.js";
 
-export const V2_RECOVERY_CRON = "2-57/5 * * * *";
+export const V2_RECOVERY_CRON = "* * * * *";
 
 function featureEnabled(runtimeEnv, name) {
   // Configuration is deliberately string based: missing values and every

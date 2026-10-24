@@ -8,6 +8,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKER_ROOT = path.resolve(HERE, "..");
 const REPO_ROOT = path.resolve(WORKER_ROOT, "..", "..");
 const WRANGLER = fs.readFileSync(path.join(WORKER_ROOT, "wrangler.toml"), "utf8");
+const PRODUCTION_WRANGLER = fs.readFileSync(path.join(WORKER_ROOT, "wrangler.production.toml"), "utf8");
 const INDEX = fs.readFileSync(path.join(WORKER_ROOT, "src", "index.js"), "utf8");
 const ROUTES = fs.readFileSync(path.join(WORKER_ROOT, "src", "rds2", "routes.js"), "utf8");
 const SETUP = fs.readFileSync(
@@ -26,7 +27,7 @@ const QUEUE_NAMES = [
   "rds2-archive-dlq"
 ];
 const V1_CRONS = ["*/5 * * * *", "0 * * * *", "0 */6 * * *"];
-const V2_RECOVERY_CRON = "2-57/5 * * * *";
+const V2_RECOVERY_CRON = "* * * * *";
 const FLAGS = [
   "RDS2_WRITE_ENABLED",
   "RDS2_QUERY_ENABLED",
@@ -46,9 +47,11 @@ test("T16 declares both V2 queue producers and four single-message consumers", (
   assert.match(WRANGLER, /queue\s*=\s*"rds2-archive"[\s\S]*?dead_letter_queue\s*=\s*"rds2-archive-dlq"/);
 });
 
-test("T16 preserves all V1 cron expressions and adds the frozen V2 recovery cron", () => {
+test("T16 preserves all V1 cron expressions and schedules V2 recovery every minute", () => {
   for (const cron of V1_CRONS) assert.match(WRANGLER, new RegExp(cron.replaceAll("*", "\\*")));
   assert.match(WRANGLER, new RegExp(V2_RECOVERY_CRON.replaceAll("*", "\\*")));
+  assert.match(PRODUCTION_WRANGLER, /crons\s*=\s*\["\* \* \* \* \*"\]/);
+  assert.match(RUNBOOK, /\* \* \* \* \*/);
   assert.match(INDEX, /controller\?\.cron === V2_RECOVERY_CRON/);
 });
 
