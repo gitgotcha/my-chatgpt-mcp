@@ -2,6 +2,8 @@
 
 本 runbook 只描述可审计的发布顺序。当前默认配置是暗部署（V2 五个开关均为 `false`），任何远程资源创建、D1 迁移、Worker 部署、Queue 绑定、Drive 访问或关闭 V1 的动作，都必须在单独的人工确认后执行。本地测试和 dry-run 不会访问真实 Drive。
 
+> **配置范围说明（2026-10-25）**：上文的灰度步骤是通用发布流程，不代表当前生产配置。仓库中的 `wrangler.production.toml` 已把 V1 标记为 retired、关闭 V1 写入，并仅保留每分钟一次的 V2 恢复 cron；默认 `wrangler.toml` 仍用于暗部署/兼容开发。生产发布、诊断和核验必须明确指定生产配置文件。V1 的写入退役也不等于所有旧数据读取与迁移兼容代码都已移除，详见 [V1/V2 兼容性与数据清理边界](./rds-v1-v2-compatibility-audit-2026-10-25.md)。
+
 ## 0. 发布记录与停止条件
 
 发布前记录以下事实，不把凭据写入文件、命令行历史、日志或提交：
@@ -26,7 +28,7 @@ npx wrangler queues create rds2-archive-dlq
 npx wrangler d1 migrations apply reliable-drive-sync --remote --config services/reliable-drive-sync-worker/wrangler.toml
 ```
 
-确认 `wrangler.toml` 中的两个主队列分别指向自己的 DLQ，四个 consumer 的 `max_batch_size = 1`，并确认 V1 原有三条 cron 逐字节保留，V2 使用 `* * * * *` 每分钟恢复一次。资源创建成功不等于业务已同步；仍需完成后续 canary。
+按所发布的配置文件核对两个主队列分别指向自己的 DLQ，四个 consumer 的 `max_batch_size = 1`，并检查相应 cron。暗部署/开发配置与已退役 V1 的生产配置不同，不能把一个配置文件的开关或 cron 假设套用到另一个。资源创建成功不等于业务已同步；仍需完成后续 canary。
 
 ## 2. 本地验证（无远程副作用）
 
