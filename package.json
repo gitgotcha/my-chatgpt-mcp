@@ -1,16 +1,16 @@
 {
-  "name": "reliable-drive-sync",
+  "name": "rds-jbryon",
   "private": true,
-  "version": "2.0.0",
+  "version": "1.0.0",
   "type": "module",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "test": "npm run test:worker && npm run test:bridge",
-    "test:worker": "node --test services/reliable-drive-sync-worker/test/*.js",
-    "test:bridge": "node --test tools/reliable-drive-sync-mcp/test/*.mjs",
-    "deploy:worker": "npx wrangler deploy --config services/reliable-drive-sync-worker/wrangler.toml"
+    "test:worker": "node --test services/rds-jbryon/test/*.test.js",
+    "test:bridge": "node --test tools/rds-jbryon-mcp/test/*.test.js",
+    "deploy:rds-jbryon": "npx wrangler deploy --config services/rds-jbryon/wrangler.jsonc"
   },
   "devDependencies": {
     "miniflare": "4.20260730.0"

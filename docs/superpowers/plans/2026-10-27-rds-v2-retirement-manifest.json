@@ -1,0 +1,1154 @@
+{
+  "createdAt": "2026-10-27",
+  "status": "partial",
+  "cloudflare": {
+    "accountId": "16b2e515b4a8353a2d0df8eae363ebb1",
+    "retiredWorker": {
+      "name": "reliable-drive-sync",
+      "status": "deleted"
+    },
+    "retiredD1": {
+      "name": "reliable-drive-sync",
+      "id": "64e7d63f-9275-45d3-be73-9e8cd4908ccd",
+      "status": "deleted"
+    },
+    "retiredQueues": [
+      {
+        "name": "rds2-projection",
+        "id": "303b16f61815477d8edd1a73a37d4d63",
+        "status": "deleted",
+        "backlog": "unknown_discarded"
+      },
+      {
+        "name": "rds2-projection-dlq",
+        "id": "6f9d2cbf5b54400bb1c4e367ec07d400",
+        "status": "deleted",
+        "backlog": "unknown_discarded"
+      },
+      {
+        "name": "rds2-archive",
+        "id": "98b7f911a3dd4364a768cd54a28b3f47",
+        "status": "deleted",
+        "backlog": "unknown_discarded"
+      },
+      {
+        "name": "rds2-archive-dlq",
+        "id": "21b49663545c4bcd937fafa3a4c2bc22",
+        "status": "deleted",
+        "backlog": "unknown_discarded"
+      }
+    ],
+    "preserved": {
+      "d1Id": "ef1e54cc-b49f-40bd-837b-54c0035cc7de",
+      "canaryStatus": "read_only_health_ok",
+      "queue": "rds-jbryon-projection",
+      "queueId": "c52049910e1646038d7c0cf72d1e9263",
+      "worker": "rds-jbryon"
+    }
+  },
+  "drive": {
+    "archiveRows": 30,
+    "uniqueFileIds": 30,
+    "metadataNameMatches": 30,
+    "deleteCallsSucceeded": 30,
+    "postDeleteAbsent": 30,
+    "protectedFolderId": "1DI64vbdm1eE5dXttkbzQ_nHs1CO0J2CP",
+    "protectedFolderStillPresent": true,
+    "ownerFieldReturnedByConnector": false
+  },
+  "local": {
+    "oldMcpProcessesStopped": true,
+    "legacyPluginMcpConfigEmpty": true,
+    "sourceMcpConfigEmpty": true,
+    "legacySourceFilesRemoved": true,
+    "oldEnvironmentVariablesRemoved": true,
+    "oldStateFilesRemoved": true,
+    "oldSourceDirectoriesRemoved": true,
+    "rdsJBryonOutboxPreserved": true,
+    "cleanupVerifiedAt": "2026-10-28",
+    "blocker": null
+  },
+  "inventory": {
+    "legacyCodeFiles": [
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\package.json",
+        "sha256": "cd69db6c94deb57a06e0f583eb66a1851ace3af0ffedba708713cad3d139e072"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\README.md",
+        "sha256": "defd1add0e2dad971192375fb0cbc0030444c9f4eeac10f495920f46ac5015cd"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\wrangler.production.toml",
+        "sha256": "66e04b301f9a8ce652fcd802a06997b85e3b9bbef505310ce1ddb5112bd928fc"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\wrangler.toml",
+        "sha256": "a83a87d98ceed78d80dc4c7e20c2ad8d7a3c42800c76e310a37af0429df24a1e"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\.wrangler\\cache\\cf.json",
+        "sha256": "f23b90ffd47714e2d4f95bb3bcde13c78bfcde920f39b61b64145e82289c075a"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\migrations\\0005_schema12_jobs.sql",
+        "sha256": "dd0e0de6a141f28eb334b46bec029778e4b117369c9cdee5c75acdf3fe1efc25"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\migrations\\0006_rds2_v2_tables.sql",
+        "sha256": "4534cd79452101911343c072158c740302e2d3b7b1fa7e60bd1656721edd8f10"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\migrations\\0007_rds2_generic_projection.sql",
+        "sha256": "5c7b89ac471ba685d2e421db75c2472b46513773df90d97a596189ccd9d6378d"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\migrations\\0008_rds2_interview_projects.sql",
+        "sha256": "99ad905935042c041fba6ab1525766660cd0b73b49ba1af342825d161695dd7b"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\algorithm-profile-model.js",
+        "sha256": "2e947dc706be68cbb6e23a1d2871aae41251140a3206307f3b36b922da974a32"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\algorithm-store.js",
+        "sha256": "103a7e7d54b6cde66868a5f62f0d1a3a9e310389d7f0e768a30f2e9313bc25da"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\capabilities.js",
+        "sha256": "10551ad3e4b4d1a569c32375f18f4301856c291a27c503d872563abefe58f631"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\daily-plan-selector.js",
+        "sha256": "dc7bb2a78241a04293cec0efabf7653516233894bdd2114a4b6a5d7fd55c4e4c"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\dispatcher.js",
+        "sha256": "59310150fb59bd34122b63861f22a433e7990055cf20b363e21f8cae9e354ab5"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\event-store.js",
+        "sha256": "eb5ebc9eece2de78deabe230db9202ff246f6b4e1ce841a4f3d509109ecae7f1"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\generic-profile-contract.js",
+        "sha256": "0bcf3c264c8dbd2f426c38e6f6fb25564ddd32c1060c49881a6c5b34dd0ad4d6"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\generic-profile-model.js",
+        "sha256": "5d3ce5d66c05f6ef5a15a0b9411e2fb190690291fe21fd61e216da12b3377666"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\generic-profile-store.js",
+        "sha256": "c461b77e2e8707892f0c07e7eb28d72fd2d75a6bf2d65c3f97a83f8f8be20335"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\google-drive.js",
+        "sha256": "336b24c6b64fd6764e32fa6842d0def393a0ec958ffa43f38563a3660e9433a6"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\index.js",
+        "sha256": "644f0dd07432fd3d7236f65d6da50e662fcc3421fb98dcb4573632be6698c482"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\ingress.js",
+        "sha256": "7fb9134e3a504a0214cd57c9f2a2c81a5b8d18432cc8a7a1ba5f657f8cdc69eb"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\interview-store.js",
+        "sha256": "feffd78493d74f8b11fdb0abeec3924929305c435767107dea4dbb0dd67763a5"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\job-repository.js",
+        "sha256": "ae301eb3037f3649212bf852f2b148e9ab26ff8f3b8d5aa872d6071a3cebd984"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\legacy-reader.js",
+        "sha256": "4961a4f1ad0a72f088238c00c974514d19c7b6befca90bed141610124799341e"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\migration-store.js",
+        "sha256": "f61aad7b03e3b2180ee3efe3b19a69a0cfb13bbaaaa70918373e4016acf37bf0"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\profile-model.js",
+        "sha256": "3c01f0af72f7beb20008f71d761c3ece6ee0f3ff06ce98b8510ccebf8b670150"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\protocol.js",
+        "sha256": "3b2ead18cf50454da2ced7ad6ad19d4e104c9cbca6e478386e7f0e32f31b8e43"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\qstash.js",
+        "sha256": "b1f2c4dfeaa0be1a7da04e0d45f87836f2f58c892385ab356e0192d4da382af2"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\reconciler.js",
+        "sha256": "815ba06127b961ccb2270b25c7a0fa8765d3eb8547d8ef7943faa3983f01a1ea"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\resume-knowledge-model.js",
+        "sha256": "a021e1a39fb96516a67e2a0fb01ee4a9a0cd404cc45e246d291035693625eb8c"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\resume-knowledge-store.js",
+        "sha256": "5c85adb583fab65d3b5ef54bc1bb1034a92987c054d5d74210b476482a4bd4c7"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\storage-layout.js",
+        "sha256": "f3e8dabecb1a4dd4b1aff819fc4b3f83f6cc641760c3d3acee28607edb3b2c2c"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\submit-event.js",
+        "sha256": "63c2595da9aa5c20d95569935423552d7c2f3bd27ea5d8c20570faed196ba250"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\sync.js",
+        "sha256": "6f10dc731c93beef72484b3084bcf835e298bd7c0d6dfe04ce6bdff9bd6e5d6f"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\user-store.js",
+        "sha256": "94a2b5352de2541b94d106c4a033af31e44d4e38ed5dc044475bc37b6a3a90f4"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\project-contract.js",
+        "sha256": "43a246ae5d64a4cf4efa1be1e93695df033b915857f105f02e44a34f7b59cd51"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\project-repository.js",
+        "sha256": "da9e979995e4438a9bb0b47a8fc4e7c22aa1f32230a4facb1e1189cd2773be94"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\query.js",
+        "sha256": "f991fdf22ade97ad9dc1ecd6aec2de35c00711312551d21ee115798b02a819b6"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\routes.js",
+        "sha256": "5a5a21a709b55cd2f3ce98317d11231e76656304c0f2e2cd414672fe098d7940"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\archive\\archiver.js",
+        "sha256": "5c4c5cba3350974726a961df1fae9552fa2ae0f1d6ab4879c81c123c7443291a"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\archive\\drive-client.js",
+        "sha256": "9392ed834da93966f0e7cbb601b95447c7f0328f8fef39fbc79a53d116140928"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\archive\\replay-validate.js",
+        "sha256": "b399198eb746d4b8c3836dc6796d0736c61bf1f2ab7eab2dc1c252f70c022b02"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\errors\\close-out.js",
+        "sha256": "3cb039d4cde23e334054c858b27e53f27ad23ac08a9d05b251852116493a075c"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\errors\\storage-error.js",
+        "sha256": "d5cbc1a2d65502260c47511e2b9a3d48d0d834109344ff11392fd5f7e1fdab5b"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\events\\accept.js",
+        "sha256": "b3f6f83658a84134b99cfcd50e08305ba28e35996280eefd54ac39d9aeff13e0"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\events\\repository.js",
+        "sha256": "4b940738f8e740abf1d335e1a98f29730b71b0b54f16cf1372f20ccfe14d89d4"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\identity\\auth.js",
+        "sha256": "81efd11395cfea4a56fd1bd6241560154704b3d59aae25a33afe4e5faea48262"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\identity\\hashing.js",
+        "sha256": "9bc600a8801259e3e996cda4f945f0176ca08b2b547f8c11a540fdfc371656a4"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\identity\\initialize.js",
+        "sha256": "986deb72368a4a9593480fdcd3f0e23aa54e7b11498a6c53cda9eb6dac3852ce"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\io\\budget.js",
+        "sha256": "414fd7b16277b11a38fa482acf4fb8cdfd7fec705a2cecf723d0a4ae533e4f24"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\io\\invocation-io.js",
+        "sha256": "71722da7dfb8aafe363f1b7b654c535465a804070b6390c13006cbd1a7224f34"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\projection\\algorithm.js",
+        "sha256": "64c4661a769229644cd093cdeefe6d845374f1205f3f6107769169e355afc0c9"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\projection\\builds.js",
+        "sha256": "7c8bac8f4088fe6470a3aefc3aca8d9ee2d0062a65e6aedcdc308f0cc7c5aa70"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\projection\\commit.js",
+        "sha256": "69db45b34fd67ca0be4d7b44c3921cea868358befadab08f7357c2c5a52f9962"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\projection\\engine.js",
+        "sha256": "a7300f2e7f76d1f45e6305432cb1a207a80585758401c4eddee766da81980569"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\projection\\generic-profile.js",
+        "sha256": "3fd3195218486e30d6b2124b6f01ddfaf508093ce5aade14137bf838c93f995e"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\projection\\interview.js",
+        "sha256": "3f0fbb79658ec46b2194b61d9cb69fa3986ba75372251b73a2439760dec345df"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\projection\\project-interview.js",
+        "sha256": "6aae3dcbc53912576eea8b04ca96a8750909687246908ec88f48f0200307518e"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\projection\\registry.js",
+        "sha256": "b2b88420e51d8a0594a50331027969cdcfb36080900f6df6e419abe2f21ca42b"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\projection\\resume-knowledge.js",
+        "sha256": "09476c6b5de897981d4b38f4e54efe7ea3e9992a72102a462b285c0c4ac1f43d"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\projection\\staging-read.js",
+        "sha256": "803ff88778773247c0b03598b4f3d361a345e1572eba40d5216c97d2eff90ce2"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\tasks\\dispatcher.js",
+        "sha256": "3c887fc4da84d4b328f28cf4530d3154530234bec9f316372945bdbdb9229543"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\tasks\\dlq.js",
+        "sha256": "8e57e272e5fe8fbc771dbab87b8434464bcc9b8f8baf1c07ece6bc428aabca11"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\tasks\\recovery.js",
+        "sha256": "7fa3e94c3cb0fdaf5f4c5dc548425d3d742e067b6bf392db79bc8fab8f9b19a8"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\src\\rds2\\tasks\\repository.js",
+        "sha256": "17498a6638e9c8c68081cabc6222102e71d29b5fe1bc124a2d8b7cd298f8147d"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\algorithm-profile-model.test.js",
+        "sha256": "4c1edac4f46eee155153cae290d01836ab196ff3bf24d596ba11823d2b142cf9"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\algorithm-store.test.js",
+        "sha256": "51cab36a35e1236c2bc2433303e5f6852b2a2e2152379fb4fa6cd4c76e1aa8d0"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\capabilities.test.js",
+        "sha256": "f2e2cf4340a3d808c29ab4871567e950d19588e2eac8904cf38c0831e2805f37"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\daily-plan-selector.test.js",
+        "sha256": "84dbd08c8d316d752689afaeea3b491cbcd60adb596acab63b5e2f81eca72a06"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\dispatcher.test.js",
+        "sha256": "6571aad4fd634eab312d5603d71865019109d760d45e12a900aad429ead2221d"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\end-to-end.test.js",
+        "sha256": "5a8668cee98312244bae3f6cba843d768b89d6ead44254430b210b560063baec"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\event-store.test.js",
+        "sha256": "d201c73521d601205cbbab0ed0dea37cdc7a47d0335c426540757f511fcbfb3a"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\generic-profile-compatibility.test.js",
+        "sha256": "c4e33ef061d59cad862ed3073e2e8a18a621ab055a9f7e0dae42f161cac0bd32"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\generic-profile-contract.test.js",
+        "sha256": "89655b30a1fdf28e5e4e4c761ba0a1fe9f92f270f6c5b1132d3acc0aa73ca657"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\generic-profile-end-to-end.test.js",
+        "sha256": "2cb101153b50366e0f00bfaed867b0a4f8adadf8b8b2a4c8926a0a396b406077"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\generic-profile-model.test.js",
+        "sha256": "cde7135fa9a50984545a37742d1d536d6d6f598dad21ac2b44852b18561bfd19"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\generic-profile-store.test.js",
+        "sha256": "468f24225ad685fa2013e34dab31ac2788d7a816bcc5ca4901f90374155d0e78"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\google-drive.test.js",
+        "sha256": "0626176544e667b82b3d7b54136da20a17991a96be0464297e83f904a327d0d3"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\ingress.test.js",
+        "sha256": "cb0500f82c0439c4dd9a508a37e880bb5b92e545dd0cab75e963bb3d205cd8c7"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\interview-store.test.js",
+        "sha256": "d55dd567f455accbd116b7e567f5d9eb1a9f28a93377eab5dc0264415a999144"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\job-repository.test.js",
+        "sha256": "6dda042b3ed48e195c92668020cf52942f44ea92c000c4c594d43ffadeea407f"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\legacy-reader.test.js",
+        "sha256": "724c623ef5f9d62a2b5d3af03b9a27d6852191d9ba2e0723a1d1c414d57d614e"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\mcp.test.js",
+        "sha256": "df4d3804e850977f61c063640a1c8443ad60b8c8de311a83b42776677395f27f"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\migration-store.test.js",
+        "sha256": "86f71cae7961f40fea0e115b1ddf1a69fb1eaaa766a1ea9df58cb4c6dd1b3b37"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\profile-model.test.js",
+        "sha256": "d6ead7bfec258c312bbf639d114c53e35f9474779328eb049f76af3dbfc8ef19"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-accept.test.js",
+        "sha256": "de9582e8f55420b85df980fbaf1517ce07e379b3239bf4bda516eba619d819c8"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-algorithm.test.js",
+        "sha256": "59b3912313f3493c18777936e46a3786a0994afa2019052d2acec17c38817c8f"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-archive.test.js",
+        "sha256": "a317643debdddf50bb457b6faeba7827fdf3674a9b916d2b3b84447c36e5f626"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-budget-entrypoints.test.js",
+        "sha256": "68cc7a3fe567515b446b413472a8e792723ec6040244f84344cfffb8455190bf"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-close-out.test.js",
+        "sha256": "cb8c762165b808c02cef0f22b2d2256f8b672124c6d70c2394fb79546f2d8253"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-faults.test.js",
+        "sha256": "7e77287f225ea811c9b566fccb3057bd03516d8717aebd6f96e8ad0836d4418b"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-g2-chain.test.js",
+        "sha256": "95a5b0d0accd3048a01a5b22f9699d1ac95d348a0db1be61009aeb54565bce54"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-generic-profile.test.js",
+        "sha256": "bb81efe6cdc5f36c58c74bfaebc031a3c2b7d4baa897b9ec29a193030df8d584"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-init-route.test.js",
+        "sha256": "bab2c66754b84c75f034e90c92f0fe7380f71404be5577d8f0870c7038185c88"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-interview.test.js",
+        "sha256": "1095119a0c2a93d3ac0b9e65104f18d75497fa7182959857f598b24b78a96f55"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-io.test.js",
+        "sha256": "22701be6c842d2aa6d6ce4882bd632505e8b593b2ad9325915e638231050730d"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-project-accept.test.js",
+        "sha256": "b81fa21788feed6b1aca8a8f8fee8671238d49ebef46c38e774d55c112eccac6"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-project-build-v2.test.js",
+        "sha256": "0f832898c0a09730b36e0e3a66fcce4d88e9cd9ba88b7b74a592d7c5662ed698"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-project-contract.test.js",
+        "sha256": "fdb09e23b1d5036b375d64dc7b35fbefbee48d49da8b05ee8c9608601d7b16b9"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-project-e2e.test.js",
+        "sha256": "484d89be43998cf48fa65986aeae2c00ad3635983c32dd02f7f55beb096eefc3"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-project-interview.test.js",
+        "sha256": "7d6e35f641ccbea6f3a63691b1f0c560f7a00c9d3d36cfee1f3a37833988927c"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-project-query.test.js",
+        "sha256": "1b06a7e2cdfbf37decf13fc5e629efc520b3a19851b80dfafdafb4f060055bf5"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-project-staging-range.test.js",
+        "sha256": "914ff3a7c88fd5d08a3243b08061a09b89da137f8e2178f4c802cc7214809cea"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-projection-engine.test.js",
+        "sha256": "71595dbc6dbf625baf1117bed82529208751fa55842ff72f98b7eeffe33b3328"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-protocol.test.js",
+        "sha256": "4834a53839b6241f1163aeb664872035ebbe35d2b635b5e1c2d888944e29dc85"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-release-config.test.js",
+        "sha256": "125a77910f2b3a8621bf36fa9fe54e897c0da87fcf9de265d9d26358c68121ae"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-resume-knowledge.test.js",
+        "sha256": "bf80685b2b5af0157fad1ba2a48a0f766ce20343b9cbd30b77004bb94f6f1e75"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-routes.test.js",
+        "sha256": "2512af97261e662332eb611db7e7c1fc1dbcd5418f1f3d1858965469d0ee2b71"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-scale.test.js",
+        "sha256": "f992a169d44900342786a3a448e6c3c24ab3560c9ba92627481636850fab6eaa"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-schema-identity.test.js",
+        "sha256": "acdb14b2c73089dd3bff75748f4849fc0f4fa1f044d8e1bce7cd8baff10d1d39"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-staging-read.test.js",
+        "sha256": "f5a3b5c2d3f850bafdb9ad6ea9899c11f51f505b6e4d5182db69f1cdd71010d0"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-storage-error.test.js",
+        "sha256": "26ef8fede3da6e17c82b4e1ca00b463037ac0293ce503733fa0f8d80f7910771"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\rds2-tasks.test.js",
+        "sha256": "c331594ea358ddc8e53fcbfa633902f6e289dc566786c70e6390f0d1278d4205"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\resume-knowledge-model.test.js",
+        "sha256": "a4c1a92f829841e36d5285687ab5a2a57f32ac0071a3912219c633f57f5983b8"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\resume-knowledge-protocol.test.js",
+        "sha256": "44fa47b24878e909a3e2d55a5bee2d7b8f047975064f1bafe76b7fd488610684"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\resume-knowledge-store.test.js",
+        "sha256": "1b8c99ca04d85bf0c7578eecfa97c78bb0ce1ef3ac2bf470711a0a94a44319ca"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\storage-layout.test.js",
+        "sha256": "de16ab1d367669d4e94b7854303cf149187e8ab012f519b098fb2c6ea68122f3"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\submit-event-adapter.js",
+        "sha256": "f02cdac9c5dbb56c77494a83738b3351823ba503003e40296a10dd299f576c43"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\sync.test.js",
+        "sha256": "6b68d19427ff17670c2fe5204d44ba8d76b2c5066af3f357d0af655cd023a354"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\user-store.test.js",
+        "sha256": "99047c84b22f996f217f56c59a398a2aca3f4dc1bfa496c84178e4e341a4b2f9"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\worker-routes.test.js",
+        "sha256": "3066761b0add80093c639869a949900170b909ff3a8dbfd94d07fa81b2c176c4"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\helpers\\project-contract-harness.mjs",
+        "sha256": "77a50004f62181c6a290b11ee1df9f21d607bb0a1f27e12c402fa20cbba35aba"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "services\\reliable-drive-sync-worker\\test\\support\\rds2-d1.js",
+        "sha256": "91de31df2482a0b02ba793e242082a1016638d2997c76a60bf68ad5cdaa1d7e3"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\delivery-service-v2.mjs",
+        "sha256": "b7c601396f888abe5e21190608370ee9ac5f65ad352b65bf4fbd5fd70e50de1c"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\delivery-service.mjs",
+        "sha256": "b8d3fb2db0f140091162b7668e57c4fb4b1db196dadc48357c4a4fc0b20d52f6"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\local-outbox-v2.mjs",
+        "sha256": "f12ecab60ce309fda1bef682180f636ceccb9bf787fb3b5756c80fb134cc0156"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\local-outbox.mjs",
+        "sha256": "cbf478e938ecc105e5377a3d6861bb03fcb64027aaad8c934495497443dfcf06"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\package.json",
+        "sha256": "84202973dd0e07eb2c81c17d87064d9e6bc40a29e103abf7bdce1273da8663b6"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\provision-v2-local.ps1",
+        "sha256": "cfc265fe7da47db024fb059ee9a6ff6685d489189a74d32e31f86221f02a019d"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\rds2-canary.mjs",
+        "sha256": "e8c75b6cc723e203c96f90855f67634ff782cd4befd7f51ce4698f1265f5082b"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\README.md",
+        "sha256": "1c1522797e4c51a84e1629232484dcdf59c601e169f9251de734952efb9d13bb"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\retire-v1-local.mjs",
+        "sha256": "a33026ceb7ee30d23d9fb894d404ca57397ad97b3ad7364877c4ba04c7054a76"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\setup-local-clients.ps1",
+        "sha256": "8899a791fc35e0344ba8bb37de5f6ef262d5a6e5fa92d2423a315a4d51c0dd71"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\start-v2.ps1",
+        "sha256": "23f04eb05378660669944bb9ea4c38494655aadcf0c8a04951d2eddfa1d26d05"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\start.cmd",
+        "sha256": "292c9500b88d7558101a76002b94f1fc5709bc2f616efda6f470b118da3d21e3"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\stdio-bridge.mjs",
+        "sha256": "5de9898f0e749dd9fbb61ba944b995bdafd7afe3a0d825a5b862d61dd215b1ce"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\test-live-v2.mjs",
+        "sha256": "deacae45ab3d359c02b63ce659ba312e9c6efc1cc562ce2c2b107120700faf5a"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\v2-routing.mjs",
+        "sha256": "5fc7d44d72800d1898d85570fa09945d3d911d48b3ecfd54cf04f059b7a407b9"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\test\\delivery-service-v2.test.mjs",
+        "sha256": "88451e607bfcb313cc47749ea2bfb3690df76a11a262114b6e7e2f3fde624d5e"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\test\\delivery-service.test.mjs",
+        "sha256": "957e0f3059185b06a911db4f1bb8563564e1fbc11194bea521e79c9621be9065"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\test\\layout.test.mjs",
+        "sha256": "4e948bf57d5a4793203a93e69ceb7abd8e3c0e337b65ecffb0ced3fc3a964e2d"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\test\\local-outbox-v2-dependency.test.mjs",
+        "sha256": "4f94084ad07a6018c438e485205d278ac40f36230d5dc7fcb1001e87b9f5f880"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\test\\local-outbox-v2.test.mjs",
+        "sha256": "857765eec4290c592a1aa965a58f5b9518221dfed196a933fccd09f6590d0a86"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\test\\local-outbox.test.mjs",
+        "sha256": "eb2759a5d716e34a376cca0a3344fdc6022592f61606fbacfc1e0b969af04f9f"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\test\\rds2-skill-contract.test.mjs",
+        "sha256": "64835c413ffe4458eb8794b958fcedd272c201cc7e85674cfa47625546a9a589"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\test\\setup-local-clients.test.mjs",
+        "sha256": "d8dae5674a7fd38934c74ca2b56ac5fa0ee14f7bffd0e39fd21bb70f9ec6496f"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\test\\stdio-bridge.test.mjs",
+        "sha256": "954235616e06575e0ac5a29912ce187f4b2a29c35be42ae8513dca7e038362b8"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\test\\v2-plugin-bridge.test.mjs",
+        "sha256": "2a1846539db1316713de75a4daa0b3abef223839645edf2714bae79af8c5be6c"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "tools\\reliable-drive-sync-mcp\\test\\v2-routing.test.mjs",
+        "sha256": "d86fadfefe10af8262ec1420681ebc31f0f1065aad37e820b73ec64ad1b5ae20"
+      },
+      {
+        "checkout": "my-chatgpt-mcp-v2",
+        "path": "shared/rds2-protocol.mjs",
+        "sha256": "c1e861a558da1661e59d88dbdcb4949e006be7b62419ccb8345a4c0bf24c10e0"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\package.json",
+        "sha256": "cd69db6c94deb57a06e0f583eb66a1851ace3af0ffedba708713cad3d139e072"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\README.md",
+        "sha256": "e02a61d40d68258d31d2a50b31ff9d1345f93566efc31a3b32995a60ea00b4da"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\wrangler.toml",
+        "sha256": "f6e07c087ef0e2f9cf5e90925149ff2db4723b49ed215d2156ba050a6dcf9e65"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\migrations\\0005_schema12_jobs.sql",
+        "sha256": "dd0e0de6a141f28eb334b46bec029778e4b117369c9cdee5c75acdf3fe1efc25"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\algorithm-profile-model.js",
+        "sha256": "2e947dc706be68cbb6e23a1d2871aae41251140a3206307f3b36b922da974a32"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\algorithm-store.js",
+        "sha256": "103a7e7d54b6cde66868a5f62f0d1a3a9e310389d7f0e768a30f2e9313bc25da"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\daily-plan-selector.js",
+        "sha256": "dc7bb2a78241a04293cec0efabf7653516233894bdd2114a4b6a5d7fd55c4e4c"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\dispatcher.js",
+        "sha256": "59310150fb59bd34122b63861f22a433e7990055cf20b363e21f8cae9e354ab5"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\event-store.js",
+        "sha256": "f18a73bad304c2949c1e5220b75e1cd2d1c6af68fccdfb439776010b5d96c3a7"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\google-drive.js",
+        "sha256": "5368eb466c6d96eb706ff1e4b496715cb4eb60d01ecfc9cd3c90732c5c2edc7e"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\index.js",
+        "sha256": "594a78a32258037ab7e2192279a0b56e245e28ed46fb9cb9674f84e801767804"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\ingress.js",
+        "sha256": "3e83cf7640d9636db2b44c768833ffa7c0eb5f3848621f1a57c646833e7e99a5"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\interview-store.js",
+        "sha256": "feffd78493d74f8b11fdb0abeec3924929305c435767107dea4dbb0dd67763a5"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\job-repository.js",
+        "sha256": "ae301eb3037f3649212bf852f2b148e9ab26ff8f3b8d5aa872d6071a3cebd984"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\legacy-reader.js",
+        "sha256": "4961a4f1ad0a72f088238c00c974514d19c7b6befca90bed141610124799341e"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\migration-store.js",
+        "sha256": "f61aad7b03e3b2180ee3efe3b19a69a0cfb13bbaaaa70918373e4016acf37bf0"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\profile-model.js",
+        "sha256": "b8a97ea7651f6457477102e75130306725e841e9d483e6e45d32fd75b619e5fd"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\protocol.js",
+        "sha256": "6ef2cc715b83b4de26a2cd45b43adcc3ecb193a9ddd9ccb6c030756fc7f626fd"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\qstash.js",
+        "sha256": "b1f2c4dfeaa0be1a7da04e0d45f87836f2f58c892385ab356e0192d4da382af2"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\reconciler.js",
+        "sha256": "815ba06127b961ccb2270b25c7a0fa8765d3eb8547d8ef7943faa3983f01a1ea"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\resume-knowledge-model.js",
+        "sha256": "a021e1a39fb96516a67e2a0fb01ee4a9a0cd404cc45e246d291035693625eb8c"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\resume-knowledge-store.js",
+        "sha256": "5c85adb583fab65d3b5ef54bc1bb1034a92987c054d5d74210b476482a4bd4c7"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\storage-layout.js",
+        "sha256": "1b7c3a722a96c75b2d8d0b507c4dba9e1df97cc6a17a06914e0cd3bdc17ea450"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\submit-event.js",
+        "sha256": "8717e7eb277d1b58d5c92fbea8a3b2fff28827ad0a9567989cd090ada200912c"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\sync.js",
+        "sha256": "f617f0d812b163318cd849105d2608ac5d587c0865ed49cac0bde93a705b4bc7"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\src\\user-store.js",
+        "sha256": "94a2b5352de2541b94d106c4a033af31e44d4e38ed5dc044475bc37b6a3a90f4"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\algorithm-profile-model.test.js",
+        "sha256": "4c1edac4f46eee155153cae290d01836ab196ff3bf24d596ba11823d2b142cf9"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\algorithm-store.test.js",
+        "sha256": "51cab36a35e1236c2bc2433303e5f6852b2a2e2152379fb4fa6cd4c76e1aa8d0"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\daily-plan-selector.test.js",
+        "sha256": "84dbd08c8d316d752689afaeea3b491cbcd60adb596acab63b5e2f81eca72a06"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\dispatcher.test.js",
+        "sha256": "6571aad4fd634eab312d5603d71865019109d760d45e12a900aad429ead2221d"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\end-to-end.test.js",
+        "sha256": "5a8668cee98312244bae3f6cba843d768b89d6ead44254430b210b560063baec"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\event-store.test.js",
+        "sha256": "dc8e929204cad4eb21f4c0c683844108f7c8a2f4a04cfdc08ea2ed477d9950a4"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\google-drive.test.js",
+        "sha256": "d4009d763a4c65d74443bb63893c9617e344969184ee89cf0d434b8c10dfb35c"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\ingress.test.js",
+        "sha256": "170e8935063ad1dd649a6a9d9c93c05d7972297189cf244d292bff225df7f300"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\interview-store.test.js",
+        "sha256": "d55dd567f455accbd116b7e567f5d9eb1a9f28a93377eab5dc0264415a999144"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\job-repository.test.js",
+        "sha256": "6dda042b3ed48e195c92668020cf52942f44ea92c000c4c594d43ffadeea407f"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\legacy-reader.test.js",
+        "sha256": "724c623ef5f9d62a2b5d3af03b9a27d6852191d9ba2e0723a1d1c414d57d614e"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\mcp.test.js",
+        "sha256": "63d90d0db2a680375bcbe4c7ba27bb277790af63f132d6f5f40c508638b64593"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\migration-store.test.js",
+        "sha256": "86f71cae7961f40fea0e115b1ddf1a69fb1eaaa766a1ea9df58cb4c6dd1b3b37"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\profile-model.test.js",
+        "sha256": "8ae5f7b92ba72320b1cf0c8c1deb6974831a2484501847fb017f86f3efbbef29"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\resume-knowledge-model.test.js",
+        "sha256": "a4c1a92f829841e36d5285687ab5a2a57f32ac0071a3912219c633f57f5983b8"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\resume-knowledge-protocol.test.js",
+        "sha256": "44fa47b24878e909a3e2d55a5bee2d7b8f047975064f1bafe76b7fd488610684"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\resume-knowledge-store.test.js",
+        "sha256": "1b8c99ca04d85bf0c7578eecfa97c78bb0ce1ef3ac2bf470711a0a94a44319ca"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\storage-layout.test.js",
+        "sha256": "49b30b3c1d66d005a888cd54842ecef750b215ae15b7df7f40d5478ac7f4a470"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\submit-event-adapter.js",
+        "sha256": "f02cdac9c5dbb56c77494a83738b3351823ba503003e40296a10dd299f576c43"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\sync.test.js",
+        "sha256": "27bee502e605e1611f6c7611495b2055c336788f578dd968b47f011398b5580c"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\user-store.test.js",
+        "sha256": "99047c84b22f996f217f56c59a398a2aca3f4dc1bfa496c84178e4e341a4b2f9"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "services\\reliable-drive-sync-worker\\test\\worker-routes.test.js",
+        "sha256": "b747c516dea053b63b2fb0d037d9fc6e6091e2772568ec17d7e77fd7b0a60073"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "tools\\reliable-drive-sync-mcp\\delivery-service.mjs",
+        "sha256": "525d7cac57163d2cd4a2fe94f333f8f62aa7b11b81a49f5b2dc3ce7a8c1927fd"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "tools\\reliable-drive-sync-mcp\\local-outbox.mjs",
+        "sha256": "cbf478e938ecc105e5377a3d6861bb03fcb64027aaad8c934495497443dfcf06"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "tools\\reliable-drive-sync-mcp\\package.json",
+        "sha256": "84202973dd0e07eb2c81c17d87064d9e6bc40a29e103abf7bdce1273da8663b6"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "tools\\reliable-drive-sync-mcp\\README.md",
+        "sha256": "0fe2e4c8121fceb0c8750c4e374959e1b0323a46e5196b32c30e98a6a6aa115c"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "tools\\reliable-drive-sync-mcp\\setup-local-clients.ps1",
+        "sha256": "c13685684b2f808eaf35357a7660135b35f490b41cb00e7d7b783e059c507d77"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "tools\\reliable-drive-sync-mcp\\start.cmd",
+        "sha256": "292c9500b88d7558101a76002b94f1fc5709bc2f616efda6f470b118da3d21e3"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "tools\\reliable-drive-sync-mcp\\stdio-bridge.mjs",
+        "sha256": "c2e9e2eea72e7c668df29b4cccaed165aa3c4c389b391f9ad3fdc4e3b1fe3e7b"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "tools\\reliable-drive-sync-mcp\\test\\delivery-service.test.mjs",
+        "sha256": "f5fc26f57eb68f673b7ae152c22888c69957980ea4fdc724105aa648df7f4b6a"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "tools\\reliable-drive-sync-mcp\\test\\layout.test.mjs",
+        "sha256": "4e948bf57d5a4793203a93e69ceb7abd8e3c0e337b65ecffb0ced3fc3a964e2d"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "tools\\reliable-drive-sync-mcp\\test\\local-outbox.test.mjs",
+        "sha256": "2363903097d0dee0d1b6a9533d386c2a932512df0d63dca93ec7b70ed556fc38"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "tools\\reliable-drive-sync-mcp\\test\\setup-local-clients.test.mjs",
+        "sha256": "d8dae5674a7fd38934c74ca2b56ac5fa0ee14f7bffd0e39fd21bb70f9ec6496f"
+      },
+      {
+        "checkout": "my-chatgpt-skills",
+        "path": "tools\\reliable-drive-sync-mcp\\test\\stdio-bridge.test.mjs",
+        "sha256": "9d164a5146bffe8d139b7375283f679b1fdf3b575156a904a20fe19fe9cbf94f"
+      }
+    ],
+    "legacyLocalStatePaths": [
+      "AppData/Local/ReliableDriveSync/control.sqlite",
+      "AppData/Local/ReliableDriveSync/outbox-v2.sqlite*",
+      "AppData/Local/ReliableDriveSync/outbox.sqlite*",
+      "AppData/Local/ReliableDriveSync/v1-retirement-20260908/",
+      "AppData/Local/ReliableDriveSync/v2-canary.*",
+      "AppData/Local/ReliableDriveSync/v2-client.*",
+      "AppData/Local/ReliableDriveSync/workbuddy-mcp.json"
+    ]
+  },
+  "verification": {
+    "rdsJBryonWorkerTests": "66/66 pass after moving the shared D1 test helper into the retained RDS-JBryon test tree",
+    "rdsJBryonMcpTests": "34/34 pass",
+    "skillRepositoryTests": "25/25 pass (1 skipped: optional runtime-root parity unavailable)",
+    "profileAwareSkillCreatorTests": "35/35 pass",
+    "adaptiveStudyPlanningTests": "42/42 pass",
+    "adaptiveStudyPlanningProfileValidator": "OK",
+    "legacyWorkerInventory": "absent",
+    "legacyD1Inventory": "absent; only RDS-JBryon D1 remains",
+    "legacyQueueInventory": "absent; only RDS-JBryon projection queue remains",
+    "rdsJBryonResourceIdsPreserved": true,
+    "driveArchiveFilesDeletedAndVerifiedAbsent": "30/30",
+    "rdsJBryonDeployment": "Worker rds-jbryon deployment c87a6701-e742-41a6-b5a8-56baaeee760a verified; D1 rds-jbryon migration list has no pending migrations; remote sqlite_master lists the RDS-JBryon schema tables; Queue rds-jbryon-projection exists with one producer and one consumer",
+    "rdsJBryonSmoke": "capabilities and empty root read passed; temporary project-rds-smoke create reached applied/projected, path resolved, delete reached applied/projected, and final root listing was empty and complete",
+    "d1InventoryNote": "Wrangler d1 list reported num_tables=0, while remote sqlite_master returned 15 tables; treat the metadata count as inconsistent, not as schema absence",
+    "remaining": "offline interview/review JSON helper schemas remain event-shaped",
+    "commits": 0,
+    "pushes": 0,
+    "deployments": 0
+  }
+}

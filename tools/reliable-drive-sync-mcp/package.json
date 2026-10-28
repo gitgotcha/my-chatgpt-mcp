@@ -1,8 +1,0 @@
-{
-  "name": "reliable-drive-sync-mcp",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "test": "node --test"
-  }
-}

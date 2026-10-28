@@ -1,0 +1,45 @@
+{
+  "name": "rds-jbryon",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-10-27",
+  "workers_dev": true,
+  "vars": {
+    "RDS_WORKSPACE_EPOCH": "REPLACE_WITH_INITIALIZED_32_HEX_EPOCH",
+    "RDS_DISPATCH_LIMIT": "20"
+  },
+  "secrets": {
+    "required": ["RDS_TOKEN"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "rds-jbryon",
+      "database_id": "REPLACE_WITH_NEW_DEDICATED_D1_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "QUEUE",
+        "queue": "REPLACE_WITH_NEW_DEDICATED_QUEUE_NAME"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "REPLACE_WITH_NEW_DEDICATED_QUEUE_NAME",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "max_concurrency": 1
+      }
+    ]
+  },
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}
